@@ -1,0 +1,72 @@
+server:
+  port: 8080
+  tomcat:
+    max-http-form-post-size: 1MB
+spring:
+  cache:
+    type: caffeine
+    caffeine:
+      spec: expireAfterWrite=60s,maximumSize=10000
+  datasource:
+    hikari:
+      pool-name: ScimHikariPool
+      maximum-pool-size: 45
+      minimum-idle: 45
+      connection-timeout: 5000
+      max-lifetime: 1800000
+      keepalive-time: 30000
+      data-source-properties:
+        reWriteBatchedInserts: true
+  servlet:
+    multipart:
+      max-file-size: 1MB
+      max-request-size: 1MB
+  application:
+    name: scim-server-api
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        "[default_batch_fetch_size]": 200
+        "[jdbc.batch_size]": 100
+        "[order_inserts]": true
+        "[order_updates]": true
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    default-property-inclusion: non_null
+
+logging:
+  level:
+    "[de.palsoftware.scim]": DEBUG
+    "[org.springframework.security]": WARN
+
+management:
+  endpoint:
+    health:
+      show-components: always
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  health:
+    ping:
+      enabled: false
+    ssl:
+      enabled: false
+    diskspace:
+      enabled: false
+
+app:
+  security:
+    actuator:
+      api-key: ${ACTUATOR_API_KEY}
+  cleanup:
+    workspace:
+      enabled: true
+      cron: "0 0 */2 * * *"
+      zone: UTC
+      stale-after: P3M
