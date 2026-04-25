@@ -1,0 +1,51 @@
+{
+  "groups": [
+    {
+      "name": "app",
+      "type": "java.lang.Object"
+    },
+    {
+      "name": "app.cleanup",
+      "type": "java.lang.Object"
+    },
+    {
+      "name": "app.cleanup.workspace",
+      "type": "java.lang.Object"
+    },
+    {
+      "name": "app.security",
+      "type": "java.lang.Object"
+    },
+    {
+      "name": "app.security.actuator",
+      "type": "java.lang.Object"
+    }
+  ],
+  "properties": [
+    {
+      "name": "app.security.actuator.api-key",
+      "type": "java.lang.String",
+      "description": "Actuator API key used by the management filter."
+    },
+    {
+      "name": "app.cleanup.workspace.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enables scheduled workspace cleanup."
+    },
+    {
+      "name": "app.cleanup.workspace.cron",
+      "type": "java.lang.String",
+      "description": "Cron expression for workspace cleanup."
+    },
+    {
+      "name": "app.cleanup.workspace.zone",
+      "type": "java.lang.String",
+      "description": "Time zone used by the cleanup schedule."
+    },
+    {
+      "name": "app.cleanup.workspace.stale-after",
+      "type": "java.lang.String",
+      "description": "Age threshold for stale workspaces."
+    }
+  ]
+}
