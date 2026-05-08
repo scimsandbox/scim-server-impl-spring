@@ -4,7 +4,7 @@
 
     <groupId>de.pal-software.scim</groupId>
     <artifactId>scim-server-impl-spring</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.0.1</version>
     <packaging>jar</packaging>
 
     <name>SCIM Server Impl Spring</name>
@@ -14,7 +14,7 @@
         <connection>scm:git:https://github.com/scimsandbox/scim-server-impl-spring.git</connection>
         <developerConnection>scm:git:https://github.com/scimsandbox/scim-server-impl-spring.git</developerConnection>
         <url>https://github.com/scimsandbox/scim-server-impl-spring</url>
-        <tag>HEAD</tag>
+        <tag>v0.0.1</tag>
     </scm>
 
     <distributionManagement>
