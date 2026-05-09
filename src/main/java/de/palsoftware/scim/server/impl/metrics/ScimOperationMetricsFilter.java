@@ -12,16 +12,23 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.UUID;
 
 @Component
 public class ScimOperationMetricsFilter extends OncePerRequestFilter {
 
     private static final Set<String> TRACKED_RESOURCES = Set.of("Users", "Groups", "Bulk");
+    private static final Duration[] SCIM_DURATION_SLOS = {
+            Duration.ofMillis(50),
+            Duration.ofMillis(100),
+            Duration.ofMillis(250),
+            Duration.ofMillis(500),
+            Duration.ofSeconds(1)
+    };
 
     private final MeterRegistry meterRegistry;
 
@@ -62,29 +69,21 @@ public class ScimOperationMetricsFilter extends OncePerRequestFilter {
         }
 
         int httpStatus = resolveHttpStatus(response.getStatus(), failure);
-        String workspaceId = resolveWorkspaceId(request);
-        String userEmail = resolveUserEmail(request);
         String authentication = resolveAuthentication(request, httpStatus);
         String throttled = resolveThrottled(request, response, httpStatus);
-        String outcome = resolveOutcome(failure, httpStatus);
 
-        List<Tag> tags = new ArrayList<>();
-        tags.add(Tag.of("operation", scimOperation.operation()));
-        tags.add(Tag.of("resource", scimOperation.resource()));
-        tags.add(Tag.of("action", scimOperation.action()));
-        tags.add(Tag.of("workspace_id", workspaceId));
-        tags.add(Tag.of("user_email", userEmail));
-        tags.add(Tag.of("http_status", Integer.toString(httpStatus)));
-        tags.add(Tag.of("outcome", outcome));
-        tags.add(Tag.of("authentication", authentication));
-        tags.add(Tag.of("throttled", throttled));
+        List<Tag> operationTags = new ArrayList<>();
+        operationTags.add(Tag.of("operation", scimOperation.operation()));
+        operationTags.add(Tag.of("http_status", Integer.toString(httpStatus)));
 
-        meterRegistry.counter("scim.operation.requests", tags).increment();
+        meterRegistry.counter("scim.operation.requests", operationTags).increment();
         sample.stop(Timer.builder("scim.operation.duration")
                 .description("Duration of SCIM API operations")
-                .publishPercentileHistogram()
-                .tags(tags)
+                .serviceLevelObjectives(SCIM_DURATION_SLOS)
+                .tags(operationTags)
                 .register(meterRegistry));
+        meterRegistry.counter("scim.operation.authentication", "state", authentication).increment();
+        meterRegistry.counter("scim.operation.throttled", "state", throttled).increment();
     }
 
     private int resolveHttpStatus(int responseStatus, Exception failure) {
@@ -93,33 +92,6 @@ public class ScimOperationMetricsFilter extends OncePerRequestFilter {
         }
 
         return responseStatus;
-    }
-
-    private String resolveWorkspaceId(HttpServletRequest request) {
-        String workspaceId = attributeValue(request, "WORKSPACE_ID");
-        if (StringUtils.hasText(workspaceId)) {
-            return workspaceId;
-        }
-
-        String[] segments = request.getRequestURI().split("/");
-        if (segments.length <= 2 || !"ws".equals(segments[1])) {
-            return "unknown";
-        }
-
-        try {
-            return UUID.fromString(segments[2]).toString();
-        } catch (IllegalArgumentException ex) {
-            return "invalid";
-        }
-    }
-
-    private String resolveUserEmail(HttpServletRequest request) {
-        String userEmail = attributeValue(request, "USER_EMAIL");
-        if (StringUtils.hasText(userEmail)) {
-            return userEmail;
-        }
-
-        return "unknown";
     }
 
     private String resolveAuthentication(HttpServletRequest request, int httpStatus) {
@@ -237,22 +209,6 @@ public class ScimOperationMetricsFilter extends OncePerRequestFilter {
             case "bulk" -> "processBulk";
             default -> "unknown";
         };
-    }
-
-    private String resolveOutcome(Exception ex, int status) {
-        if (ex != null || status >= 500) {
-            return "server_error";
-        }
-        if (status >= 400) {
-            return "client_error";
-        }
-        if (status >= 300) {
-            return "redirection";
-        }
-        if (status >= 200) {
-            return "success";
-        }
-        return "unknown";
     }
 
     private record ScimOperation(String operation, String resource, String action) {
