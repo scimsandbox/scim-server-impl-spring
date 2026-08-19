@@ -196,8 +196,8 @@ public class ScimGroupController extends ScimBaseController {
         String sortOrder = body.containsKey("sortOrder") ? (String) body.get("sortOrder") : "ascending";
         int startIndex = body.containsKey("startIndex") ? ((Number) body.get("startIndex")).intValue() : 1;
         int count = body.containsKey("count") ? ((Number) body.get("count")).intValue() : 100;
-        String attributes = (String) body.get("attributes");
-        String excludedAttributes = (String) body.get("excludedAttributes");
+        String attributes = extractAttributesParam(body.get("attributes"));
+        String excludedAttributes = extractAttributesParam(body.get("excludedAttributes"));
 
         return listGroups(workspaceId, filter, sortBy, sortOrder, startIndex, count,
                 attributes, excludedAttributes, compat, request);

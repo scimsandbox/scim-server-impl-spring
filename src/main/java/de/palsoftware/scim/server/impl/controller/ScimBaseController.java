@@ -4,6 +4,7 @@ import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import jakarta.servlet.http.HttpServletRequest;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 abstract class ScimBaseController {
 
@@ -33,27 +34,22 @@ abstract class ScimBaseController {
     }
 
     protected static String buildBaseUrl(HttpServletRequest request, String workspaceId, String compat) {
+        // Only the scheme is taken from a forwarded header: the edge terminates TLS and reaches this
+        // service over plain http, and it overwrites X-Forwarded-Proto itself. X-Forwarded-Host and
+        // X-Forwarded-Port are deliberately NOT read - any client can send them, and they would become
+        // the authority in every meta.location and $ref handed back. Host is authoritative because the
+        // proxy routes on it.
         String forwardedProto = request.getHeader("X-Forwarded-Proto");
-        String forwardedHost = request.getHeader("X-Forwarded-Host");
-        String forwardedPort = request.getHeader("X-Forwarded-Port");
+        String scheme = forwardedProto != null
+                ? sanitizeHeaderValue(forwardedProto.split(",")[0].trim())
+                : request.getScheme();
 
-        String scheme = forwardedProto != null ? sanitizeHeaderValue(forwardedProto.split(",")[0].trim()) : request.getScheme();
-        String host = forwardedHost != null ? sanitizeHeaderValue(forwardedHost.split(",")[0].trim()) : request.getServerName();
-        if (host == null || host.isBlank()) {
-            host = request.getServerName();
-        }
+        String host = request.getServerName();
         if (host == null || host.isBlank()) {
             host = "localhost";
         }
 
         int port = request.getServerPort();
-        if (forwardedPort != null) {
-            try {
-                port = Integer.parseInt(forwardedPort.split(",")[0].trim());
-            } catch (NumberFormatException ignored) {
-                // Fall back to server port when forwarded port is invalid.
-            }
-        }
 
         String portStr = shouldAppendPort(port, host) ? ":" + port : "";
         String base = scheme + "://" + host + portStr + "/ws/" + workspaceId + "/scim/v2";
@@ -137,5 +133,27 @@ abstract class ScimBaseController {
         }
         // Unknown URN — return as-is
         return attr;
+    }
+
+    /**
+     * Extracts an attributes or excludedAttributes parameter from a SearchRequest payload,
+     * which can be formatted either as a JSON Array of strings (per RFC 7644 §3.4.3) or
+     * as a comma-separated String.
+     */
+    protected static String extractAttributesParam(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof List<?> list) {
+            return list.stream()
+                    .map(Object::toString)
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .collect(Collectors.joining(","));
+        }
+        if (value instanceof String str) {
+            return str.isBlank() ? null : str.trim();
+        }
+        return value.toString().trim();
     }
 }

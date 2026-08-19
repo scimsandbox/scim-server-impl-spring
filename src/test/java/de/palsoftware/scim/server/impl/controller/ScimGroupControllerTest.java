@@ -178,6 +178,48 @@ class ScimGroupControllerTest {
         assertEquals(200, response.getStatusCode().value());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void searchGroupsWithAttributesList() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockGroup));
+
+        when(groupService.listGroups(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"));
+        body.put("filter", "displayName pr");
+        body.put("startIndex", 1);
+        body.put("count", 10);
+        body.put("attributes", List.of("displayName", "members"));
+
+        ResponseEntity<Map<String, Object>> response = controller.searchGroups(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(1, resources.size());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void searchGroupsWithExcludedAttributesList() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockGroup));
+
+        when(groupService.listGroups(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"));
+        body.put("filter", "displayName pr");
+        body.put("excludedAttributes", List.of("members"));
+
+        ResponseEntity<Map<String, Object>> response = controller.searchGroups(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+    }
+
     // ─── Tests for Fix 7: If-None-Match / 304 ──────────────────────────
 
     @Test

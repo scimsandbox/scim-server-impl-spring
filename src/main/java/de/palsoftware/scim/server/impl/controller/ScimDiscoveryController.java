@@ -121,6 +121,20 @@ public class ScimDiscoveryController extends ScimBaseController {
         return methodNotAllowed();
     }
 
+    // ─── Global Search (RFC 7644 §3.4.3) ───────────────────────────────
+
+    /**
+     * POST /.search — Global cross-resource search.
+     * Per RFC 7644 §3.4.3: "If a service provider does not support cross-resource search
+     * via HTTP POST at the root endpoint, the service provider MUST return HTTP status code 501 (Not Implemented)."
+     */
+    @PostMapping("/.search")
+    public ResponseEntity<Map<String, Object>> globalSearchNotImplemented(
+            @PathVariable String workspaceId,
+            @PathVariable(name = "compat", required = false) String compat) {
+        throw new ScimException(501, null, "Global cross-resource search is not implemented");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────
 
     private ResponseEntity<Map<String, Object>> methodNotAllowed() {

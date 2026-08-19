@@ -187,6 +187,50 @@ class ScimUserControllerTest {
         assertEquals(200, response.getStatusCode().value());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testSearchUsersWithAttributesList() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockUser));
+
+        when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
+        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"));
+        body.put("filter", "userName sw \"a\" or active eq true");
+        body.put("startIndex", 1);
+        body.put("count", 10);
+        body.put("attributes", List.of("userName", "displayName", "emails"));
+
+        ResponseEntity<Map<String, Object>> response = controller.searchUsers(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(1, resources.size());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testSearchUsersWithExcludedAttributesList() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockUser));
+
+        when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
+        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"));
+        body.put("filter", "active eq true");
+        body.put("excludedAttributes", List.of("emails", "addresses"));
+
+        ResponseEntity<Map<String, Object>> response = controller.searchUsers(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+    }
+
     // ─── Tests for Fix 7: If-None-Match / 304 ──────────────────────────
 
     @Test
