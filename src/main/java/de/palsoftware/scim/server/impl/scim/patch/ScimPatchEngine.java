@@ -29,6 +29,18 @@ public class ScimPatchEngine {
     }
 
     private static final String ENTERPRISE_PREFIX = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+    private static final String CORE_USER_PREFIX = "urn:ietf:params:scim:schemas:core:2.0:User:";
+
+    private static String stripPathPrefix(String path) {
+        if (path == null) {
+            return null;
+        }
+        if (path.regionMatches(true, 0, CORE_USER_PREFIX, 0, CORE_USER_PREFIX.length())) {
+            return path.substring(CORE_USER_PREFIX.length());
+        }
+        return path;
+    }
+
     // Pattern: attrName[filterExpr].subAttr
     private static final Pattern FILTERED_PATH = Pattern.compile("^(\\w+)\\[(.+)](?:\\.(\\w+))?$");
 
@@ -74,7 +86,7 @@ public class ScimPatchEngine {
                 throw new ScimException(400, "invalidValue", "PATCH operation must include a string 'op' field");
             }
             String opType = ((String) rawOp).toLowerCase();
-            String path = (String) op.get("path");
+            String path = stripPathPrefix((String) op.get("path"));
             Object value = op.get(KEY_VALUE);
 
             // Validate read-only
@@ -119,6 +131,11 @@ public class ScimPatchEngine {
             return;
         }
 
+        if ("name".equalsIgnoreCase(path)) {
+            setNameAttribute(user, value);
+            return;
+        }
+
         // Handle sub-attribute paths (name.givenName)
         if (path.contains(".")) {
             setSubAttribute(user, path, value);
@@ -160,6 +177,11 @@ public class ScimPatchEngine {
         if (path.startsWith(ENTERPRISE_PREFIX + ":")) {
             String entAttr = path.substring(ENTERPRISE_PREFIX.length() + 1);
             setEnterpriseAttribute(user, entAttr, value);
+            return;
+        }
+
+        if ("name".equalsIgnoreCase(path)) {
+            setNameAttribute(user, value);
             return;
         }
 
@@ -389,6 +411,31 @@ public class ScimPatchEngine {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private static void setNameAttribute(ScimUser user, Object value) {
+        if (value == null) {
+            clearAttribute(user, "name");
+            return;
+        }
+        if (!(value instanceof Map<?, ?> rawMap)) {
+            throw new ScimException(400, "invalidValue", "Attribute 'name' must be an object");
+        }
+        Map<String, Object> nameMap = (Map<String, Object>) rawMap;
+        for (Map.Entry<String, Object> entry : nameMap.entrySet()) {
+            String sub = entry.getKey();
+            Object val = entry.getValue();
+            switch (sub) {
+                case KEY_FORMATTED -> user.setNameFormatted(toString(val));
+                case "familyName" -> user.setNameFamilyName(toString(val));
+                case "givenName" -> user.setNameGivenName(toString(val));
+                case "middleName" -> user.setNameMiddleName(toString(val));
+                case "honorificPrefix" -> user.setNameHonorificPrefix(toString(val));
+                case "honorificSuffix" -> user.setNameHonorificSuffix(toString(val));
+                default -> throw new ScimException(400, "noTarget", "Unknown name sub-attribute: " + sub);
+            }
+        }
+    }
+
     private static void setEnterpriseAttribute(ScimUser user, String attr, Object value) {
         switch (attr) {
             case "employeeNumber" -> user.setEnterpriseEmployeeNumber(toString(value));
@@ -441,8 +488,9 @@ public class ScimPatchEngine {
         Map<String, Object> normalized = new LinkedHashMap<>();
 
         for (Map.Entry<String, Object> entry : valueMap.entrySet()) {
-            String key = entry.getKey();
+            String rawKey = entry.getKey();
             Object val = entry.getValue();
+            String key = stripPathPrefix(rawKey);
 
             if (key.startsWith(ENTERPRISE_PREFIX + ":")) {
                 String entAttr = key.substring(ENTERPRISE_PREFIX.length() + 1);

@@ -496,4 +496,45 @@ class ScimPatchEngineTest {
         );
         assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsCert));
     }
+
+    @Test
+    void testReplaceNameNoPathAndWithPath() {
+        // Replace without path (RFC 7644)
+        Map<String, Object> nameMap = new LinkedHashMap<>();
+        nameMap.put("familyName", "Jensen");
+        nameMap.put("givenName", "Barbara");
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "value", Map.of("name", nameMap))
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+        assertEquals("Jensen", user.getNameFamilyName());
+        assertEquals("Barbara", user.getNameGivenName());
+
+        // Replace with path "name"
+        Map<String, Object> nameMap2 = new LinkedHashMap<>();
+        nameMap2.put("familyName", "Doe");
+        List<Map<String, Object>> ops2 = List.of(
+            Map.of("op", "replace", "path", "name", "value", nameMap2)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops2);
+        assertEquals("Doe", user.getNameFamilyName());
+        assertEquals("Barbara", user.getNameGivenName()); // preserved
+
+        // Replace with URN prefix
+        Map<String, Object> nameMap3 = new LinkedHashMap<>();
+        nameMap3.put("familyName", "Smith");
+        List<Map<String, Object>> ops3 = List.of(
+            Map.of("op", "replace", "path", "urn:ietf:params:scim:schemas:core:2.0:User:name", "value", nameMap3)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops3);
+        assertEquals("Smith", user.getNameFamilyName());
+
+        // Remove name
+        List<Map<String, Object>> opsRemove = List.of(
+            Map.of("op", "remove", "path", "name")
+        );
+        ScimPatchEngine.applyPatchOperations(user, opsRemove);
+        assertNull(user.getNameFamilyName());
+        assertNull(user.getNameGivenName());
+    }
 }
