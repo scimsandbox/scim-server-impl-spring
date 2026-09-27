@@ -298,13 +298,13 @@ public class ScimBulkController extends ScimBaseController {
                 throw new ScimException(400, "invalidPath", "Bulk path must include resource ID: " + rawPath);
             }
             String idStr = segments.get(1);
-            if (idStr.length() != 36) {
-                throw new ScimException(400, "invalidValue", "Invalid resource ID: " + idStr);
-            }
             UUID id;
             try {
                 id = UUID.fromString(idStr);
             } catch (IllegalArgumentException e) {
+                throw new ScimException(400, "invalidValue", "Invalid resource ID: " + idStr);
+            }
+            if (!id.toString().equalsIgnoreCase(idStr)) {
                 throw new ScimException(400, "invalidValue", "Invalid resource ID: " + idStr);
             }
             return new BulkTarget(resourceType, id);

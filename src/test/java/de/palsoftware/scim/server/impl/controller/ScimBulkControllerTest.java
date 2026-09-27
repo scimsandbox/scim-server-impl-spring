@@ -360,18 +360,24 @@ class ScimBulkControllerTest {
         Map<String, Object> op4 = Map.of(
                 "method", "DELETE",
                 "path", "/Users/urn:uuid:" + validUuid);
+        Map<String, Object> op5 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/000000001-0001-0001-0001-00000000001");
+        Map<String, Object> op6 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/+0000001-0001-0001-0001-000000000001");
 
         Map<String, Object> body = Map.of(
                 "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
-                "Operations", List.of(op1, op2, op3, op4));
+                "Operations", List.of(op1, op2, op3, op4, op5, op6));
 
         ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
 
         assertEquals(200, response.getStatusCode().value());
         List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
-        assertEquals(4, results.size());
+        assertEquals(6, results.size());
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 6; i++) {
             assertEquals("400", results.get(i).get("status"));
             Map<String, Object> resp = (Map<String, Object>) results.get(i).get("response");
             assertEquals("invalidValue", resp.get("scimType"));
