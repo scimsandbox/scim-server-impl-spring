@@ -306,4 +306,168 @@ class ScimBulkControllerTest {
         assertEquals("201", results.get(2).get("status"));
         assertEquals("204", results.get(3).get("status"));
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_LowercaseUsersAndGroups() {
+        UUID userId = UUID.randomUUID();
+        UUID groupId = UUID.randomUUID();
+
+        ScimUser user = new ScimUser();
+        user.setId(userId);
+        when(userService.replaceUser(eq(workspaceId), eq(userId), any(), any())).thenReturn(user);
+
+        ScimGroup group = new ScimGroup();
+        group.setId(groupId);
+        when(groupService.patchGroup(eq(workspaceId), eq(groupId), any(), any())).thenReturn(group);
+
+        Map<String, Object> opPut = Map.of(
+                "method", "PUT",
+                "path", "/users/" + userId,
+                "data", Map.of("userName", "updatedUser"));
+
+        Map<String, Object> opPatch = Map.of(
+                "method", "PATCH",
+                "path", "/groups/" + groupId,
+                "data", Map.of("Operations", List.of(Map.of("op", "replace", "path", "displayName", "value", "newGroup"))));
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(opPut, opPatch));
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(2, results.size());
+        assertEquals("200", results.get(0).get("status"));
+        assertEquals("200", results.get(1).get("status"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_InvalidUUID_Returns400InvalidValue() {
+        Map<String, Object> op1 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/not-a-uuid");
+        Map<String, Object> op2 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/1-1-1-1-1");
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(op1, op2));
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(2, results.size());
+
+        assertEquals("400", results.get(0).get("status"));
+        Map<String, Object> resp1 = (Map<String, Object>) results.get(0).get("response");
+        assertEquals("invalidValue", resp1.get("scimType"));
+
+        assertEquals("400", results.get(1).get("status"));
+        Map<String, Object> resp2 = (Map<String, Object>) results.get(1).get("response");
+        assertEquals("invalidValue", resp2.get("scimType"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_UnknownResourceType_Returns400InvalidValue() {
+        UUID id = UUID.randomUUID();
+        Map<String, Object> op1 = Map.of(
+                "method", "PUT",
+                "path", "/UnknownEndpoint/" + id,
+                "data", Map.of("userName", "test"));
+        Map<String, Object> op2 = Map.of(
+                "method", "DELETE",
+                "path", "/InvalidResource/" + id);
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(op1, op2));
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(2, results.size());
+
+        assertEquals("400", results.get(0).get("status"));
+        Map<String, Object> resp1 = (Map<String, Object>) results.get(0).get("response");
+        assertEquals("invalidValue", resp1.get("scimType"));
+
+        assertEquals("400", results.get(1).get("status"));
+        Map<String, Object> resp2 = (Map<String, Object>) results.get(1).get("response");
+        assertEquals("invalidValue", resp2.get("scimType"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_PostItemPath_Returns400InvalidPath() {
+        UUID id = UUID.randomUUID();
+        Map<String, Object> op1 = Map.of(
+                "method", "POST",
+                "path", "/Users/" + id,
+                "data", Map.of("userName", "test"));
+        Map<String, Object> op2 = Map.of(
+                "method", "POST",
+                "path", "//Users//" + id,
+                "data", Map.of("userName", "test"));
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(op1, op2));
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(2, results.size());
+
+        assertEquals("400", results.get(0).get("status"));
+        Map<String, Object> resp1 = (Map<String, Object>) results.get(0).get("response");
+        assertEquals("invalidPath", resp1.get("scimType"));
+
+        assertEquals("400", results.get(1).get("status"));
+        Map<String, Object> resp2 = (Map<String, Object>) results.get(1).get("response");
+        assertEquals("invalidPath", resp2.get("scimType"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_PathTraversal_Returns400InvalidPath() {
+        UUID id = UUID.randomUUID();
+        Map<String, Object> op1 = Map.of(
+                "method", "POST",
+                "path", "/Users/../Groups",
+                "data", Map.of("displayName", "group"));
+        Map<String, Object> op2 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/../Groups/" + id);
+        Map<String, Object> op3 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/./" + id);
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(op1, op2, op3));
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(3, results.size());
+
+        assertEquals("400", results.get(0).get("status"));
+        assertEquals("invalidPath", ((Map<String, Object>) results.get(0).get("response")).get("scimType"));
+
+        assertEquals("400", results.get(1).get("status"));
+        assertEquals("invalidPath", ((Map<String, Object>) results.get(1).get("response")).get("scimType"));
+
+        assertEquals("400", results.get(2).get("status"));
+        assertEquals("invalidPath", ((Map<String, Object>) results.get(2).get("response")).get("scimType"));
+    }
 }
