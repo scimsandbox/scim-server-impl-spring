@@ -12,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.regex.Pattern;
 import java.util.*;
 
 /**
@@ -34,6 +35,15 @@ public class ScimBulkController extends ScimBaseController {
     private static final String KEY_LOCATION = "location";
     private static final String RESOURCE_USERS = "Users";
     private static final String RESOURCE_GROUPS = "Groups";
+
+    private static final Pattern MULTIPLE_SLASHES = Pattern.compile("/+");
+
+    enum BulkResourceType {
+        USERS,
+        GROUPS
+    }
+
+    record BulkTarget(BulkResourceType type, UUID id) {}
 
     private final ScimUserService userService;
     private final ScimGroupService groupService;
@@ -191,40 +201,44 @@ public class ScimBulkController extends ScimBaseController {
     private Map<String, Object> handlePost(String path, Map<String, Object> data, UUID wsId,
                                             String baseUrl, String bulkId, Map<String, String> bulkIdMap) {
         Map<String, Object> result = new LinkedHashMap<>();
-        if (path.startsWith("/" + RESOURCE_USERS)) {
-            ScimUser user = userService.createUser(wsId, data);
-            result.put(KEY_STATUS, "201");
-            result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
-            if (bulkId != null) {
-                bulkIdMap.put(bulkId, user.getId().toString());
+        BulkTarget target = parseBulkTarget(path, false);
+
+        switch (target.type()) {
+            case USERS -> {
+                ScimUser user = userService.createUser(wsId, data);
+                result.put(KEY_STATUS, "201");
+                result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
+                if (bulkId != null) {
+                    bulkIdMap.put(bulkId, user.getId().toString());
+                }
             }
-        } else if (path.startsWith("/" + RESOURCE_GROUPS)) {
-            ScimGroup group = groupService.createGroup(wsId, data);
-            result.put(KEY_STATUS, "201");
-            result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
-            if (bulkId != null) {
-                bulkIdMap.put(bulkId, group.getId().toString());
+            case GROUPS -> {
+                ScimGroup group = groupService.createGroup(wsId, data);
+                result.put(KEY_STATUS, "201");
+                result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+                if (bulkId != null) {
+                    bulkIdMap.put(bulkId, group.getId().toString());
+                }
             }
-        } else {
-            throw new ScimException(400, "invalidValue", "Unknown resource path: " + path);
         }
         return result;
     }
 
     private Map<String, Object> handlePut(String path, Map<String, Object> data, UUID wsId, String baseUrl) {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] parts = parsePath(path);
-        String resourceType = parts[0];
-        UUID resourceId = UUID.fromString(parts[1]);
+        BulkTarget target = parseBulkTarget(path, true);
 
-        if (RESOURCE_USERS.equals(resourceType)) {
-            ScimUser user = userService.replaceUser(wsId, resourceId, data, null);
-            result.put(KEY_STATUS, "200");
-            result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
-        } else if (RESOURCE_GROUPS.equals(resourceType)) {
-            ScimGroup group = groupService.replaceGroup(wsId, resourceId, data, null);
-            result.put(KEY_STATUS, "200");
-            result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+        switch (target.type()) {
+            case USERS -> {
+                ScimUser user = userService.replaceUser(wsId, target.id(), data, null);
+                result.put(KEY_STATUS, "200");
+                result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
+            }
+            case GROUPS -> {
+                ScimGroup group = groupService.replaceGroup(wsId, target.id(), data, null);
+                result.put(KEY_STATUS, "200");
+                result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+            }
         }
         return result;
     }
@@ -232,48 +246,107 @@ public class ScimBulkController extends ScimBaseController {
     @SuppressWarnings("unchecked")
     private Map<String, Object> handlePatch(String path, Map<String, Object> data, UUID wsId, String baseUrl) {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] parts = parsePath(path);
-        String resourceType = parts[0];
-        UUID resourceId = UUID.fromString(parts[1]);
+        BulkTarget target = parseBulkTarget(path, true);
 
         List<Map<String, Object>> operations = (List<Map<String, Object>>) data.get(KEY_OPERATIONS);
         if (operations == null) operations = List.of();
 
-        if (RESOURCE_USERS.equals(resourceType)) {
-            ScimUser user = userService.patchUser(wsId, resourceId, operations, null);
-            result.put(KEY_STATUS, "200");
-            result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
-        } else if (RESOURCE_GROUPS.equals(resourceType)) {
-            ScimGroup group = groupService.patchGroup(wsId, resourceId, operations, null);
-            result.put(KEY_STATUS, "200");
-            result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+        switch (target.type()) {
+            case USERS -> {
+                ScimUser user = userService.patchUser(wsId, target.id(), operations, null);
+                result.put(KEY_STATUS, "200");
+                result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
+            }
+            case GROUPS -> {
+                ScimGroup group = groupService.patchGroup(wsId, target.id(), operations, null);
+                result.put(KEY_STATUS, "200");
+                result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+            }
         }
         return result;
     }
 
     private Map<String, Object> handleDelete(String path, UUID wsId) {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] parts = parsePath(path);
-        String resourceType = parts[0];
-        UUID resourceId = UUID.fromString(parts[1]);
+        BulkTarget target = parseBulkTarget(path, true);
 
-        if (RESOURCE_USERS.equals(resourceType)) {
-            userService.deleteUser(wsId, resourceId);
-        } else if (RESOURCE_GROUPS.equals(resourceType)) {
-            groupService.deleteGroup(wsId, resourceId);
+        switch (target.type()) {
+            case USERS -> userService.deleteUser(wsId, target.id());
+            case GROUPS -> groupService.deleteGroup(wsId, target.id());
         }
         result.put(KEY_STATUS, "204");
         return result;
     }
 
-    private String[] parsePath(String path) {
-        // path like /Users/uuid or /Groups/uuid
-        String cleaned = path.startsWith("/") ? path.substring(1) : path;
-        String[] parts = cleaned.split("/", 2);
-        if (parts.length < 2) {
-            throw new ScimException(400, "invalidPath", "Bulk path must include resource ID: " + path);
+    private BulkTarget parseBulkTarget(String rawPath, boolean isItemRequired) {
+        List<String> segments = normalizeBulkPath(rawPath);
+        if (segments.isEmpty()) {
+            throw new ScimException(400, "invalidPath", "Bulk path cannot be empty: " + rawPath);
         }
-        return parts;
+
+        BulkResourceType resourceType;
+        if (RESOURCE_USERS.equalsIgnoreCase(segments.get(0))) {
+            resourceType = BulkResourceType.USERS;
+        } else if (RESOURCE_GROUPS.equalsIgnoreCase(segments.get(0))) {
+            resourceType = BulkResourceType.GROUPS;
+        } else {
+            throw new ScimException(400, "invalidValue", "Unknown resource path: " + rawPath);
+        }
+
+        if (isItemRequired) {
+            if (segments.size() != 2 || segments.get(1).isBlank()) {
+                throw new ScimException(400, "invalidPath", "Bulk path must include resource ID: " + rawPath);
+            }
+            String idStr = segments.get(1);
+            UUID id;
+            try {
+                id = UUID.fromString(idStr);
+            } catch (IllegalArgumentException e) {
+                throw new ScimException(400, "invalidValue", "Invalid resource ID: " + idStr);
+            }
+            if (!id.toString().equalsIgnoreCase(idStr)) {
+                throw new ScimException(400, "invalidValue", "Invalid resource ID: " + idStr);
+            }
+            return new BulkTarget(resourceType, id);
+        }
+
+        if (segments.size() != 1) {
+            throw new ScimException(400, "invalidPath", "Bulk POST must specify a resource type endpoint: " + rawPath);
+        }
+
+        return new BulkTarget(resourceType, null);
+    }
+
+    private static List<String> normalizeBulkPath(String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) {
+            return List.of();
+        }
+        String trimmed = rawPath.trim();
+        int start = 0;
+        int end = trimmed.length();
+        while (start < end && trimmed.charAt(start) == '/') {
+            start++;
+        }
+        while (end > start && trimmed.charAt(end - 1) == '/') {
+            end--;
+        }
+        if (start >= end) {
+            return List.of();
+        }
+        String stripped = trimmed.substring(start, end);
+        String[] rawSegments = MULTIPLE_SLASHES.split(stripped);
+        List<String> segments = new ArrayList<>(rawSegments.length);
+        for (String seg : rawSegments) {
+            if (seg.isEmpty()) {
+                continue;
+            }
+            if (".".equals(seg) || "..".equals(seg)) {
+                throw new ScimException(400, "invalidPath",
+                        "Path traversal segments ('.' or '..') are not allowed: " + rawPath);
+            }
+            segments.add(seg);
+        }
+        return segments;
     }
 
     private String resolveBulkIdReferences(String path, Map<String, String> bulkIdMap) {
