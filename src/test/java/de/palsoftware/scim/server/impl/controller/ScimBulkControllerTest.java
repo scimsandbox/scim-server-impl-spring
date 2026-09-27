@@ -260,4 +260,50 @@ class ScimBulkControllerTest {
         assertEquals(413, e.getHttpStatus());
         assertTrue(e.getMessage().contains("maxPayloadSize"));
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_NonCanonicalPaths() {
+        ScimUser user = new ScimUser();
+        user.setId(UUID.randomUUID());
+        when(userService.createUser(eq(workspaceId), any())).thenReturn(user);
+
+        UUID userId = UUID.randomUUID();
+
+        Map<String, Object> opDoubleSlash = Map.of(
+                "method", "POST",
+                "path", "//Users",
+                "bulkId", "b1",
+                "data", Map.of("userName", "doubleSlashUser"));
+
+        Map<String, Object> opNoLeadingSlash = Map.of(
+                "method", "POST",
+                "path", "Users",
+                "bulkId", "b2",
+                "data", Map.of("userName", "noSlashUser"));
+
+        Map<String, Object> opTrailingSlash = Map.of(
+                "method", "POST",
+                "path", "/Users/",
+                "bulkId", "b3",
+                "data", Map.of("userName", "trailingSlashUser"));
+
+        Map<String, Object> opDeleteDoubleSlash = Map.of(
+                "method", "DELETE",
+                "path", "//Users/" + userId);
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(opDoubleSlash, opNoLeadingSlash, opTrailingSlash, opDeleteDoubleSlash));
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(4, results.size());
+        assertEquals("201", results.get(0).get("status"));
+        assertEquals("201", results.get(1).get("status"));
+        assertEquals("201", results.get(2).get("status"));
+        assertEquals("204", results.get(3).get("status"));
+    }
 }

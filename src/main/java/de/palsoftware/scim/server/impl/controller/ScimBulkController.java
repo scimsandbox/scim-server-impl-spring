@@ -191,14 +191,19 @@ public class ScimBulkController extends ScimBaseController {
     private Map<String, Object> handlePost(String path, Map<String, Object> data, UUID wsId,
                                             String baseUrl, String bulkId, Map<String, String> bulkIdMap) {
         Map<String, Object> result = new LinkedHashMap<>();
-        if (path.startsWith("/" + RESOURCE_USERS)) {
+        String cleanPath = normalizePath(path);
+        String withoutLeading = cleanPath.startsWith("/") ? cleanPath.substring(1) : cleanPath;
+        String[] segments = withoutLeading.split("/");
+        String resourceType = segments.length > 0 ? segments[0] : "";
+
+        if (RESOURCE_USERS.equalsIgnoreCase(resourceType)) {
             ScimUser user = userService.createUser(wsId, data);
             result.put(KEY_STATUS, "201");
             result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
             if (bulkId != null) {
                 bulkIdMap.put(bulkId, user.getId().toString());
             }
-        } else if (path.startsWith("/" + RESOURCE_GROUPS)) {
+        } else if (RESOURCE_GROUPS.equalsIgnoreCase(resourceType)) {
             ScimGroup group = groupService.createGroup(wsId, data);
             result.put(KEY_STATUS, "201");
             result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
@@ -225,6 +230,8 @@ public class ScimBulkController extends ScimBaseController {
             ScimGroup group = groupService.replaceGroup(wsId, resourceId, data, null);
             result.put(KEY_STATUS, "200");
             result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+        } else {
+            throw new ScimException(400, "invalidValue", "Unknown resource path: " + path);
         }
         return result;
     }
@@ -247,6 +254,8 @@ public class ScimBulkController extends ScimBaseController {
             ScimGroup group = groupService.patchGroup(wsId, resourceId, operations, null);
             result.put(KEY_STATUS, "200");
             result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
+        } else {
+            throw new ScimException(400, "invalidValue", "Unknown resource path: " + path);
         }
         return result;
     }
@@ -261,19 +270,47 @@ public class ScimBulkController extends ScimBaseController {
             userService.deleteUser(wsId, resourceId);
         } else if (RESOURCE_GROUPS.equals(resourceType)) {
             groupService.deleteGroup(wsId, resourceId);
+        } else {
+            throw new ScimException(400, "invalidValue", "Unknown resource path: " + path);
         }
         result.put(KEY_STATUS, "204");
         return result;
     }
 
     private String[] parsePath(String path) {
-        // path like /Users/uuid or /Groups/uuid
-        String cleaned = path.startsWith("/") ? path.substring(1) : path;
+        String cleanPath = normalizePath(path);
+        String cleaned = cleanPath.startsWith("/") ? cleanPath.substring(1) : cleanPath;
         String[] parts = cleaned.split("/", 2);
-        if (parts.length < 2) {
+        if (parts.length < 2 || parts[1].isBlank()) {
             throw new ScimException(400, "invalidPath", "Bulk path must include resource ID: " + path);
         }
-        return parts;
+        String canonicalType;
+        if (RESOURCE_USERS.equalsIgnoreCase(parts[0])) {
+            canonicalType = RESOURCE_USERS;
+        } else if (RESOURCE_GROUPS.equalsIgnoreCase(parts[0])) {
+            canonicalType = RESOURCE_GROUPS;
+        } else {
+            throw new ScimException(400, "invalidValue", "Unknown resource path: " + path);
+        }
+        try {
+            UUID.fromString(parts[1]);
+        } catch (IllegalArgumentException e) {
+            throw new ScimException(400, "invalidValue", "Invalid resource ID: " + parts[1]);
+        }
+        return new String[]{canonicalType, parts[1]};
+    }
+
+    private static String normalizePath(String path) {
+        if (path == null || path.isBlank()) {
+            return "";
+        }
+        String trimmed = path.trim();
+        String withoutLeading = trimmed.replaceAll("^/+", "");
+        String normalized = "/" + withoutLeading.replaceAll("/+", "/");
+        if (normalized.length() > 1 && normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
     }
 
     private String resolveBulkIdReferences(String path, Map<String, String> bulkIdMap) {
