@@ -347,30 +347,35 @@ class ScimBulkControllerTest {
     @Test
     @SuppressWarnings("unchecked")
     void testProcessBulk_InvalidUUID_Returns400InvalidValue() {
+        UUID validUuid = UUID.randomUUID();
         Map<String, Object> op1 = Map.of(
                 "method", "DELETE",
                 "path", "/Users/not-a-uuid");
         Map<String, Object> op2 = Map.of(
                 "method", "DELETE",
                 "path", "/Users/1-1-1-1-1");
+        Map<String, Object> op3 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/{" + validUuid + "}");
+        Map<String, Object> op4 = Map.of(
+                "method", "DELETE",
+                "path", "/Users/urn:uuid:" + validUuid);
 
         Map<String, Object> body = Map.of(
                 "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
-                "Operations", List.of(op1, op2));
+                "Operations", List.of(op1, op2, op3, op4));
 
         ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
 
         assertEquals(200, response.getStatusCode().value());
         List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
-        assertEquals(2, results.size());
+        assertEquals(4, results.size());
 
-        assertEquals("400", results.get(0).get("status"));
-        Map<String, Object> resp1 = (Map<String, Object>) results.get(0).get("response");
-        assertEquals("invalidValue", resp1.get("scimType"));
-
-        assertEquals("400", results.get(1).get("status"));
-        Map<String, Object> resp2 = (Map<String, Object>) results.get(1).get("response");
-        assertEquals("invalidValue", resp2.get("scimType"));
+        for (int i = 0; i < 4; i++) {
+            assertEquals("400", results.get(i).get("status"));
+            Map<String, Object> resp = (Map<String, Object>) results.get(i).get("response");
+            assertEquals("invalidValue", resp.get("scimType"));
+        }
     }
 
     @Test

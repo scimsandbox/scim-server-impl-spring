@@ -37,7 +37,6 @@ public class ScimBulkController extends ScimBaseController {
     private static final String RESOURCE_GROUPS = "Groups";
 
     private static final Pattern MULTIPLE_SLASHES = Pattern.compile("/+");
-    private static final Pattern UUID_PATTERN = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
 
     enum BulkResourceType {
         USERS,
@@ -299,7 +298,7 @@ public class ScimBulkController extends ScimBaseController {
                 throw new ScimException(400, "invalidPath", "Bulk path must include resource ID: " + rawPath);
             }
             String idStr = segments.get(1);
-            if (!UUID_PATTERN.matcher(idStr).matches()) {
+            if (idStr.length() != 36) {
                 throw new ScimException(400, "invalidValue", "Invalid resource ID: " + idStr);
             }
             UUID id;
@@ -348,14 +347,6 @@ public class ScimBulkController extends ScimBaseController {
             segments.add(seg);
         }
         return segments;
-    }
-
-    static String normalizePath(String path) {
-        List<String> segments = normalizeBulkPath(path);
-        if (segments.isEmpty()) {
-            return "";
-        }
-        return "/" + String.join("/", segments);
     }
 
     private String resolveBulkIdReferences(String path, Map<String, String> bulkIdMap) {
