@@ -17,6 +17,6 @@ public interface ScimRequestLogRepository extends JpaRepository<ScimRequestLog, 
     long deleteByWorkspaceId(@Param("workspaceId") UUID workspaceId);
 
     @Modifying
-    @Query(value = "DELETE FROM scim_request_logs WHERE id IN (SELECT id FROM scim_request_logs ORDER BY created_at DESC OFFSET :maxCount)", nativeQuery = true)
-    int deleteOldLogsNative(@Param("maxCount") int maxCount);
+    @Query(value = "DELETE FROM scim_request_logs WHERE workspace_id = :workspaceId AND id IN (SELECT id FROM scim_request_logs WHERE workspace_id = :workspaceId ORDER BY created_at DESC, id DESC OFFSET :maxCount)", nativeQuery = true)
+    int deleteOldLogsByWorkspaceIdNative(@Param("workspaceId") UUID workspaceId, @Param("maxCount") int maxCount);
 }

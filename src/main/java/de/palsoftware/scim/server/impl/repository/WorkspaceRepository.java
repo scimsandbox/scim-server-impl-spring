@@ -22,6 +22,9 @@ public interface WorkspaceRepository extends JpaRepository<Workspace, UUID> {
     """)
     List<Workspace> findAllOrderByCreatedAtDesc();
 
+    @Query("SELECT w.id FROM Workspace w")
+    List<UUID> findAllWorkspaceIds();
+
     @Modifying(flushAutomatically = true)
     @Query("""
         UPDATE Workspace w
