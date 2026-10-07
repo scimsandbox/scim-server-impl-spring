@@ -64,7 +64,10 @@ public abstract class PostgresIntegrationTestSupport {
 
     @DynamicPropertySource
     static void registerPostgresProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.datasource.url", () -> {
+            String url = POSTGRES.getJdbcUrl().replace("localhost", "127.0.0.1");
+            return url.contains("?") ? url + "&currentSchema=" + SCHEMA : url + "?currentSchema=" + SCHEMA;
+        });
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
@@ -72,5 +75,8 @@ public abstract class PostgresIntegrationTestSupport {
         registry.add("spring.flyway.schemas", () -> SCHEMA);
         registry.add("spring.flyway.create-schemas", () -> "true");
         registry.add("spring.jpa.properties.hibernate.default_schema", () -> SCHEMA);
+        registry.add("spring.datasource.hikari.minimum-idle", () -> 1);
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> 10);
+        registry.add("spring.datasource.hikari.connection-timeout", () -> 20000);
     }
 }

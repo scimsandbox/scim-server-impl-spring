@@ -22,6 +22,9 @@ public interface WorkspaceRepository extends JpaRepository<Workspace, UUID> {
     """)
     List<Workspace> findAllOrderByCreatedAtDesc();
 
+    @Query("SELECT w.id FROM Workspace w")
+    List<UUID> findAllWorkspaceIds();
+
     @Modifying(flushAutomatically = true)
     @Query("""
         UPDATE Workspace w
@@ -30,6 +33,21 @@ public interface WorkspaceRepository extends JpaRepository<Workspace, UUID> {
           AND w.updatedAt < :updatedAt
     """)
     int touchUpdatedAt(@Param("workspaceId") UUID workspaceId, @Param("updatedAt") Instant updatedAt);
+
+    /**
+     * Explicitly sets the {@code updatedAt} timestamp for a workspace.
+     * <p>
+     * Used primarily for testing time-dependent lifecycle flows (e.g. stale workspace cleanup).
+     * This bulk JPQL update directly updates the database, intentionally bypassing the
+     * monotonic guard in {@link #touchUpdatedAt} and the {@code @PreUpdate} lifecycle callback.
+     */
+    @Modifying(flushAutomatically = true)
+    @Query("""
+        UPDATE Workspace w
+        SET w.updatedAt = :updatedAt
+        WHERE w.id = :workspaceId
+    """)
+    int setUpdatedAt(@Param("workspaceId") UUID workspaceId, @Param("updatedAt") Instant updatedAt);
 
     @Modifying(flushAutomatically = true)
     @Query("""
