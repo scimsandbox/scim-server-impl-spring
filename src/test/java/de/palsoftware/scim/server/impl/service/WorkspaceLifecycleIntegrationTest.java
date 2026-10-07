@@ -66,7 +66,7 @@ class WorkspaceLifecycleIntegrationTest extends PostgresIntegrationTestSupport {
         workspace = workspaceRepository.saveAndFlush(workspace);
 
         Instant baseline = Instant.now().minus(Duration.ofDays(10));
-        workspaceRepository.touchUpdatedAt(workspace.getId(), baseline);
+        workspaceRepository.setUpdatedAt(workspace.getId(), baseline);
         clock.setInstant(baseline.plus(Duration.ofHours(6)));
 
         scimUserService.createUser(workspace.getId(), Map.of("userName", "alice@example.com"));
@@ -94,8 +94,8 @@ class WorkspaceLifecycleIntegrationTest extends PostgresIntegrationTestSupport {
         freshWorkspace = workspaceRepository.saveAndFlush(freshWorkspace);
 
         Instant now = Instant.now();
-        workspaceRepository.touchUpdatedAt(staleWorkspace.getId(), now.minus(Duration.ofDays(200)));
-        workspaceRepository.touchUpdatedAt(freshWorkspace.getId(), now.minus(Duration.ofDays(10)));
+        workspaceRepository.setUpdatedAt(staleWorkspace.getId(), now.minus(Duration.ofDays(200)));
+        workspaceRepository.setUpdatedAt(freshWorkspace.getId(), now.minus(Duration.ofDays(10)));
 
         int deletedCount = workspaceCleanupService.deleteStaleWorkspaces(now.minus(Duration.ofDays(90)));
 

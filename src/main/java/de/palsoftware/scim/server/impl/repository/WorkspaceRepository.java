@@ -36,6 +36,14 @@ public interface WorkspaceRepository extends JpaRepository<Workspace, UUID> {
 
     @Modifying(flushAutomatically = true)
     @Query("""
+        UPDATE Workspace w
+        SET w.updatedAt = :updatedAt
+        WHERE w.id = :workspaceId
+    """)
+    int setUpdatedAt(@Param("workspaceId") UUID workspaceId, @Param("updatedAt") Instant updatedAt);
+
+    @Modifying(flushAutomatically = true)
+    @Query("""
         DELETE FROM Workspace w
         WHERE w.updatedAt < :cutoff
     """)
