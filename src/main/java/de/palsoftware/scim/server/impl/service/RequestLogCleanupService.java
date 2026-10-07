@@ -18,6 +18,7 @@ public class RequestLogCleanupService {
     private static final Logger logger = LoggerFactory.getLogger(RequestLogCleanupService.class);
 
     public static final int DEFAULT_MAX_LOGS_TO_KEEP = 10000;
+    public static final int DEFAULT_PRUNE_BATCH_SIZE = 5000;
 
     private final ScimRequestLogRepository logRepository;
     private final WorkspaceRepository workspaceRepository;
@@ -57,6 +58,7 @@ public class RequestLogCleanupService {
         int effectiveMaxLogs = maxLogsToKeep <= 0 ? this.maxCount : maxLogsToKeep;
         List<UUID> workspaceIds = workspaceRepository.findAllWorkspaceIds();
         int totalDeleted = 0;
+        int prunedWorkspaces = 0;
 
         for (UUID workspaceId : workspaceIds) {
             try {
@@ -64,6 +66,7 @@ public class RequestLogCleanupService {
                 if (deleted > 0) {
                     logger.debug("Deleted {} old request logs for workspace {}", deleted, workspaceId);
                     totalDeleted += deleted;
+                    prunedWorkspaces++;
                 }
             } catch (Exception e) {
                 logger.error("Failed to prune request logs for workspace {}", workspaceId, e);
@@ -72,16 +75,33 @@ public class RequestLogCleanupService {
 
         if (totalDeleted > 0) {
             logger.info("Deleted {} old request logs across {} workspaces, retaining latest {} per workspace",
-                    totalDeleted, workspaceIds.size(), effectiveMaxLogs);
+                    totalDeleted, prunedWorkspaces, effectiveMaxLogs);
         }
         return totalDeleted;
     }
 
     public int deleteOldRequestLogsForWorkspace(UUID workspaceId, int maxLogsToKeep) {
+        return deleteOldRequestLogsForWorkspace(workspaceId, maxLogsToKeep, DEFAULT_PRUNE_BATCH_SIZE);
+    }
+
+    public int deleteOldRequestLogsForWorkspace(UUID workspaceId, int maxLogsToKeep, int batchSize) {
+        if (!cleanupEnabled) {
+            return 0;
+        }
         int effectiveMaxLogs = maxLogsToKeep <= 0 ? this.maxCount : maxLogsToKeep;
-        Integer count = transactionOperations.execute(status ->
-                logRepository.deleteOldLogsByWorkspaceIdNative(workspaceId, effectiveMaxLogs));
-        return count != null ? count : 0;
+        int effectiveBatchSize = batchSize <= 0 ? DEFAULT_PRUNE_BATCH_SIZE : batchSize;
+        int totalDeleted = 0;
+
+        while (true) {
+            Integer count = transactionOperations.execute(status ->
+                    logRepository.deleteOldLogsByWorkspaceIdNative(workspaceId, effectiveMaxLogs, effectiveBatchSize));
+            int deleted = count != null ? count : 0;
+            totalDeleted += deleted;
+            if (deleted < effectiveBatchSize) {
+                break;
+            }
+        }
+        return totalDeleted;
     }
 }
 

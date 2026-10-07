@@ -123,9 +123,16 @@ Useful optional settings:
 - `app.cleanup.workspace.cron`
 - `app.cleanup.workspace.zone`
 - `app.cleanup.workspace.stale-after`
+- `app.cleanup.request-logs.enabled`
+- `app.cleanup.request-logs.cron`
+- `app.cleanup.request-logs.zone`
+- `app.cleanup.request-logs.max-count`
 
 Workspace cleanup is enabled by default and removes stale workspaces on a
 schedule. The default retention window is `P3M`.
+
+Request log cleanup is enabled by default and retains the latest 10,000 request logs
+per workspace on a schedule.
 
 The application enforces a strict 1MB limit on request payloads to prevent
 exhaustion attacks (particularly relevant for the SCIM Bulk endpoint). This

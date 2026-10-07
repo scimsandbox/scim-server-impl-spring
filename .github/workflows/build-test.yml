@@ -27,14 +27,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ github.repository_owner }}/scim-server-db
+          ref: main
           path: scim-server-db
-
-      - name: Link sibling scim-server-db module
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ln -s "$GITHUB_WORKSPACE/scim-server-db" ../scim-server-db
 
       - name: Build scim-server-db image
         shell: bash
