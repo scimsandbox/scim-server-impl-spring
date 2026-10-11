@@ -236,11 +236,36 @@ public class ScimUserController extends ScimBaseController {
             @PathVariable(name = "compat", required = false) String compat,
             HttpServletRequest request) {
 
-        String filter = (String) body.get("filter");
-        String sortBy = body.containsKey("sortBy") ? (String) body.get("sortBy") : "userName";
-        String sortOrder = body.containsKey("sortOrder") ? (String) body.get("sortOrder") : "ascending";
-        int startIndex = body.containsKey("startIndex") ? ((Number) body.get("startIndex")).intValue() : 1;
-        int count = body.containsKey("count") ? ((Number) body.get("count")).intValue() : 100;
+        String filter = null;
+        Object filterObj = body.get("filter");
+        if (filterObj instanceof String s) {
+            filter = s;
+        }
+
+        String sortBy = "userName";
+        Object sortByObj = body.get("sortBy");
+        if (sortByObj instanceof String s && !s.isBlank()) {
+            sortBy = s;
+        }
+
+        String sortOrder = "ascending";
+        Object sortOrderObj = body.get("sortOrder");
+        if (sortOrderObj instanceof String s && !s.isBlank()) {
+            sortOrder = s;
+        }
+
+        int startIndex = 1;
+        Object startIndexObj = body.get("startIndex");
+        if (startIndexObj instanceof Number num) {
+            startIndex = num.intValue();
+        }
+
+        int count = 100;
+        Object countObj = body.get("count");
+        if (countObj instanceof Number num) {
+            count = num.intValue();
+        }
+
         String attributes = extractAttributesParam(body.get("attributes"));
         String excludedAttributes = extractAttributesParam(body.get("excludedAttributes"));
 

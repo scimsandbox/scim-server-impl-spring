@@ -197,6 +197,7 @@ public class ScimGroupService {
     @Transactional
     public ScimGroup patchGroup(UUID workspaceId, UUID groupId, List<Map<String, Object>> operations, String ifMatch) {
         ScimGroup group = getGroup(workspaceId, groupId);
+        String originalDisplayName = group.getDisplayName();
 
         // Validate If-Match ETag for optimistic concurrency control
         if (ifMatch != null) {
@@ -208,6 +209,16 @@ public class ScimGroupService {
 
         for (Map<String, Object> op : operations) {
             applyPatchOperation(group, workspaceId, op);
+        }
+
+        if (group.getDisplayName() == null || group.getDisplayName().isBlank()) {
+            throw new ScimException(400, "invalidValue", KEY_DISPLAY_NAME + " is required");
+        }
+
+        if (!group.getDisplayName().equals(originalDisplayName)
+                && groupRepository.findByDisplayNameAndWorkspaceId(group.getDisplayName(), workspaceId).isPresent()) {
+            throw new ScimException(409, "uniqueness",
+                    RESOURCE_TYPE_GROUP + " with " + KEY_DISPLAY_NAME + " '" + group.getDisplayName() + "' already exists");
         }
 
         ScimGroup savedGroup = groupRepository.save(group);

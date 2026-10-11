@@ -163,6 +163,7 @@ public class ScimUserService {
     @Transactional
     public ScimUser patchUser(UUID workspaceId, UUID userId, List<Map<String, Object>> operations, String ifMatch) {
         ScimUser user = getUser(workspaceId, userId);
+        String originalUserName = user.getUserName();
 
         // Validate If-Match ETag for optimistic concurrency control
         if (ifMatch != null) {
@@ -173,6 +174,16 @@ public class ScimUserService {
         }
 
         ScimPatchEngine.applyPatchOperations(user, operations);
+
+        if (user.getUserName() == null || user.getUserName().isBlank()) {
+            throw new ScimException(400, "invalidValue", "userName is required");
+        }
+
+        if (!user.getUserName().equalsIgnoreCase(originalUserName)
+                && userRepository.existsByUserNameIgnoreCaseAndWorkspaceId(user.getUserName(), workspaceId)) {
+            throw new ScimException(409, "uniqueness", "User with userName '" + user.getUserName() + "' already exists");
+        }
+
         ScimUser savedUser = userRepository.save(user);
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
