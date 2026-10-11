@@ -351,4 +351,103 @@ class ScimFilterParserTest {
         assertNotNull(spec);
         spec.toPredicate(root, query, cb);
     }
+
+    @Test
+    void testDateTimeEqNeAndSubstringRejection() {
+        Path datePath = Mockito.mock(Path.class);
+        when(datePath.getJavaType()).thenReturn(java.time.Instant.class);
+        when(root.get("createdAt")).thenReturn(datePath);
+        when(root.get("lastModified")).thenReturn(datePath);
+
+        Specification<ScimUser> eqSpec = ScimFilterParser.parseUserFilter("meta.created eq \"2026-01-01T00:00:00Z\"", workspaceId);
+        assertNotNull(eqSpec);
+        eqSpec.toPredicate(root, query, cb);
+        verify(cb).equal(eq(datePath), any(java.time.Instant.class));
+
+        Specification<ScimUser> neSpec = ScimFilterParser.parseUserFilter("meta.lastModified ne \"2026-01-01T00:00:00Z\"", workspaceId);
+        assertNotNull(neSpec);
+        neSpec.toPredicate(root, query, cb);
+        verify(cb).notEqual(eq(datePath), any(java.time.Instant.class));
+
+        // Substrings on dateTime must be rejected
+        Specification<ScimUser> coSpec = ScimFilterParser.parseUserFilter("meta.created co \"2026\"", workspaceId);
+        ScimException ex = assertThrows(ScimException.class, () -> coSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+
+        Specification<ScimUser> swSpec = ScimFilterParser.parseUserFilter("meta.lastModified sw \"2026\"", workspaceId);
+        ex = assertThrows(ScimException.class, () -> swSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testActiveInvalidBooleanValueThrows() {
+        Path activePath = Mockito.mock(Path.class);
+        when(activePath.getJavaType()).thenReturn(Boolean.class);
+        when(root.get("active")).thenReturn(activePath);
+
+        Specification<ScimUser> eqYes = ScimFilterParser.parseUserFilter("active eq \"yes\"", workspaceId);
+        ScimException ex = assertThrows(ScimException.class, () -> eqYes.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+
+        Specification<ScimUser> neFoo = ScimFilterParser.parseUserFilter("active ne \"foo\"", workspaceId);
+        ex = assertThrows(ScimException.class, () -> neFoo.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+    }
+
+    @Test
+    void testStringAttributeWithValueTrueIsNotCoercedToBoolean() {
+        Path userPath = Mockito.mock(Path.class);
+        when(userPath.getJavaType()).thenReturn(String.class);
+        when(root.get("userName")).thenReturn(userPath);
+
+        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter("userName eq \"true\"", workspaceId);
+        assertNotNull(spec);
+        spec.toPredicate(root, query, cb);
+        // Verify cb.equal was invoked with String value "true", never boolean true
+        verify(cb, never()).equal(any(), eq(Boolean.TRUE));
+        verify(cb).equal(any(), eq("true"));
+    }
+
+    @Test
+    void testUuidAttributeRejectsSubstringsAndOrder() {
+        Path idPath = Mockito.mock(Path.class);
+        when(idPath.getJavaType()).thenReturn(UUID.class);
+        when(root.get("id")).thenReturn(idPath);
+
+        Specification<ScimUser> coSpec = ScimFilterParser.parseUserFilter("id co \"123\"", workspaceId);
+        ScimException ex = assertThrows(ScimException.class, () -> coSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+
+        Specification<ScimUser> gtSpec = ScimFilterParser.parseUserFilter("id gt \"123\"", workspaceId);
+        ex = assertThrows(ScimException.class, () -> gtSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+    }
+
+    @Test
+    void testUuidAttributeEqNeWithValidAndInvalidUUID() {
+        Path idPath = Mockito.mock(Path.class);
+        when(idPath.getJavaType()).thenReturn(UUID.class);
+        when(root.get("id")).thenReturn(idPath);
+
+        UUID testUuid = UUID.randomUUID();
+        Specification<ScimUser> eqValid = ScimFilterParser.parseUserFilter("id eq \"" + testUuid + "\"", workspaceId);
+        assertNotNull(eqValid);
+        eqValid.toPredicate(root, query, cb);
+        verify(cb).equal(eq(idPath), eq(testUuid));
+
+        Specification<ScimUser> eqInvalid = ScimFilterParser.parseUserFilter("id eq \"not-a-uuid\"", workspaceId);
+        assertNotNull(eqInvalid);
+        eqInvalid.toPredicate(root, query, cb);
+        verify(cb).disjunction();
+
+        Specification<ScimUser> neInvalid = ScimFilterParser.parseUserFilter("id ne \"not-a-uuid\"", workspaceId);
+        assertNotNull(neInvalid);
+        neInvalid.toPredicate(root, query, cb);
+        verify(cb).isNotNull(idPath);
+    }
 }

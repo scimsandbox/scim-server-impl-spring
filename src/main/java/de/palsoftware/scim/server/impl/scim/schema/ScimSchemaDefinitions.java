@@ -658,7 +658,7 @@ public class ScimSchemaDefinitions {
         private static Map<String, Object> paginationModeAttr() {
                 Map<String, Object> a = attr("defaultPaginationMode", TYPE_STRING, false, MUT_READ_ONLY, UNIQ_NONE,
                                 "Default pagination mode", false);
-                a.put(KEY_CANONICAL_VALUES, List.of(PAGINATION_CURSOR, PAGINATION_INDEX));
+                a.put(KEY_CANONICAL_VALUES, List.of(PAGINATION_INDEX));
                 a.remove(KEY_UNIQUENESS);
                 return a;
         }

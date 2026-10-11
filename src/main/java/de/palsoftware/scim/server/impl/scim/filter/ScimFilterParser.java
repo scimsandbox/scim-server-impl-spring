@@ -13,6 +13,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -369,22 +370,26 @@ public class ScimFilterParser {
         return collectionName.toLowerCase();
     }
 
+    /**
+     * Parses date and dateTime strings per RFC 7643 §2.3.5 (which recommends RFC 3339 / ISO 8601),
+     * while also accepting common variants without timezone offset (interpreted as UTC) and date-only strings.
+     */
     private static Instant parseDateTime(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
             return Instant.parse(value);
-        } catch (Exception e1) {
+        } catch (DateTimeParseException e1) {
             try {
                 return OffsetDateTime.parse(value).toInstant();
-            } catch (Exception e2) {
+            } catch (DateTimeParseException e2) {
                 try {
                     return LocalDateTime.parse(value).toInstant(ZoneOffset.UTC);
-                } catch (Exception e3) {
+                } catch (DateTimeParseException e3) {
                     try {
                         return LocalDate.parse(value).atStartOfDay().toInstant(ZoneOffset.UTC);
-                    } catch (Exception e4) {
+                    } catch (DateTimeParseException e4) {
                         return null;
                     }
                 }
@@ -410,9 +415,14 @@ public class ScimFilterParser {
             Path<Instant> instantPath = (Path<Instant>) path;
             return negate ? cb.notEqual(instantPath, instant) : cb.equal(instantPath, instant);
         }
-        if ("true".equalsIgnoreCase(value) || BOOLEAN_FALSE.equalsIgnoreCase(value)) {
-            boolean boolVal = Boolean.parseBoolean(value);
-            return negate ? cb.notEqual(path, boolVal) : cb.equal(path, boolVal);
+        if (UUID.class.equals(path.getJavaType())) {
+            try {
+                UUID uuidVal = UUID.fromString(value);
+                Path<UUID> uuidPath = (Path<UUID>) path;
+                return negate ? cb.notEqual(uuidPath, uuidVal) : cb.equal(uuidPath, uuidVal);
+            } catch (IllegalArgumentException e) {
+                return negate ? cb.isNotNull(path) : cb.disjunction();
+            }
         }
         if (caseInsensitive) {
             Expression<String> lower = cb.lower((Expression<String>) path);
@@ -439,9 +449,9 @@ public class ScimFilterParser {
             }
         }
 
-        // Substrings on non-string types
+        // Substrings on non-string types (Instant, Boolean, UUID)
         if ("co".equalsIgnoreCase(operator) || "sw".equalsIgnoreCase(operator) || "ew".equalsIgnoreCase(operator)) {
-            if (Instant.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType())) {
+            if (Instant.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType()) || UUID.class.equals(path.getJavaType())) {
                 throw new ScimException(400, "invalidFilter", "Operator '" + operator + "' is not supported for attribute: " + attrPath);
             }
         }
@@ -506,6 +516,10 @@ public class ScimFilterParser {
                 case "le" -> cb.lessThanOrEqualTo(instantPath, instant);
                 default -> throw new ScimException(400, "invalidFilter", "Unknown operator: " + op);
             };
+        }
+
+        if (UUID.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType())) {
+            throw new ScimException(400, "invalidFilter", "Comparison operator '" + op + "' is not supported for attribute: " + attrPath);
         }
 
         Path<String> stringPath = (Path<String>) path;
