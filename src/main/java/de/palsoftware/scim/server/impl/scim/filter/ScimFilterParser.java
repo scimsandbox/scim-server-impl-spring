@@ -9,10 +9,10 @@ import org.hibernate.query.criteria.JpaExpression;
 import org.springframework.data.jpa.domain.Specification;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -369,24 +369,26 @@ public class ScimFilterParser {
         return collectionName.toLowerCase();
     }
 
+    /**
+     * Parses date and dateTime strings per RFC 7643 §2.3.5 (which mandates including both a date and a time,
+     * in the format recommended by RFC 3339 / ISO 8601).
+     * Accepts ISO 8601 strings with timezone offset, as well as zoneless local datetimes (interpreted as UTC per xsd:dateTime).
+     * Date-only strings without a time component are rejected per RFC 7643 §2.3.5.
+     */
     private static Instant parseDateTime(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
             return Instant.parse(value);
-        } catch (Exception e1) {
+        } catch (DateTimeParseException e1) {
             try {
                 return OffsetDateTime.parse(value).toInstant();
-            } catch (Exception e2) {
+            } catch (DateTimeParseException e2) {
                 try {
                     return LocalDateTime.parse(value).toInstant(ZoneOffset.UTC);
-                } catch (Exception e3) {
-                    try {
-                        return LocalDate.parse(value).atStartOfDay().toInstant(ZoneOffset.UTC);
-                    } catch (Exception e4) {
-                        return null;
-                    }
+                } catch (DateTimeParseException e3) {
+                    return null;
                 }
             }
         }
@@ -410,9 +412,18 @@ public class ScimFilterParser {
             Path<Instant> instantPath = (Path<Instant>) path;
             return negate ? cb.notEqual(instantPath, instant) : cb.equal(instantPath, instant);
         }
-        if ("true".equalsIgnoreCase(value) || BOOLEAN_FALSE.equalsIgnoreCase(value)) {
-            boolean boolVal = Boolean.parseBoolean(value);
-            return negate ? cb.notEqual(path, boolVal) : cb.equal(path, boolVal);
+        if (UUID.class.equals(path.getJavaType())) {
+            UUID uuidVal;
+            try {
+                uuidVal = UUID.fromString(value);
+            } catch (IllegalArgumentException e) {
+                throw new ScimException(400, "invalidFilter", "Invalid UUID format for attribute '" + attrPath + "': " + value);
+            }
+            if (!uuidVal.toString().equalsIgnoreCase(value)) {
+                throw new ScimException(400, "invalidFilter", "Invalid UUID format for attribute '" + attrPath + "': " + value);
+            }
+            Path<UUID> uuidPath = (Path<UUID>) path;
+            return negate ? cb.notEqual(uuidPath, uuidVal) : cb.equal(uuidPath, uuidVal);
         }
         if (caseInsensitive) {
             Expression<String> lower = cb.lower((Expression<String>) path);
@@ -439,9 +450,9 @@ public class ScimFilterParser {
             }
         }
 
-        // Substrings on non-string types
+        // Substrings on non-string types (Instant, Boolean, UUID)
         if ("co".equalsIgnoreCase(operator) || "sw".equalsIgnoreCase(operator) || "ew".equalsIgnoreCase(operator)) {
-            if (Instant.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType())) {
+            if (Instant.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType()) || UUID.class.equals(path.getJavaType())) {
                 throw new ScimException(400, "invalidFilter", "Operator '" + operator + "' is not supported for attribute: " + attrPath);
             }
         }
@@ -506,6 +517,10 @@ public class ScimFilterParser {
                 case "le" -> cb.lessThanOrEqualTo(instantPath, instant);
                 default -> throw new ScimException(400, "invalidFilter", "Unknown operator: " + op);
             };
+        }
+
+        if (UUID.class.equals(path.getJavaType())) {
+            throw new ScimException(400, "invalidFilter", "Comparison operator '" + op + "' is not supported for attribute: " + attrPath);
         }
 
         Path<String> stringPath = (Path<String>) path;

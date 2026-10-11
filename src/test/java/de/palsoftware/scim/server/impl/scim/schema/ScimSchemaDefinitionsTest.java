@@ -28,6 +28,30 @@ class ScimSchemaDefinitionsTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testServiceProviderConfigSchema() {
+        Map<String, Object> spcSchema = ScimSchemaDefinitions.getSchemaById("urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig");
+        assertNotNull(spcSchema);
+        List<Map<String, Object>> attrs = (List<Map<String, Object>>) spcSchema.get("attributes");
+        Map<String, Object> paginationAttr = attrs.stream()
+                .filter(a -> "pagination".equals(a.get("name")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(paginationAttr);
+        List<Map<String, Object>> subAttrs = (List<Map<String, Object>>) paginationAttr.get("subAttributes");
+        assertNotNull(subAttrs);
+        boolean hasCursorTimeout = subAttrs.stream().anyMatch(sa -> "cursorTimeout".equals(sa.get("name")));
+        assertFalse(hasCursorTimeout, "cursorTimeout should not be present in schema subAttributes when cursor pagination is disabled");
+
+        Map<String, Object> modeAttr = subAttrs.stream()
+                .filter(sa -> "defaultPaginationMode".equals(sa.get("name")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(modeAttr);
+        assertEquals(List.of("index"), modeAttr.get("canonicalValues"));
+    }
+
+    @Test
     void testAllSchemas() {
         List<Map<String, Object>> schemas = ScimSchemaDefinitions.allSchemas();
         assertNotNull(schemas);
