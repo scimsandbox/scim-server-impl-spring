@@ -413,16 +413,17 @@ public class ScimFilterParser {
             return negate ? cb.notEqual(instantPath, instant) : cb.equal(instantPath, instant);
         }
         if (UUID.class.equals(path.getJavaType())) {
+            UUID uuidVal;
             try {
-                UUID uuidVal = UUID.fromString(value);
-                if (!uuidVal.toString().equalsIgnoreCase(value)) {
-                    throw new IllegalArgumentException("Non-canonical UUID format: " + value);
-                }
-                Path<UUID> uuidPath = (Path<UUID>) path;
-                return negate ? cb.notEqual(uuidPath, uuidVal) : cb.equal(uuidPath, uuidVal);
+                uuidVal = UUID.fromString(value);
             } catch (IllegalArgumentException e) {
                 throw new ScimException(400, "invalidFilter", "Invalid UUID format for attribute '" + attrPath + "': " + value);
             }
+            if (!uuidVal.toString().equalsIgnoreCase(value)) {
+                throw new ScimException(400, "invalidFilter", "Invalid UUID format for attribute '" + attrPath + "': " + value);
+            }
+            Path<UUID> uuidPath = (Path<UUID>) path;
+            return negate ? cb.notEqual(uuidPath, uuidVal) : cb.equal(uuidPath, uuidVal);
         }
         if (caseInsensitive) {
             Expression<String> lower = cb.lower((Expression<String>) path);
