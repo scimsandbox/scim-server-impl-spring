@@ -9,6 +9,10 @@ import org.hibernate.query.criteria.JpaExpression;
 import org.springframework.data.jpa.domain.Specification;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -365,9 +369,47 @@ public class ScimFilterParser {
         return collectionName.toLowerCase();
     }
 
+    private static Instant parseDateTime(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(value);
+        } catch (Exception e1) {
+            try {
+                return OffsetDateTime.parse(value).toInstant();
+            } catch (Exception e2) {
+                try {
+                    return LocalDateTime.parse(value).toInstant(ZoneOffset.UTC);
+                } catch (Exception e3) {
+                    try {
+                        return LocalDate.parse(value).atStartOfDay().toInstant(ZoneOffset.UTC);
+                    } catch (Exception e4) {
+                        return null;
+                    }
+                }
+            }
+        }
+    }
+
     @SuppressWarnings({"unchecked"})
     private static Predicate buildEqNePredicate(CriteriaBuilder cb, Path<?> path, String value,
-                                                  boolean caseInsensitive, boolean negate) {
+                                                  boolean caseInsensitive, boolean negate, String attrPath) {
+        if (Boolean.class.equals(path.getJavaType()) || "active".equalsIgnoreCase(attrPath)) {
+            if (!"true".equalsIgnoreCase(value) && !BOOLEAN_FALSE.equalsIgnoreCase(value)) {
+                throw new ScimException(400, "invalidFilter", "Invalid boolean value for attribute '" + attrPath + "': " + value);
+            }
+            boolean boolVal = Boolean.parseBoolean(value);
+            return negate ? cb.notEqual(path, boolVal) : cb.equal(path, boolVal);
+        }
+        if (Instant.class.equals(path.getJavaType())) {
+            Instant instant = parseDateTime(value);
+            if (instant == null) {
+                throw new ScimException(400, "invalidFilter", "Invalid dateTime format for attribute '" + attrPath + "': " + value);
+            }
+            Path<Instant> instantPath = (Path<Instant>) path;
+            return negate ? cb.notEqual(instantPath, instant) : cb.equal(instantPath, instant);
+        }
         if ("true".equalsIgnoreCase(value) || BOOLEAN_FALSE.equalsIgnoreCase(value)) {
             boolean boolVal = Boolean.parseBoolean(value);
             return negate ? cb.notEqual(path, boolVal) : cb.equal(path, boolVal);
@@ -390,6 +432,20 @@ public class ScimFilterParser {
     @SuppressWarnings({"unchecked"})
     private static Predicate buildComparisonPredicate(CriteriaBuilder cb, Path<?> path,
                                                        String operator, String value, String attrPath) {
+        // RFC 7644 §3.4.2.2: Boolean attributes only support eq and ne
+        if (Boolean.class.equals(path.getJavaType()) || "active".equalsIgnoreCase(attrPath)) {
+            if (!"eq".equalsIgnoreCase(operator) && !"ne".equalsIgnoreCase(operator)) {
+                throw new ScimException(400, "invalidFilter", "Comparison operator '" + operator + "' is not supported for boolean attribute '" + attrPath + "'");
+            }
+        }
+
+        // Substrings on non-string types
+        if ("co".equalsIgnoreCase(operator) || "sw".equalsIgnoreCase(operator) || "ew".equalsIgnoreCase(operator)) {
+            if (Instant.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType())) {
+                throw new ScimException(400, "invalidFilter", "Operator '" + operator + "' is not supported for attribute: " + attrPath);
+            }
+        }
+
         // RFC 7644 §3.4.2.2 + RFC 7643 §2.2: case sensitivity determined by caseExact attribute
         boolean caseInsensitive = isCaseInsensitiveAttribute(attrPath);
 
@@ -398,10 +454,10 @@ public class ScimFilterParser {
 
         switch (operator) {
             case "eq":
-                return buildEqNePredicate(cb, path, value, caseInsensitive, false);
+                return buildEqNePredicate(cb, path, value, caseInsensitive, false, attrPath);
 
             case "ne":
-                return buildEqNePredicate(cb, path, value, caseInsensitive, true);
+                return buildEqNePredicate(cb, path, value, caseInsensitive, true, attrPath);
 
             case "co":
                 if (caseInsensitive) {
@@ -422,13 +478,13 @@ public class ScimFilterParser {
                 return cb.like((Expression<String>) path, "%" + escaped, '\\');
 
             case "gt":
-                return buildOrderPredicate(cb, path, value, "gt");
+                return buildOrderPredicate(cb, path, value, "gt", attrPath);
             case "ge":
-                return buildOrderPredicate(cb, path, value, "ge");
+                return buildOrderPredicate(cb, path, value, "ge", attrPath);
             case "lt":
-                return buildOrderPredicate(cb, path, value, "lt");
+                return buildOrderPredicate(cb, path, value, "lt", attrPath);
             case "le":
-                return buildOrderPredicate(cb, path, value, "le");
+                return buildOrderPredicate(cb, path, value, "le", attrPath);
 
             default:
                 throw new ScimException(400, "invalidFilter", "Unknown filter operator: " + operator);
@@ -436,10 +492,12 @@ public class ScimFilterParser {
     }
 
     @SuppressWarnings({"unchecked"})
-    private static Predicate buildOrderPredicate(CriteriaBuilder cb, Path<?> path, String value, String op) {
-        // Try as datetime
-        try {
-            Instant instant = Instant.parse(value);
+    private static Predicate buildOrderPredicate(CriteriaBuilder cb, Path<?> path, String value, String op, String attrPath) {
+        if (Instant.class.equals(path.getJavaType())) {
+            Instant instant = parseDateTime(value);
+            if (instant == null) {
+                throw new ScimException(400, "invalidFilter", "Invalid dateTime format for attribute '" + attrPath + "': " + value);
+            }
             Path<Instant> instantPath = (Path<Instant>) path;
             return switch (op) {
                 case "gt" -> cb.greaterThan(instantPath, instant);
@@ -448,8 +506,6 @@ public class ScimFilterParser {
                 case "le" -> cb.lessThanOrEqualTo(instantPath, instant);
                 default -> throw new ScimException(400, "invalidFilter", "Unknown operator: " + op);
             };
-        } catch (Exception e) {
-            // Fall through to string comparison
         }
 
         Path<String> stringPath = (Path<String>) path;

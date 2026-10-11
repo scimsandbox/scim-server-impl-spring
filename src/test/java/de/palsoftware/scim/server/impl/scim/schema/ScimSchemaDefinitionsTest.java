@@ -18,6 +18,9 @@ class ScimSchemaDefinitionsTest {
         assertTrue(config.containsKey("bulk"));
         assertTrue(config.containsKey("filter"));
         assertTrue(config.containsKey("pagination"));
+        Map<?, ?> pagination = (Map<?, ?>) config.get("pagination");
+        assertFalse((Boolean) pagination.get("cursor"));
+        assertTrue((Boolean) pagination.get("index"));
         assertTrue(config.containsKey("changePassword"));
         assertTrue(config.containsKey("sort"));
         assertTrue(config.containsKey("etag"));

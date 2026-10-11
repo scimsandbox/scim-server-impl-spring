@@ -309,4 +309,46 @@ class ScimFilterParserTest {
         assertThrows(ScimException.class, () -> spec.toPredicate(root, query, cb));
     }
 
+    @Test
+    void testActiveBooleanOnlySupportsEqAndNe() {
+        Path activePath = Mockito.mock(Path.class);
+        when(activePath.getJavaType()).thenReturn(Boolean.class);
+        when(root.get("active")).thenReturn(activePath);
+
+        Specification<ScimUser> eqSpec = ScimFilterParser.parseUserFilter("active eq true", workspaceId);
+        assertNotNull(eqSpec);
+        eqSpec.toPredicate(root, query, cb);
+
+        Specification<ScimUser> neSpec = ScimFilterParser.parseUserFilter("active ne false", workspaceId);
+        assertNotNull(neSpec);
+        neSpec.toPredicate(root, query, cb);
+
+        Specification<ScimUser> gtSpec = ScimFilterParser.parseUserFilter("active gt true", workspaceId);
+        ScimException ex = assertThrows(ScimException.class, () -> gtSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+    }
+
+    @Test
+    void testMalformedDateTimeInFilterThrows() {
+        Path datePath = Mockito.mock(Path.class);
+        when(datePath.getJavaType()).thenReturn(java.time.Instant.class);
+        when(root.get("lastModified")).thenReturn(datePath);
+
+        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter("meta.lastModified gt \"not-an-iso-8601-date\"", workspaceId);
+        ScimException ex = assertThrows(ScimException.class, () -> spec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+    }
+
+    @Test
+    void testValidDateTimeInFilterSucceeds() {
+        Path datePath = Mockito.mock(Path.class);
+        when(datePath.getJavaType()).thenReturn(java.time.Instant.class);
+        when(root.get("lastModified")).thenReturn(datePath);
+
+        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter("meta.lastModified gt \"2026-01-01T00:00:00Z\"", workspaceId);
+        assertNotNull(spec);
+        spec.toPredicate(root, query, cb);
+    }
 }

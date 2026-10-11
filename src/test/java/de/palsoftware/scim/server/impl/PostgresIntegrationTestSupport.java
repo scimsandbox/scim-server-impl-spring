@@ -75,6 +75,7 @@ public abstract class PostgresIntegrationTestSupport {
         registry.add("spring.flyway.schemas", () -> SCHEMA);
         registry.add("spring.flyway.create-schemas", () -> "true");
         registry.add("spring.jpa.properties.hibernate.default_schema", () -> SCHEMA);
+        registry.add("spring.jpa.database-platform", () -> "org.hibernate.dialect.PostgreSQLDialect");
         registry.add("spring.datasource.hikari.minimum-idle", () -> 1);
         registry.add("spring.datasource.hikari.maximum-pool-size", () -> 10);
         registry.add("spring.datasource.hikari.connection-timeout", () -> 20000);
