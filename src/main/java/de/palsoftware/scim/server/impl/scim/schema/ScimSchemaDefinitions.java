@@ -432,8 +432,6 @@ public class ScimSchemaDefinitions {
                                 attr("defaultPageSize", TYPE_INTEGER, false, MUT_READ_ONLY, UNIQ_NONE,
                                                 "Default page size", false),
                                 attr("maxPageSize", TYPE_INTEGER, false, MUT_READ_ONLY, UNIQ_NONE, "Max page size",
-                                                false),
-                                attr("cursorTimeout", TYPE_INTEGER, false, MUT_READ_ONLY, UNIQ_NONE, "Cursor timeout",
                                                 false)));
                 attrs.add(pagination);
 

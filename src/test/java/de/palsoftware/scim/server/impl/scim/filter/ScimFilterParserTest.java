@@ -384,6 +384,10 @@ class ScimFilterParserTest {
         Specification<ScimUser> swSpec = ScimFilterParser.parseUserFilter("meta.lastModified sw \"2026\"", workspaceId);
         ex = assertThrows(ScimException.class, () -> swSpec.toPredicate(root, query, cb));
         assertEquals(400, ex.getHttpStatus());
+
+        Specification<ScimUser> ewSpec = ScimFilterParser.parseUserFilter("meta.lastModified ew \"2026\"", workspaceId);
+        ex = assertThrows(ScimException.class, () -> ewSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
@@ -428,6 +432,16 @@ class ScimFilterParserTest {
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidFilter", ex.getScimType());
 
+        Specification<ScimUser> swSpec = ScimFilterParser.parseUserFilter("id sw \"123\"", workspaceId);
+        ex = assertThrows(ScimException.class, () -> swSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+
+        Specification<ScimUser> ewSpec = ScimFilterParser.parseUserFilter("id ew \"123\"", workspaceId);
+        ex = assertThrows(ScimException.class, () -> ewSpec.toPredicate(root, query, cb));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidFilter", ex.getScimType());
+
         Specification<ScimUser> gtSpec = ScimFilterParser.parseUserFilter("id gt \"123\"", workspaceId);
         ex = assertThrows(ScimException.class, () -> gtSpec.toPredicate(root, query, cb));
         assertEquals(400, ex.getHttpStatus());
@@ -450,6 +464,12 @@ class ScimFilterParserTest {
         ScimException exEq = assertThrows(ScimException.class, () -> eqInvalid.toPredicate(root, query, cb));
         assertEquals(400, exEq.getHttpStatus());
         assertEquals("invalidFilter", exEq.getScimType());
+
+        // Lenient UUID formats like "1-1-1-1-1" must also be rejected per strict RFC 4122 textual form
+        Specification<ScimUser> eqLenient = ScimFilterParser.parseUserFilter("id eq \"1-1-1-1-1\"", workspaceId);
+        ScimException exLenient = assertThrows(ScimException.class, () -> eqLenient.toPredicate(root, query, cb));
+        assertEquals(400, exLenient.getHttpStatus());
+        assertEquals("invalidFilter", exLenient.getScimType());
 
         Specification<ScimUser> neInvalid = ScimFilterParser.parseUserFilter("id ne \"not-a-uuid\"", workspaceId);
         ScimException exNe = assertThrows(ScimException.class, () -> neInvalid.toPredicate(root, query, cb));

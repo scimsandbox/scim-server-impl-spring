@@ -9,7 +9,6 @@ import org.hibernate.query.criteria.JpaExpression;
 import org.springframework.data.jpa.domain.Specification;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -371,7 +370,8 @@ public class ScimFilterParser {
     }
 
     /**
-     * Parses date and dateTime strings per RFC 7643 §2.3.5 (which recommends RFC 3339 / ISO 8601).
+     * Parses date and dateTime strings per RFC 7643 §2.3.5 (which mandates including both a date and a time,
+     * in the format recommended by RFC 3339 / ISO 8601).
      * Accepts ISO 8601 strings with timezone offset, as well as zoneless local datetimes (interpreted as UTC per xsd:dateTime).
      * Date-only strings without a time component are rejected per RFC 7643 §2.3.5.
      */
@@ -415,6 +415,9 @@ public class ScimFilterParser {
         if (UUID.class.equals(path.getJavaType())) {
             try {
                 UUID uuidVal = UUID.fromString(value);
+                if (!uuidVal.toString().equalsIgnoreCase(value)) {
+                    throw new IllegalArgumentException("Non-canonical UUID format: " + value);
+                }
                 Path<UUID> uuidPath = (Path<UUID>) path;
                 return negate ? cb.notEqual(uuidPath, uuidVal) : cb.equal(uuidPath, uuidVal);
             } catch (IllegalArgumentException e) {
