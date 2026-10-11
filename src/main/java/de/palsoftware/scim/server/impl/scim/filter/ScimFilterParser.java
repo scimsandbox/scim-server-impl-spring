@@ -371,8 +371,9 @@ public class ScimFilterParser {
     }
 
     /**
-     * Parses date and dateTime strings per RFC 7643 §2.3.5 (which recommends RFC 3339 / ISO 8601),
-     * while also accepting common variants without timezone offset (interpreted as UTC) and date-only strings.
+     * Parses date and dateTime strings per RFC 7643 §2.3.5 (which recommends RFC 3339 / ISO 8601).
+     * Accepts ISO 8601 strings with timezone offset, as well as zoneless local datetimes (interpreted as UTC per xsd:dateTime).
+     * Date-only strings without a time component are rejected per RFC 7643 §2.3.5.
      */
     private static Instant parseDateTime(String value) {
         if (value == null || value.isBlank()) {
@@ -387,11 +388,7 @@ public class ScimFilterParser {
                 try {
                     return LocalDateTime.parse(value).toInstant(ZoneOffset.UTC);
                 } catch (DateTimeParseException e3) {
-                    try {
-                        return LocalDate.parse(value).atStartOfDay().toInstant(ZoneOffset.UTC);
-                    } catch (DateTimeParseException e4) {
-                        return null;
-                    }
+                    return null;
                 }
             }
         }
@@ -421,7 +418,7 @@ public class ScimFilterParser {
                 Path<UUID> uuidPath = (Path<UUID>) path;
                 return negate ? cb.notEqual(uuidPath, uuidVal) : cb.equal(uuidPath, uuidVal);
             } catch (IllegalArgumentException e) {
-                return negate ? cb.isNotNull(path) : cb.disjunction();
+                throw new ScimException(400, "invalidFilter", "Invalid UUID format for attribute '" + attrPath + "': " + value);
             }
         }
         if (caseInsensitive) {
@@ -518,7 +515,7 @@ public class ScimFilterParser {
             };
         }
 
-        if (UUID.class.equals(path.getJavaType()) || Boolean.class.equals(path.getJavaType())) {
+        if (UUID.class.equals(path.getJavaType())) {
             throw new ScimException(400, "invalidFilter", "Comparison operator '" + op + "' is not supported for attribute: " + attrPath);
         }
 

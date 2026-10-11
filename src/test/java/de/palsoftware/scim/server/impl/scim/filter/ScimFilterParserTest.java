@@ -339,6 +339,12 @@ class ScimFilterParserTest {
         ScimException ex = assertThrows(ScimException.class, () -> spec.toPredicate(root, query, cb));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidFilter", ex.getScimType());
+
+        // Date-only string lacks required time component per RFC 7643 §2.3.5
+        Specification<ScimUser> dateOnlySpec = ScimFilterParser.parseUserFilter("meta.lastModified gt \"2026-01-01\"", workspaceId);
+        ScimException exDateOnly = assertThrows(ScimException.class, () -> dateOnlySpec.toPredicate(root, query, cb));
+        assertEquals(400, exDateOnly.getHttpStatus());
+        assertEquals("invalidFilter", exDateOnly.getScimType());
     }
 
     @Test
@@ -441,13 +447,13 @@ class ScimFilterParserTest {
         verify(cb).equal(eq(idPath), eq(testUuid));
 
         Specification<ScimUser> eqInvalid = ScimFilterParser.parseUserFilter("id eq \"not-a-uuid\"", workspaceId);
-        assertNotNull(eqInvalid);
-        eqInvalid.toPredicate(root, query, cb);
-        verify(cb).disjunction();
+        ScimException exEq = assertThrows(ScimException.class, () -> eqInvalid.toPredicate(root, query, cb));
+        assertEquals(400, exEq.getHttpStatus());
+        assertEquals("invalidFilter", exEq.getScimType());
 
         Specification<ScimUser> neInvalid = ScimFilterParser.parseUserFilter("id ne \"not-a-uuid\"", workspaceId);
-        assertNotNull(neInvalid);
-        neInvalid.toPredicate(root, query, cb);
-        verify(cb).isNotNull(idPath);
+        ScimException exNe = assertThrows(ScimException.class, () -> neInvalid.toPredicate(root, query, cb));
+        assertEquals(400, exNe.getHttpStatus());
+        assertEquals("invalidFilter", exNe.getScimType());
     }
 }
