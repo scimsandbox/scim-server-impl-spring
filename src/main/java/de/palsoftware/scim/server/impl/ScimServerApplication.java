@@ -13,12 +13,15 @@ import org.springframework.cache.annotation.EnableCaching;
 
 import java.time.Clock;
 
+import de.palsoftware.scim.server.impl.repository.CustomJpaRepository;
+
 @SpringBootApplication(scanBasePackages = {"de.palsoftware.scim.server.impl",
                                            "de.palsoftware.scim.server.impl.repository"},
                        exclude = UserDetailsServiceAutoConfiguration.class)
 @EntityScan(basePackages = {"de.palsoftware.scim.server.impl.model",
                             "de.palsoftware.scim.server.impl"})
-@EnableJpaRepositories(basePackages = {"de.palsoftware.scim.server.impl.repository"})
+@EnableJpaRepositories(basePackages = {"de.palsoftware.scim.server.impl.repository"},
+                       repositoryBaseClass = CustomJpaRepository.class)
 @EnableAsync
 @EnableScheduling
 @EnableCaching

@@ -111,10 +111,10 @@ public class ScimGroupService {
         }
 
         String sortAttr = ScimFilterParser.resolveGroupSortAttribute(sortBy);
-        Sort.Direction direction = "descending".equalsIgnoreCase(sortOrder)
-                ? Sort.Direction.DESC
-                : Sort.Direction.ASC;
-        Sort sort = Sort.by(direction, sortAttr);
+        Sort.Order order = "descending".equalsIgnoreCase(sortOrder)
+                ? Sort.Order.desc(sortAttr).nullsFirst()
+                : Sort.Order.asc(sortAttr).nullsLast();
+        Sort sort = Sort.by(order);
 
         // Pagination (SCIM is 1-based, Spring Data Pageable is 0-based)
         int offset = Math.max(0, startIndex - 1);

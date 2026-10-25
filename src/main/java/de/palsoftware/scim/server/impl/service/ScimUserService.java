@@ -6,6 +6,7 @@ import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
 import de.palsoftware.scim.server.impl.scim.patch.ScimPatchEngine;
 import de.palsoftware.scim.server.impl.model.ScimGroupMembership;
 import de.palsoftware.scim.server.impl.model.ScimUser;
+import de.palsoftware.scim.server.impl.model.ScimUserEmail;
 import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.repository.ScimGroupMembershipRepository;
 import de.palsoftware.scim.server.impl.repository.ScimUserRepository;
@@ -81,10 +82,36 @@ public class ScimUserService {
 
         // Sorting
         String sortAttr = ScimFilterParser.resolveUserSortAttribute(sortBy);
-        Sort.Direction direction = "descending".equalsIgnoreCase(sortOrder)
-                ? Sort.Direction.DESC
-                : Sort.Direction.ASC;
-        Sort sort = Sort.by(direction, sortAttr);
+        boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
+
+        if ("emails".equals(sortAttr)) {
+            List<ScimUser> allUsers = new ArrayList<>(userRepository.findAll(spec));
+            Comparator<String> strComparator = String.CASE_INSENSITIVE_ORDER;
+            Comparator<ScimUser> emailComparator = isDescending
+                    ? Comparator.comparing(this::extractPrimaryOrFirstEmail, Comparator.nullsFirst(strComparator.reversed()))
+                    : Comparator.comparing(this::extractPrimaryOrFirstEmail, Comparator.nullsLast(strComparator));
+
+            Comparator<String> idComparator = isDescending ? Comparator.reverseOrder() : Comparator.naturalOrder();
+            Comparator<ScimUser> userComparator = emailComparator
+                    .thenComparing(u -> u.getId() != null ? u.getId().toString() : "", idComparator);
+            allUsers.sort(userComparator);
+
+            int offset = Math.max(0, startIndex - 1);
+            List<ScimUser> page;
+            if (offset >= allUsers.size()) {
+                page = Collections.emptyList();
+            } else {
+                page = allUsers.subList(offset, Math.min(offset + count, allUsers.size()));
+            }
+            page.forEach(this::initializeLazyCollections);
+
+            return buildListResponse(page, totalResults, startIndex, page.size());
+        }
+
+        Sort.Order order = isDescending
+                ? Sort.Order.desc(sortAttr).nullsFirst()
+                : Sort.Order.asc(sortAttr).nullsLast();
+        Sort sort = Sort.by(order);
 
         // Pagination (SCIM is 1-based, Spring Data Pageable is 0-based)
         int offset = Math.max(0, startIndex - 1);
@@ -247,5 +274,22 @@ public class ScimUserService {
             Hibernate.initialize(user.getPhotos());
             Hibernate.initialize(user.getX509Certificates());
         }
+    }
+
+    private String extractPrimaryOrFirstEmail(ScimUser u) {
+        if (u == null || u.getEmails() == null || u.getEmails().isEmpty()) {
+            return null;
+        }
+        for (ScimUserEmail e : u.getEmails()) {
+            if (e != null && e.isPrimaryFlag() && e.getValue() != null && !e.getValue().isBlank()) {
+                return e.getValue();
+            }
+        }
+        for (ScimUserEmail e : u.getEmails()) {
+            if (e != null && e.getValue() != null && !e.getValue().isBlank()) {
+                return e.getValue();
+            }
+        }
+        return null;
     }
 }

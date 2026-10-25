@@ -8,14 +8,17 @@ import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.repository.ScimGroupMembershipRepository;
 import de.palsoftware.scim.server.impl.repository.ScimUserRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
+import de.palsoftware.scim.server.impl.model.ScimUserEmail;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 
 
@@ -168,6 +171,148 @@ class ScimUserServiceTest {
         List<ScimUser> resources = (List<ScimUser>) response.get("Resources");
         assertThat(resources).hasSize(1);
         assertThat(resources.get(0).getId()).isEqualTo(userId);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_ascending_usesNullsLast() {
+        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(1L);
+        when(userRepository.findAll(any(Specification.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(user)));
+
+        service.listUsers(workspaceId, null, "title", "ascending", 1, 10);
+
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(userRepository).findAll(any(Specification.class), pageableCaptor.capture());
+        Sort sort = pageableCaptor.getValue().getSort();
+        Sort.Order order = sort.getOrderFor("title");
+        assertThat(order).isNotNull();
+        assertThat(order.isAscending()).isTrue();
+        assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_LAST);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_descending_usesNullsFirst() {
+        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(1L);
+        when(userRepository.findAll(any(Specification.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(user)));
+
+        service.listUsers(workspaceId, null, "title", "descending", 1, 10);
+
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(userRepository).findAll(any(Specification.class), pageableCaptor.capture());
+        Sort sort = pageableCaptor.getValue().getSort();
+        Sort.Order order = sort.getOrderFor("title");
+        assertThat(order).isNotNull();
+        assertThat(order.isDescending()).isTrue();
+        assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_FIRST);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_sortByEmails_ascending() {
+        ScimUser u1 = new ScimUser();
+        u1.setId(UUID.randomUUID());
+        u1.setUserName("user1");
+        ScimUserEmail e1Primary = new ScimUserEmail();
+        e1Primary.setValue("b_primary@example.com");
+        e1Primary.setPrimaryFlag(true);
+        ScimUserEmail e1Secondary = new ScimUserEmail();
+        e1Secondary.setValue("a_secondary@example.com");
+        e1Secondary.setPrimaryFlag(false);
+        u1.setEmails(List.of(e1Primary, e1Secondary));
+
+        ScimUser u2 = new ScimUser();
+        u2.setId(UUID.randomUUID());
+        u2.setUserName("user2");
+        ScimUserEmail e2First = new ScimUserEmail();
+        e2First.setValue("a_first@example.com");
+        e2First.setPrimaryFlag(false);
+        u2.setEmails(List.of(e2First));
+
+        ScimUser u3 = new ScimUser();
+        u3.setId(UUID.randomUUID());
+        u3.setUserName("user3");
+        u3.setEmails(Collections.emptyList());
+
+        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(3L);
+        when(userRepository.findAll(any(Specification.class))).thenReturn(List.of(u1, u2, u3));
+
+        Map<String, Object> response = service.listUsers(workspaceId, null, "emails", "ascending", 1, 10);
+
+        assertThat(response).containsEntry("totalResults", 3L).containsEntry("itemsPerPage", 3);
+        List<ScimUser> resources = (List<ScimUser>) response.get("Resources");
+        // u2 ("a_first") should come before u1 ("b_primary"), and u3 (no email) should be last
+        assertThat(resources).containsExactly(u2, u1, u3);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_sortByEmails_descending() {
+        ScimUser u1 = new ScimUser();
+        u1.setId(UUID.randomUUID());
+        u1.setUserName("user1");
+        ScimUserEmail e1 = new ScimUserEmail();
+        e1.setValue("b@example.com");
+        e1.setPrimaryFlag(true);
+        u1.setEmails(List.of(e1));
+
+        ScimUser u2 = new ScimUser();
+        u2.setId(UUID.randomUUID());
+        u2.setUserName("user2");
+        ScimUserEmail e2 = new ScimUserEmail();
+        e2.setValue("a@example.com");
+        e2.setPrimaryFlag(true);
+        u2.setEmails(List.of(e2));
+
+        ScimUser u3 = new ScimUser();
+        u3.setId(UUID.randomUUID());
+        u3.setUserName("user3");
+        u3.setEmails(Collections.emptyList());
+
+        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(3L);
+        when(userRepository.findAll(any(Specification.class))).thenReturn(List.of(u1, u2, u3));
+
+        Map<String, Object> response = service.listUsers(workspaceId, null, "emails.value", "descending", 1, 10);
+
+        assertThat(response).containsEntry("totalResults", 3L).containsEntry("itemsPerPage", 3);
+        List<ScimUser> resources = (List<ScimUser>) response.get("Resources");
+        // Nulls come first on descending, followed by b then a
+        assertThat(resources).containsExactly(u3, u1, u2);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_sortByEmails_pagination() {
+        ScimUser u1 = new ScimUser();
+        u1.setId(UUID.randomUUID());
+        u1.setUserName("user1");
+        ScimUserEmail e1 = new ScimUserEmail();
+        e1.setValue("b@example.com");
+        u1.setEmails(List.of(e1));
+
+        ScimUser u2 = new ScimUser();
+        u2.setId(UUID.randomUUID());
+        u2.setUserName("user2");
+        ScimUserEmail e2 = new ScimUserEmail();
+        e2.setValue("a@example.com");
+        u2.setEmails(List.of(e2));
+
+        ScimUser u3 = new ScimUser();
+        u3.setId(UUID.randomUUID());
+        u3.setUserName("user3");
+        u3.setEmails(Collections.emptyList());
+
+        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(3L);
+        when(userRepository.findAll(any(Specification.class))).thenReturn(List.of(u1, u2, u3));
+
+        // startIndex 2, count 1 -> should return 2nd item (u1)
+        Map<String, Object> response = service.listUsers(workspaceId, null, "emails", "ascending", 2, 1);
+
+        assertThat(response).containsEntry("totalResults", 3L).containsEntry("startIndex", 2).containsEntry("itemsPerPage", 1);
+        List<ScimUser> resources = (List<ScimUser>) response.get("Resources");
+        assertThat(resources).containsExactly(u1);
     }
 
     @Test

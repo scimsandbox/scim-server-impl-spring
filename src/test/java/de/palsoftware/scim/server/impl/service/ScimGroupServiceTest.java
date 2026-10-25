@@ -12,11 +12,13 @@ import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 
 
@@ -228,5 +230,43 @@ class ScimGroupServiceTest {
         verify(membershipRepository).deleteByMemberValue(groupId);
         verify(groupRepository).delete(group);
         verify(workspaceActivityService).touchWorkspace(workspaceId);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listGroups_ascending_usesNullsLast() {
+        when(groupRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimGroup>>any())).thenReturn(1L);
+        when(groupRepository.findAll(any(Specification.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(group)));
+
+        Map<String, Object> response = service.listGroups(workspaceId, null, "externalId", "ascending", 1, 10);
+
+        assertThat(response).containsEntry("totalResults", 1L).containsEntry("itemsPerPage", 1);
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(groupRepository).findAll(any(Specification.class), pageableCaptor.capture());
+        Sort sort = pageableCaptor.getValue().getSort();
+        Sort.Order order = sort.getOrderFor("externalId");
+        assertThat(order).isNotNull();
+        assertThat(order.isAscending()).isTrue();
+        assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_LAST);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listGroups_descending_usesNullsFirst() {
+        when(groupRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimGroup>>any())).thenReturn(1L);
+        when(groupRepository.findAll(any(Specification.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(group)));
+
+        Map<String, Object> response = service.listGroups(workspaceId, null, "externalId", "descending", 1, 10);
+
+        assertThat(response).containsEntry("totalResults", 1L).containsEntry("itemsPerPage", 1);
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(groupRepository).findAll(any(Specification.class), pageableCaptor.capture());
+        Sort sort = pageableCaptor.getValue().getSort();
+        Sort.Order order = sort.getOrderFor("externalId");
+        assertThat(order).isNotNull();
+        assertThat(order.isDescending()).isTrue();
+        assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_FIRST);
     }
 }
