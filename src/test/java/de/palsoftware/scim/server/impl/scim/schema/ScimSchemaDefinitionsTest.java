@@ -19,7 +19,9 @@ class ScimSchemaDefinitionsTest {
         assertTrue(config.containsKey("filter"));
         assertTrue(config.containsKey("pagination"));
         Map<?, ?> pagination = (Map<?, ?>) config.get("pagination");
-        assertFalse((Boolean) pagination.get("cursor"));
+        assertTrue((Boolean) pagination.get("cursor"));
+        assertTrue((Boolean) pagination.get("index"));
+        assertEquals(3600, pagination.get("cursorTimeout"));
         assertTrue(config.containsKey("changePassword"));
         Map<?, ?> changePassword = (Map<?, ?>) config.get("changePassword");
         assertEquals(true, changePassword.get("supported"));
@@ -42,14 +44,14 @@ class ScimSchemaDefinitionsTest {
         List<Map<String, Object>> subAttrs = (List<Map<String, Object>>) paginationAttr.get("subAttributes");
         assertNotNull(subAttrs);
         boolean hasCursorTimeout = subAttrs.stream().anyMatch(sa -> "cursorTimeout".equals(sa.get("name")));
-        assertFalse(hasCursorTimeout, "cursorTimeout should not be present in schema subAttributes when cursor pagination is disabled");
+        assertTrue(hasCursorTimeout, "cursorTimeout should be present in schema subAttributes when cursor pagination is enabled");
 
         Map<String, Object> modeAttr = subAttrs.stream()
                 .filter(sa -> "defaultPaginationMode".equals(sa.get("name")))
                 .findFirst()
                 .orElse(null);
         assertNotNull(modeAttr);
-        assertEquals(List.of("index"), modeAttr.get("canonicalValues"));
+        assertEquals(List.of("cursor", "index"), modeAttr.get("canonicalValues"));
     }
 
     @Test

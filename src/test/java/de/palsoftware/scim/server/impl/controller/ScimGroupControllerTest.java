@@ -3,6 +3,7 @@ package de.palsoftware.scim.server.impl.controller;
 import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -307,5 +308,126 @@ class ScimGroupControllerTest {
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getHeaders().getFirst("Content-Location"));
         assertTrue(response.getHeaders().getFirst("Content-Location").contains("/Groups/" + groupId));
+    }
+
+    // ─── Tests for RFC 9865 Cursor Pagination ───────────────────────────
+
+    @Test
+    void testListGroupsWithEmptyCursorReturnsNextCursorWithoutPreviousCursor() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockGroup));
+        result.put("totalResults", 5L);
+
+        when(groupService.listGroups(eq(workspaceId), isNull(), eq("displayName"), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(result);
+
+        ResponseEntity<Map<String, Object>> response = controller.listGroups(
+                workspaceId.toString(), null, "displayName", "ascending", null, 1, "", null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertNull(body.get("startIndex"));
+        assertNull(body.get("previousCursor"));
+        assertNotNull(body.get("nextCursor"));
+        assertTrue(((String) body.get("nextCursor")).startsWith("scim_cur_"));
+    }
+
+    @Test
+    void testListGroupsWithNextCursorReturnsSecondPage() {
+        String token = ScimCursorCodec.encodeCursor(workspaceId, 1, 3600);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockGroup));
+        result.put("totalResults", 5L);
+
+        when(groupService.listGroups(eq(workspaceId), isNull(), eq("displayName"), eq("ascending"), eq(2), eq(1)))
+                .thenReturn(result);
+
+        ResponseEntity<Map<String, Object>> response = controller.listGroups(
+                workspaceId.toString(), null, "displayName", "ascending", null, 1, token, null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertNull(body.get("startIndex"));
+        assertNotNull(body.get("previousCursor"));
+        assertNotNull(body.get("nextCursor"));
+    }
+
+    @Test
+    void testListGroupsFinalPageOmitsNextCursor() {
+        String token = ScimCursorCodec.encodeCursor(workspaceId, 4, 3600);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockGroup));
+        result.put("totalResults", 5L);
+
+        when(groupService.listGroups(eq(workspaceId), isNull(), eq("displayName"), eq("ascending"), eq(5), eq(1)))
+                .thenReturn(result);
+
+        ResponseEntity<Map<String, Object>> response = controller.listGroups(
+                workspaceId.toString(), null, "displayName", "ascending", null, 1, token, null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertNull(body.get("startIndex"));
+        assertNotNull(body.get("previousCursor"));
+        assertNull(body.get("nextCursor"));
+    }
+
+    @Test
+    void testListGroupsInvalidCursorThrowsInvalidCursor() {
+        ScimException ex = assertThrows(ScimException.class, () -> controller.listGroups(
+                workspaceId.toString(), null, "displayName", "ascending", null, 10, "invalid-opaque-cursor-value-999",
+                null, null, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidCursor", ex.getScimType());
+    }
+
+    @Test
+    void testListGroupsMutualExclusivityCursorAndStartIndex() {
+        ScimException ex = assertThrows(ScimException.class, () -> controller.listGroups(
+                workspaceId.toString(), null, "displayName", "ascending", 1, 10, "",
+                null, null, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+        assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testSearchGroupsWithCursor() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", List.of(mockGroup));
+        result.put("totalResults", 5L);
+
+        when(groupService.listGroups(eq(workspaceId), isNull(), eq("displayName"), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(result);
+
+        Map<String, Object> searchBody = Map.of("cursor", "", "count", 1);
+        ResponseEntity<Map<String, Object>> response = controller.searchGroups(
+                workspaceId.toString(), searchBody, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertNull(body.get("startIndex"));
+        assertNotNull(body.get("nextCursor"));
+    }
+
+    @Test
+    void testSearchGroupsMutualExclusivityCursorAndStartIndex() {
+        Map<String, Object> searchBody = Map.of("cursor", "", "startIndex", 1);
+
+        ScimException ex = assertThrows(ScimException.class, () -> controller.searchGroups(
+                workspaceId.toString(), searchBody, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+        assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
     }
 }

@@ -6,6 +6,8 @@ import de.palsoftware.scim.server.impl.scim.compat.CompatMode;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimGroupMapper;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
+import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import de.palsoftware.scim.server.impl.scim.schema.ScimSchemaDefinitions;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
@@ -148,8 +150,9 @@ public class ScimDiscoveryController extends ScimBaseController {
     public ResponseEntity<Map<String, Object>> rootSearchGet(
             @PathVariable String workspaceId,
             @RequestParam(required = false) String filter,
-            @RequestParam(required = false, defaultValue = "1") int startIndex,
+            @RequestParam(required = false) Integer startIndex,
             @RequestParam(required = false, defaultValue = "100") int count,
+            @RequestParam(required = false) String cursor,
             @RequestParam(required = false) String sortBy,
             @RequestParam(required = false, defaultValue = "ascending") String sortOrder,
             @RequestParam(required = false) String attributes,
@@ -157,7 +160,26 @@ public class ScimDiscoveryController extends ScimBaseController {
             @PathVariable(name = "compat", required = false) String compat,
             HttpServletRequest request) {
 
-        return executeRootSearch(workspaceId, filter, sortBy, sortOrder, startIndex, count,
+        if (cursor != null && startIndex != null) {
+            throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
+        }
+
+        return executeRootSearch(workspaceId, filter, sortBy, sortOrder, startIndex, count, cursor,
+                attributes, excludedAttributes, compat, request);
+    }
+
+    public ResponseEntity<Map<String, Object>> rootSearchGet(
+            String workspaceId,
+            String filter,
+            int startIndex,
+            int count,
+            String sortBy,
+            String sortOrder,
+            String attributes,
+            String excludedAttributes,
+            String compat,
+            HttpServletRequest request) {
+        return rootSearchGet(workspaceId, filter, (Integer) startIndex, count, null, sortBy, sortOrder,
                 attributes, excludedAttributes, compat, request);
     }
 
@@ -188,10 +210,20 @@ public class ScimDiscoveryController extends ScimBaseController {
             sortOrder = s;
         }
 
-        int startIndex = 1;
+        String cursor = null;
+        Object cursorObj = reqBody.get("cursor");
+        if (cursorObj instanceof String s) {
+            cursor = s;
+        }
+
+        Integer startIndex = null;
         Object startIndexObj = reqBody.get("startIndex");
         if (startIndexObj instanceof Number num) {
             startIndex = num.intValue();
+        }
+
+        if (cursor != null && startIndex != null) {
+            throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
         }
 
         int count = 100;
@@ -203,7 +235,7 @@ public class ScimDiscoveryController extends ScimBaseController {
         String attributes = extractAttributesParam(reqBody.get("attributes"));
         String excludedAttributes = extractAttributesParam(reqBody.get("excludedAttributes"));
 
-        return executeRootSearch(workspaceId, filter, sortBy, sortOrder, startIndex, count,
+        return executeRootSearch(workspaceId, filter, sortBy, sortOrder, startIndex, count, cursor,
                 attributes, excludedAttributes, compat, request);
     }
 
@@ -291,8 +323,9 @@ public class ScimDiscoveryController extends ScimBaseController {
             String filter,
             String sortBy,
             String sortOrder,
-            int startIndex,
+            Integer startIndex,
             int count,
+            String cursor,
             String attributes,
             String excludedAttributes,
             String compat,
@@ -311,7 +344,22 @@ public class ScimDiscoveryController extends ScimBaseController {
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
         CompatMode compatMode = CompatMode.fromString(compat);
 
-        if (startIndex < 1) startIndex = 1;
+        if (cursor != null && startIndex != null) {
+            throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
+        }
+
+        boolean isCursorPagination = cursor != null;
+        int offset;
+        int effectiveStartIndex;
+        if (isCursorPagination) {
+            offset = ScimCursorCodec.decodeCursor(cursor, wsId);
+            effectiveStartIndex = offset + 1;
+        } else {
+            effectiveStartIndex = (startIndex != null) ? startIndex : 1;
+            if (effectiveStartIndex < 1) effectiveStartIndex = 1;
+            offset = effectiveStartIndex - 1;
+        }
+
         if (count < 0) count = 0;
         if (count > 200) count = 200; // Enforce maxResults from ServiceProviderConfig
 
@@ -356,18 +404,18 @@ public class ScimDiscoveryController extends ScimBaseController {
         List<Map<String, Object>> allResources = new ArrayList<>();
         if (count > 0 && totalResults > 0) {
             if (usersEligible && !groupsEligible) {
-                Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, startIndex, count);
+                Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, effectiveStartIndex, count);
                 @SuppressWarnings("unchecked")
                 List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
                 allResources.addAll(mapUsers(users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
             } else if (!usersEligible && groupsEligible) {
-                Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, startIndex, count);
+                Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, effectiveStartIndex, count);
                 @SuppressWarnings("unchecked")
                 List<ScimGroup> groups = (List<ScimGroup>) gResult.get("Resources");
                 allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
             } else {
                 if (sortBy != null && !sortBy.isBlank()) {
-                    int fetchLimit = Math.min((int) ((long) startIndex - 1 + count), 200);
+                    int fetchLimit = (int) Math.min((long) effectiveStartIndex - 1 + count, totalResults);
                     List<Map<String, Object>> combined = new ArrayList<>();
 
                     if (totalUsers > 0) {
@@ -399,20 +447,20 @@ public class ScimDiscoveryController extends ScimBaseController {
 
                     combined.sort(buildCrossResourceComparator(sortBy, sortOrder));
 
-                    int offset = Math.max(0, startIndex - 1);
-                    int toIndex = Math.min(offset + count, combined.size());
-                    List<Map<String, Object>> paged = (offset < combined.size())
-                            ? combined.subList(offset, toIndex)
+                    int sortOffset = Math.max(0, effectiveStartIndex - 1);
+                    int toIndex = Math.min(sortOffset + count, combined.size());
+                    List<Map<String, Object>> paged = (sortOffset < combined.size())
+                            ? combined.subList(sortOffset, toIndex)
                             : Collections.emptyList();
 
                     for (Map<String, Object> res : paged) {
                         allResources.add(finalizeResource(res, compatMode, attributes, excludedAttributes));
                     }
                 } else {
-                    if (startIndex <= totalUsers) {
-                        int takeUsers = Math.min(count, (int) (totalUsers - startIndex + 1));
+                    if (effectiveStartIndex <= totalUsers) {
+                        int takeUsers = Math.min(count, (int) (totalUsers - effectiveStartIndex + 1));
                         if (takeUsers > 0) {
-                            Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, startIndex, takeUsers);
+                            Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, effectiveStartIndex, takeUsers);
                             @SuppressWarnings("unchecked")
                             List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
                             allResources.addAll(mapUsers(users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
@@ -425,7 +473,7 @@ public class ScimDiscoveryController extends ScimBaseController {
                             allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
                         }
                     } else {
-                        long groupStartIndex = startIndex - totalUsers;
+                        long groupStartIndex = effectiveStartIndex - totalUsers;
                         if (groupStartIndex <= totalGroups) {
                             Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, (int) groupStartIndex, count);
                             @SuppressWarnings("unchecked")
@@ -437,16 +485,26 @@ public class ScimDiscoveryController extends ScimBaseController {
             }
         }
 
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put(KEY_SCHEMAS, List.of("urn:ietf:params:scim:api:messages:2.0:ListResponse"));
-        response.put("totalResults", totalResults);
-        response.put("startIndex", startIndex);
-        response.put("itemsPerPage", allResources.size());
-        response.put("Resources", allResources);
+        int itemsPerPage = allResources.size();
+        Map<String, Object> responseBody;
+        if (isCursorPagination) {
+            String previousCursor = null;
+            if (offset > 0) {
+                int prevOffset = Math.max(0, offset - count);
+                previousCursor = ScimCursorCodec.encodeCursor(wsId, prevOffset);
+            }
+            String nextCursor = null;
+            if ((long) offset + itemsPerPage < totalResults) {
+                nextCursor = ScimCursorCodec.encodeCursor(wsId, offset + itemsPerPage);
+            }
+            responseBody = ScimListResponse.ofCursor(allResources, totalResults, nextCursor, previousCursor).toMap();
+        } else {
+            responseBody = ScimListResponse.ofIndex(allResources, totalResults, effectiveStartIndex).toMap();
+        }
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
-                .body(response);
+                .body(responseBody);
     }
 
     private List<Map<String, Object>> mapUsers(

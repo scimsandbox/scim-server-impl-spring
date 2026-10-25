@@ -81,11 +81,12 @@ public class ScimSchemaDefinitions {
                 config.put("bulk", Map.of(ATTR_SUPPORTED, true, "maxOperations", 1000, "maxPayloadSize", 1048576));
                 config.put("filter", Map.of(ATTR_SUPPORTED, true, "maxResults", 200));
                 config.put("pagination", Map.of(
-                                PAGINATION_CURSOR, false,
+                                PAGINATION_CURSOR, true,
                                 PAGINATION_INDEX, true,
                                 "defaultPaginationMode", PAGINATION_INDEX,
                                 "defaultPageSize", 10,
-                                "maxPageSize", 200));
+                                "maxPageSize", 200,
+                                "cursorTimeout", 3600));
                 config.put("changePassword", Map.of(ATTR_SUPPORTED, true));
                 config.put("sort", Map.of(ATTR_SUPPORTED, true));
                 config.put("etag", Map.of(ATTR_SUPPORTED, true));
@@ -429,6 +430,8 @@ public class ScimSchemaDefinitions {
                                 attr(PAGINATION_INDEX, TYPE_BOOLEAN, true, MUT_READ_ONLY, UNIQ_NONE,
                                                 "Index pagination supported", false),
                                 paginationModeAttr(),
+                                attr("cursorTimeout", TYPE_INTEGER, false, MUT_READ_ONLY, UNIQ_NONE,
+                                                "Cursor timeout in seconds", false),
                                 attr("defaultPageSize", TYPE_INTEGER, false, MUT_READ_ONLY, UNIQ_NONE,
                                                 "Default page size", false),
                                 attr("maxPageSize", TYPE_INTEGER, false, MUT_READ_ONLY, UNIQ_NONE, "Max page size",
@@ -656,7 +659,7 @@ public class ScimSchemaDefinitions {
         private static Map<String, Object> paginationModeAttr() {
                 Map<String, Object> a = attr("defaultPaginationMode", TYPE_STRING, false, MUT_READ_ONLY, UNIQ_NONE,
                                 "Default pagination mode", false);
-                a.put(KEY_CANONICAL_VALUES, List.of(PAGINATION_INDEX));
+                a.put(KEY_CANONICAL_VALUES, List.of(PAGINATION_CURSOR, PAGINATION_INDEX));
                 a.remove(KEY_UNIQUENESS);
                 return a;
         }

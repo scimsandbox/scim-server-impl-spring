@@ -4,6 +4,7 @@ import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimUser;
 import de.palsoftware.scim.server.impl.model.ScimUserEmail;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,6 +48,11 @@ class ScimDiscoveryControllerTest {
         Map<?, ?> changePassword = (Map<?, ?>) response.getBody().get("changePassword");
         assertNotNull(changePassword);
         assertEquals(true, changePassword.get("supported"));
+        Map<?, ?> pagination = (Map<?, ?>) response.getBody().get("pagination");
+        assertNotNull(pagination);
+        assertEquals(true, pagination.get("cursor"));
+        assertEquals(true, pagination.get("index"));
+        assertEquals(3600, pagination.get("cursorTimeout"));
     }
 
     @Test
@@ -524,5 +530,91 @@ class ScimDiscoveryControllerTest {
         assertEquals(2, resources.size());
         assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
         assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    // ─── Tests for Root Search Cursor Pagination ─────────────────────────
+
+    @Test
+    void testRootSearchGetWithCursorReturnsNextCursor() {
+        ScimUser user = createMockUser("Alice");
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 5L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 0L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(Map.of("totalResults", 5L, "Resources", List.of(user)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, null, 1, "", null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertNull(body.get("startIndex"));
+        assertNull(body.get("previousCursor"));
+        assertNotNull(body.get("nextCursor"));
+        assertTrue(((String) body.get("nextCursor")).startsWith("scim_cur_"));
+    }
+
+    @Test
+    void testRootSearchGetMutualExclusivityCursorAndStartIndex() {
+        ScimException ex = assertThrows(ScimException.class, () -> controller.rootSearchGet(
+                workspaceId, null, 1, 10, "", null, "ascending",
+                null, null, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+        assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testRootSearchPostWithCursorReturnsNextCursor() {
+        ScimUser user = createMockUser("Bob");
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 3L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 0L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(Map.of("totalResults", 3L, "Resources", List.of(user)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        Map<String, Object> reqBody = Map.of("cursor", "", "count", 1);
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchPost(
+                workspaceId, reqBody, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertNull(body.get("startIndex"));
+        assertNotNull(body.get("nextCursor"));
+    }
+
+    @Test
+    void testRootSearchPostMutualExclusivityCursorAndStartIndex() {
+        Map<String, Object> reqBody = Map.of("cursor", "", "startIndex", 1);
+
+        ScimException ex = assertThrows(ScimException.class, () -> controller.rootSearchPost(
+                workspaceId, reqBody, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+        assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testRootSearchGetInvalidCursorThrowsInvalidCursor() {
+        ScimException ex = assertThrows(ScimException.class, () -> controller.rootSearchGet(
+                workspaceId, null, null, 10, "bogus-cursor", null, "ascending",
+                null, null, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidCursor", ex.getScimType());
     }
 }

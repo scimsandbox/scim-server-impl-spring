@@ -6,6 +6,8 @@ import de.palsoftware.scim.server.impl.scim.compat.CompatMode;
 import de.palsoftware.scim.server.impl.scim.mapper.MsScimUserMapper;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
+import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -111,8 +113,9 @@ public class ScimUserController extends ScimBaseController {
             @RequestParam(required = false) String filter,
             @RequestParam(required = false, defaultValue = "userName") String sortBy,
             @RequestParam(required = false, defaultValue = "ascending") String sortOrder,
-            @RequestParam(required = false, defaultValue = "1") int startIndex,
+            @RequestParam(required = false) Integer startIndex,
             @RequestParam(required = false, defaultValue = "100") int count,
+            @RequestParam(required = false) String cursor,
             @RequestParam(required = false) String attributes,
             @RequestParam(required = false) String excludedAttributes,
             @PathVariable(name = "compat", required = false) String compat,
@@ -122,15 +125,29 @@ public class ScimUserController extends ScimBaseController {
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
 
-        if (startIndex < 1) startIndex = 1;
+        if (cursor != null && startIndex != null) {
+            throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
+        }
+
+        boolean isCursorPagination = cursor != null;
+        int offset;
+        int effectiveStartIndex;
+        if (isCursorPagination) {
+            offset = ScimCursorCodec.decodeCursor(cursor, wsId);
+            effectiveStartIndex = offset + 1;
+        } else {
+            effectiveStartIndex = (startIndex != null) ? startIndex : 1;
+            if (effectiveStartIndex < 1) effectiveStartIndex = 1;
+            offset = effectiveStartIndex - 1;
+        }
+
         if (count < 0) count = 0;
         if (count > 200) count = 200; // Enforce maxResults from ServiceProviderConfig
 
-        Map<String, Object> result = userService.listUsers(wsId, filter, sortBy, sortOrder, startIndex, count);
+        Map<String, Object> result = userService.listUsers(wsId, filter, sortBy, sortOrder, effectiveStartIndex, count);
         CompatMode compatMode = CompatMode.fromString(compat);
 
-        // Convert ScimUser entities to SCIM response maps
-        List<ScimUser> users = (List<ScimUser>) result.get("Resources");
+        List<ScimUser> users = result.get("Resources") instanceof List<?> list ? (List<ScimUser>) list : Collections.emptyList();
 
         // Batch-load groups for all users in one query (avoids N+1)
         List<UUID> userIds = users.stream().map(ScimUser::getId).toList();
@@ -145,11 +162,45 @@ public class ScimUserController extends ScimBaseController {
                     return scimResp;
                 })
                 .toList();
-        result.put("Resources", resources);
+
+        Object totalObj = result.get("totalResults");
+        long totalResults = totalObj instanceof Number num ? num.longValue() : resources.size();
+        int itemsPerPage = resources.size();
+
+        Map<String, Object> responseBody;
+        if (isCursorPagination) {
+            String previousCursor = null;
+            if (offset > 0) {
+                int prevOffset = Math.max(0, offset - count);
+                previousCursor = ScimCursorCodec.encodeCursor(wsId, prevOffset);
+            }
+            String nextCursor = null;
+            if ((long) offset + itemsPerPage < totalResults) {
+                nextCursor = ScimCursorCodec.encodeCursor(wsId, offset + itemsPerPage);
+            }
+            responseBody = ScimListResponse.ofCursor(resources, totalResults, nextCursor, previousCursor).toMap();
+        } else {
+            responseBody = ScimListResponse.ofIndex(resources, totalResults, effectiveStartIndex).toMap();
+        }
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
-                .body(result);
+                .body(responseBody);
+    }
+
+    public ResponseEntity<Map<String, Object>> listUsers(
+            String workspaceId,
+            String filter,
+            String sortBy,
+            String sortOrder,
+            int startIndex,
+            int count,
+            String attributes,
+            String excludedAttributes,
+            String compat,
+            HttpServletRequest request) {
+        return listUsers(workspaceId, filter, sortBy, sortOrder, (Integer) startIndex, count, null,
+                attributes, excludedAttributes, compat, request);
     }
 
     /**
@@ -254,10 +305,20 @@ public class ScimUserController extends ScimBaseController {
             sortOrder = s;
         }
 
-        int startIndex = 1;
+        String cursor = null;
+        Object cursorObj = body.get("cursor");
+        if (cursorObj instanceof String s) {
+            cursor = s;
+        }
+
+        Integer startIndex = null;
         Object startIndexObj = body.get("startIndex");
         if (startIndexObj instanceof Number num) {
             startIndex = num.intValue();
+        }
+
+        if (cursor != null && startIndex != null) {
+            throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
         }
 
         int count = 100;
@@ -269,7 +330,7 @@ public class ScimUserController extends ScimBaseController {
         String attributes = extractAttributesParam(body.get("attributes"));
         String excludedAttributes = extractAttributesParam(body.get("excludedAttributes"));
 
-        return listUsers(workspaceId, filter, sortBy, sortOrder, startIndex, count,
+        return listUsers(workspaceId, filter, sortBy, sortOrder, startIndex, count, cursor,
                 attributes, excludedAttributes, compat, request);
     }
 
