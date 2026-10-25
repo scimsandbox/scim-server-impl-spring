@@ -366,28 +366,72 @@ public class ScimDiscoveryController extends ScimBaseController {
                 List<ScimGroup> groups = (List<ScimGroup>) gResult.get("Resources");
                 allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
             } else {
-                if (startIndex <= totalUsers) {
-                    int takeUsers = Math.min(count, (int) (totalUsers - startIndex + 1));
-                    if (takeUsers > 0) {
-                        Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, startIndex, takeUsers);
+                if (sortBy != null && !sortBy.isBlank()) {
+                    int fetchLimit = Math.min((int) ((long) startIndex - 1 + count), 200);
+                    List<Map<String, Object>> combined = new ArrayList<>();
+
+                    if (totalUsers > 0) {
+                        int userLimit = (int) Math.min((long) fetchLimit, totalUsers);
+                        Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, 1, userLimit);
                         @SuppressWarnings("unchecked")
                         List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
-                        allResources.addAll(mapUsers(users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
+                        if (users != null && !users.isEmpty()) {
+                            List<UUID> userIds = users.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
+                            Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(userIds, baseUrl);
+                            for (ScimUser u : users) {
+                                List<Map<String, Object>> userGroups = groupsByUserId.getOrDefault(u.getId(), Collections.emptyList());
+                                combined.add(ScimUserMapper.toScimResponse(u, compatBaseUrl, userGroups));
+                            }
+                        }
                     }
-                    int remaining = count - takeUsers;
-                    if (remaining > 0 && totalGroups > 0) {
-                        Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, 1, remaining);
+
+                    if (totalGroups > 0) {
+                        int groupLimit = (int) Math.min((long) fetchLimit, totalGroups);
+                        Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, 1, groupLimit);
                         @SuppressWarnings("unchecked")
                         List<ScimGroup> groups = (List<ScimGroup>) gResult.get("Resources");
-                        allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
+                        if (groups != null && !groups.isEmpty()) {
+                            for (ScimGroup g : groups) {
+                                combined.add(ScimGroupMapper.toScimResponse(g, compatBaseUrl));
+                            }
+                        }
+                    }
+
+                    combined.sort(buildCrossResourceComparator(sortBy, sortOrder));
+
+                    int offset = Math.max(0, startIndex - 1);
+                    int toIndex = Math.min(offset + count, combined.size());
+                    List<Map<String, Object>> paged = (offset < combined.size())
+                            ? combined.subList(offset, toIndex)
+                            : Collections.emptyList();
+
+                    for (Map<String, Object> res : paged) {
+                        allResources.add(finalizeResource(res, compatMode, attributes, excludedAttributes));
                     }
                 } else {
-                    long groupStartIndex = startIndex - totalUsers;
-                    if (groupStartIndex <= totalGroups) {
-                        Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, (int) groupStartIndex, count);
-                        @SuppressWarnings("unchecked")
-                        List<ScimGroup> groups = (List<ScimGroup>) gResult.get("Resources");
-                        allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
+                    if (startIndex <= totalUsers) {
+                        int takeUsers = Math.min(count, (int) (totalUsers - startIndex + 1));
+                        if (takeUsers > 0) {
+                            Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, startIndex, takeUsers);
+                            @SuppressWarnings("unchecked")
+                            List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
+                            allResources.addAll(mapUsers(users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
+                        }
+                        int remaining = count - takeUsers;
+                        if (remaining > 0 && totalGroups > 0) {
+                            Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, 1, remaining);
+                            @SuppressWarnings("unchecked")
+                            List<ScimGroup> groups = (List<ScimGroup>) gResult.get("Resources");
+                            allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
+                        }
+                    } else {
+                        long groupStartIndex = startIndex - totalUsers;
+                        if (groupStartIndex <= totalGroups) {
+                            Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, (int) groupStartIndex, count);
+                            @SuppressWarnings("unchecked")
+                            List<ScimGroup> groups = (List<ScimGroup>) gResult.get("Resources");
+                            allResources.addAll(mapGroups(groups, compatBaseUrl, attributes, excludedAttributes));
+                        }
                     }
                 }
             }
@@ -415,16 +459,14 @@ public class ScimDiscoveryController extends ScimBaseController {
         if (users == null || users.isEmpty()) {
             return Collections.emptyList();
         }
-        List<UUID> userIds = users.stream().map(ScimUser::getId).toList();
+        List<UUID> userIds = users.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
         Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(userIds, baseUrl);
 
         return users.stream()
                 .map(u -> {
                     List<Map<String, Object>> groups = groupsByUserId.getOrDefault(u.getId(), Collections.emptyList());
                     Map<String, Object> scimResp = ScimUserMapper.toScimResponse(u, compatBaseUrl, groups);
-                    scimResp = applyCompat(scimResp, compatMode);
-                    applyAttributeProjection(scimResp, attributes, excludedAttributes);
-                    return scimResp;
+                    return finalizeResource(scimResp, compatMode, attributes, excludedAttributes);
                 })
                 .toList();
     }
@@ -440,10 +482,160 @@ public class ScimDiscoveryController extends ScimBaseController {
         return groups.stream()
                 .map(g -> {
                     Map<String, Object> scimResp = ScimGroupMapper.toScimResponse(g, compatBaseUrl);
-                    applyAttributeProjection(scimResp, attributes, excludedAttributes);
-                    return scimResp;
+                    return finalizeResource(scimResp, CompatMode.NONE, attributes, excludedAttributes);
                 })
                 .toList();
+    }
+
+    private Map<String, Object> finalizeResource(
+            Map<String, Object> resource,
+            CompatMode compatMode,
+            String attributes,
+            String excludedAttributes) {
+        if (resource == null) {
+            return null;
+        }
+        Map<?, ?> meta = (Map<?, ?>) resource.get("meta");
+        boolean isUser = meta != null && "User".equalsIgnoreCase((String) meta.get("resourceType"));
+        Map<String, Object> res = isUser ? applyCompat(resource, compatMode) : resource;
+        if (!(res instanceof LinkedHashMap || res instanceof HashMap)) {
+            res = new LinkedHashMap<>(res);
+        }
+        applyAttributeProjection(res, attributes, excludedAttributes);
+        return res;
+    }
+
+    private Comparator<Map<String, Object>> buildCrossResourceComparator(String sortBy, String sortOrder) {
+        boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
+        Comparator<String> strComp = String.CASE_INSENSITIVE_ORDER;
+        Comparator<String> valComparator = isDescending
+                ? Comparator.nullsFirst(strComp.reversed())
+                : Comparator.nullsLast(strComp);
+
+        return (r1, r2) -> {
+            String val1 = extractSortValue(r1, sortBy);
+            String val2 = extractSortValue(r2, sortBy);
+            int cmp = valComparator.compare(val1, val2);
+            if (cmp != 0) {
+                return cmp;
+            }
+            // Deterministic secondary tie-breaker by id
+            String id1 = r1 != null && r1.get("id") != null ? r1.get("id").toString() : null;
+            String id2 = r2 != null && r2.get("id") != null ? r2.get("id").toString() : null;
+            if (id1 != null && id2 != null) {
+                int idCmp = id1.compareTo(id2);
+                return isDescending ? -idCmp : idCmp;
+            } else if (id1 != null) {
+                return -1;
+            } else if (id2 != null) {
+                return 1;
+            }
+            return 0;
+        };
+    }
+
+    private String extractSortValue(Map<String, Object> resource, String sortBy) {
+        if (resource == null || sortBy == null || sortBy.isBlank()) {
+            return null;
+        }
+
+        String lower = sortBy.toLowerCase();
+        String enterprisePrefixColon = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:user:";
+        String enterprisePrefixDot = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:user.";
+        String subAttr = null;
+        if (lower.startsWith(enterprisePrefixColon)) {
+            subAttr = sortBy.substring(enterprisePrefixColon.length());
+        } else if (lower.startsWith(enterprisePrefixDot)) {
+            subAttr = sortBy.substring(enterprisePrefixDot.length());
+        }
+
+        if (subAttr != null) {
+            Object enterpriseObj = getCaseInsensitive(resource, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User");
+            if (enterpriseObj instanceof Map<?, ?> enterpriseMap) {
+                String[] parts = subAttr.split("\\.");
+                Object current = enterpriseMap;
+                for (String part : parts) {
+                    if (!(current instanceof Map<?, ?> map)) {
+                        return null;
+                    }
+                    current = getCaseInsensitive(map, part);
+                    if (current == null) {
+                        return null;
+                    }
+                }
+                if (current instanceof Map || current instanceof Collection) {
+                    return null;
+                }
+                return current.toString();
+            }
+            return null;
+        }
+
+        String stripped = sortBy;
+        if (lower.startsWith("urn:ietf:params:scim:schemas:core:2.0:user:")) {
+            stripped = sortBy.substring("urn:ietf:params:scim:schemas:core:2.0:user:".length());
+        } else if (lower.startsWith("urn:ietf:params:scim:schemas:core:2.0:user.")) {
+            stripped = sortBy.substring("urn:ietf:params:scim:schemas:core:2.0:user.".length());
+        } else if (lower.startsWith("urn:ietf:params:scim:schemas:core:2.0:group:")) {
+            stripped = sortBy.substring("urn:ietf:params:scim:schemas:core:2.0:group:".length());
+        } else if (lower.startsWith("urn:ietf:params:scim:schemas:core:2.0:group.")) {
+            stripped = sortBy.substring("urn:ietf:params:scim:schemas:core:2.0:group.".length());
+        }
+
+        String strippedLower = stripped.toLowerCase();
+        if ("emails".equals(strippedLower) || "emails.value".equals(strippedLower)) {
+            Object emailsObj = getCaseInsensitive(resource, "emails");
+            if (emailsObj instanceof List<?> list && !list.isEmpty()) {
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> map) {
+                        Object isPrimary = map.get("primary");
+                        if (Boolean.TRUE.equals(isPrimary)) {
+                            Object val = map.get("value");
+                            if (val != null && !val.toString().isBlank()) {
+                                return val.toString();
+                            }
+                        }
+                    }
+                }
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> map) {
+                        Object val = map.get("value");
+                        if (val != null && !val.toString().isBlank()) {
+                            return val.toString();
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        String[] parts = stripped.split("\\.");
+        Object current = resource;
+        for (String part : parts) {
+            if (!(current instanceof Map<?, ?> map)) {
+                return null;
+            }
+            current = getCaseInsensitive(map, part);
+            if (current == null) {
+                return null;
+            }
+        }
+        if (current instanceof Map || current instanceof Collection) {
+            return null;
+        }
+        return current.toString();
+    }
+
+    private static Object getCaseInsensitive(Map<?, ?> map, String key) {
+        if (map == null || key == null) return null;
+        Object val = map.get(key);
+        if (val != null) return val;
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() instanceof String k && k.equalsIgnoreCase(key)) {
+                return entry.getValue();
+            }
+        }
+        return null;
     }
 
     private Map<String, Object> applyCompat(Map<String, Object> scimResponse, CompatMode compatMode) {

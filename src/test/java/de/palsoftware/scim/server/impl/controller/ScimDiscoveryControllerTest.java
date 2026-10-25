@@ -2,6 +2,7 @@ package de.palsoftware.scim.server.impl.controller;
 
 import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimUser;
+import de.palsoftware.scim.server.impl.model.ScimUserEmail;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
@@ -214,5 +215,314 @@ class ScimDiscoveryControllerTest {
     void rootMethodNotAllowedReturns405() {
         ResponseEntity<Map<String, Object>> response = controller.rootMethodNotAllowed(null);
         assertEquals(405, response.getStatusCode().value());
+    }
+
+    @Test
+    void rootSearchCombinedSortingOrdersAcrossTypesAscending() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(2L, body.get("totalResults"));
+        assertEquals(2, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Alice", resources.get(0).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Bob", resources.get(1).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingOrdersAcrossTypesDescending() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, "displayName", "descending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(2L, body.get("totalResults"));
+        assertEquals(2, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Bob", resources.get(0).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Alice", resources.get(1).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingWithAttributeProjection() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, "displayName", "ascending",
+                "id,meta.resourceType", null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Group", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("User", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+        assertFalse(resources.get(0).containsKey("displayName"));
+        assertFalse(resources.get(1).containsKey("displayName"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingNullsLastOnAscending() {
+        ScimUser userNullDisplay = createMockUser("user1");
+        userNullDisplay.setDisplayName(null);
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userNullDisplay)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Alice", resources.get(0).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertNull(resources.get(1).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingNullsFirstOnDescending() {
+        ScimUser userNullDisplay = createMockUser("user1");
+        userNullDisplay.setDisplayName(null);
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userNullDisplay)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, "displayName", "descending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertNull(resources.get(0).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Alice", resources.get(1).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchPostCombinedSortingOrdersAcrossTypes() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        Map<String, Object> searchBody = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"),
+                "sortBy", "displayName",
+                "sortOrder", "ascending",
+                "count", 10
+        );
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchPost(
+                workspaceId, searchBody, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Alice", resources.get(0).get("displayName"));
+        assertEquals("Bob", resources.get(1).get("displayName"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingPaginationSlice() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+        ScimGroup groupCharlie = createMockGroup("Charlie");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 2L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 2L, "Resources", List.of(groupAlice, groupCharlie)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 2, 1, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(3L, body.get("totalResults"));
+        assertEquals(2, body.get("startIndex"));
+        assertEquals(1, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(1, resources.size());
+        assertEquals("Bob", resources.get(0).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingEnterpriseDepartmentAscending() {
+        ScimUser user = createMockUser("dave");
+        user.setDisplayName("Dave");
+        user.setEnterpriseDepartment("Engineering");
+        ScimGroup group = createMockGroup("Admins");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10,
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        // User has non-null department "Engineering", Group has null enterprise department -> User first, Group last
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingEmailPrimaryAscending() {
+        ScimUser user = createMockUser("eve");
+        user.setDisplayName("Eve");
+        ScimUserEmail email = new ScimUserEmail();
+        email.setValue("eve@example.com");
+        email.setPrimaryFlag(true);
+        user.setEmails(List.of(email));
+        ScimGroup group = createMockGroup("Auditors");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("emails"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("emails"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, "emails", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
     }
 }
