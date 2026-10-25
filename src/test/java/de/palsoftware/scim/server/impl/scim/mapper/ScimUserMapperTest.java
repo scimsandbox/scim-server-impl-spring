@@ -137,4 +137,28 @@ class ScimUserMapperTest {
         item.put("value", "invalid-base64!!");
         assertThrows(ScimException.class, () -> ScimUserMapper.buildCertificate(item));
     }
+
+    @Test
+    void testPasswordHashingOnCreateAndUpdate() {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("userName", "hashedUser");
+        input.put("password", "PlaintextPassword!123");
+
+        ScimUser newUser = new ScimUser();
+        ScimUserMapper.applyFromScimInput(newUser, input);
+        assertNotNull(newUser.getPassword());
+        assertTrue(newUser.getPassword().startsWith("$2a$") || newUser.getPassword().startsWith("$2b$"));
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("PlaintextPassword!123", newUser.getPassword()));
+
+        // When password is already bcrypt-hashed, it should not be rehashed
+        String preHashed = "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr";
+        input.put("password", preHashed);
+        ScimUserMapper.applyFromScimInput(newUser, input);
+        assertEquals(preHashed, newUser.getPassword());
+
+        // When password is null or empty
+        input.put("password", null);
+        ScimUserMapper.applyFromScimInput(newUser, input);
+        assertNull(newUser.getPassword());
+    }
 }

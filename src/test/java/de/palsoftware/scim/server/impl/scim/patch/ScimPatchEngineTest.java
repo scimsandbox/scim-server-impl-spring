@@ -82,7 +82,30 @@ class ScimPatchEngineTest {
         assertEquals("en-US", user.getLocale());
         assertEquals("UTC", user.getTimezone());
         assertTrue(user.isActive());
-        assertEquals("secret", user.getPassword());
+        assertNotNull(user.getPassword());
+        assertTrue(user.getPassword().startsWith("$2a$") || user.getPassword().startsWith("$2b$"));
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("secret", user.getPassword()));
+    }
+
+    @Test
+    void testPatchAlreadyHashedPasswordNotRehashed() {
+        String preHashed = "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr";
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "path", "password", "value", preHashed)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+        assertEquals(preHashed, user.getPassword());
+    }
+
+    @Test
+    void testPatchPasswordViaValueMapWithoutPath() {
+        Map<String, Object> value = Map.of("password", "newSecret123");
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "value", value)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+        assertNotNull(user.getPassword());
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("newSecret123", user.getPassword()));
     }
 
     @Test

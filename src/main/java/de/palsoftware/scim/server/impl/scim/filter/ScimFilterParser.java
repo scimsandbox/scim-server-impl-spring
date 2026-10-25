@@ -219,6 +219,10 @@ public class ScimFilterParser {
 
         // Presence operator (no value)
         if ("pr".equals(operator)) {
+            String stripped = stripCoreUrnPrefix(attrPath, isUser).toLowerCase();
+            if ("meta.resourcetype".equals(stripped)) {
+                return (root, query, cb) -> cb.conjunction();
+            }
             return (root, query, cb) -> {
                 Path<?> path = resolveAttributePath(root, attrPath, isUser);
                 return cb.isNotNull(path);
@@ -240,6 +244,33 @@ public class ScimFilterParser {
         }
 
         final String finalValue = value;
+
+        String stripped = stripCoreUrnPrefix(attrPath, isUser).toLowerCase();
+        if ("meta.resourcetype".equals(stripped)) {
+            return (root, query, cb) -> {
+                String myType = isUser ? "User" : "Group";
+                boolean match;
+                switch (operator) {
+                    case "eq":
+                        match = myType.equalsIgnoreCase(finalValue);
+                        return match ? cb.conjunction() : cb.disjunction();
+                    case "ne":
+                        match = myType.equalsIgnoreCase(finalValue);
+                        return match ? cb.disjunction() : cb.conjunction();
+                    case "co":
+                        match = myType.toLowerCase().contains(finalValue.toLowerCase());
+                        return match ? cb.conjunction() : cb.disjunction();
+                    case "sw":
+                        match = myType.toLowerCase().startsWith(finalValue.toLowerCase());
+                        return match ? cb.conjunction() : cb.disjunction();
+                    case "ew":
+                        match = myType.toLowerCase().endsWith(finalValue.toLowerCase());
+                        return match ? cb.conjunction() : cb.disjunction();
+                    default:
+                        throw new ScimException(400, "invalidFilter", "Operator '" + operator + "' is not supported for meta.resourceType");
+                }
+            };
+        }
 
         return (root, query, cb) -> {
             Path<?> path = resolveAttributePath(root, attrPath, isUser);
@@ -664,13 +695,17 @@ public class ScimFilterParser {
 
     public static String resolveUserSortAttribute(String sortBy) {
         if (sortBy == null) return ATTR_USER_NAME;
-        
-        String lowerSortBy = sortBy.toLowerCase();
+
+        String stripped = stripCoreUrnPrefix(sortBy, true);
+        String lowerSortBy = stripped.toLowerCase();
+        if (lowerSortBy.equals("emails") || lowerSortBy.equals("emails.value")) {
+            return "emails";
+        }
         if (JSON_COLLECTIONS.stream().anyMatch(lowerSortBy::startsWith)) {
             throw new ScimException(400, "invalidValue", "Sorting on multi-valued complex attributes is not supported.");
         }
 
-        return switch (sortBy) {
+        return switch (stripped) {
             case ATTR_USER_NAME -> ATTR_USER_NAME;
             case "name.familyName" -> "nameFamilyName";
             case "name.givenName" -> "nameGivenName";
@@ -680,19 +715,40 @@ public class ScimFilterParser {
             case "meta.created" -> ATTR_CREATED_AT;
             case "meta.lastModified" -> ATTR_LAST_MODIFIED;
             case ATTR_ID -> ATTR_ID;
-            default -> ATTR_USER_NAME;
+            default -> {
+                if (stripped.equalsIgnoreCase(ATTR_USER_NAME)) yield ATTR_USER_NAME;
+                if (stripped.equalsIgnoreCase("name.familyName")) yield "nameFamilyName";
+                if (stripped.equalsIgnoreCase("name.givenName")) yield "nameGivenName";
+                if (stripped.equalsIgnoreCase(ATTR_DISPLAY_NAME)) yield ATTR_DISPLAY_NAME;
+                if (stripped.equalsIgnoreCase(ATTR_TITLE)) yield ATTR_TITLE;
+                if (stripped.equalsIgnoreCase(ATTR_EXTERNAL_ID)) yield ATTR_EXTERNAL_ID;
+                if (stripped.equalsIgnoreCase("meta.created")) yield ATTR_CREATED_AT;
+                if (stripped.equalsIgnoreCase("meta.lastModified")) yield ATTR_LAST_MODIFIED;
+                if (stripped.equalsIgnoreCase(ATTR_ID)) yield ATTR_ID;
+                if (stripped.equalsIgnoreCase("meta.resourceType")) yield ATTR_USER_NAME;
+                yield ATTR_USER_NAME;
+            }
         };
     }
 
     public static String resolveGroupSortAttribute(String sortBy) {
         if (sortBy == null) return ATTR_DISPLAY_NAME;
-        return switch (sortBy) {
+        String stripped = stripCoreUrnPrefix(sortBy, false);
+        return switch (stripped) {
             case ATTR_DISPLAY_NAME -> ATTR_DISPLAY_NAME;
             case ATTR_EXTERNAL_ID -> ATTR_EXTERNAL_ID;
             case "meta.created" -> ATTR_CREATED_AT;
             case "meta.lastModified" -> ATTR_LAST_MODIFIED;
             case ATTR_ID -> ATTR_ID;
-            default -> ATTR_DISPLAY_NAME;
+            default -> {
+                if (stripped.equalsIgnoreCase(ATTR_DISPLAY_NAME)) yield ATTR_DISPLAY_NAME;
+                if (stripped.equalsIgnoreCase(ATTR_EXTERNAL_ID)) yield ATTR_EXTERNAL_ID;
+                if (stripped.equalsIgnoreCase("meta.created")) yield ATTR_CREATED_AT;
+                if (stripped.equalsIgnoreCase("meta.lastModified")) yield ATTR_LAST_MODIFIED;
+                if (stripped.equalsIgnoreCase(ATTR_ID)) yield ATTR_ID;
+                if (stripped.equalsIgnoreCase("meta.resourceType")) yield ATTR_DISPLAY_NAME;
+                yield ATTR_DISPLAY_NAME;
+            }
         };
     }
 }

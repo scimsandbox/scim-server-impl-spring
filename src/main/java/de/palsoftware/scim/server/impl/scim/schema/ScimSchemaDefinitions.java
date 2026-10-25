@@ -86,7 +86,7 @@ public class ScimSchemaDefinitions {
                                 "defaultPaginationMode", PAGINATION_INDEX,
                                 "defaultPageSize", 10,
                                 "maxPageSize", 200));
-                config.put("changePassword", Map.of(ATTR_SUPPORTED, false));
+                config.put("changePassword", Map.of(ATTR_SUPPORTED, true));
                 config.put("sort", Map.of(ATTR_SUPPORTED, true));
                 config.put("etag", Map.of(ATTR_SUPPORTED, true));
                 config.put("authenticationSchemes", List.of(Map.of(

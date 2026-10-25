@@ -20,8 +20,9 @@ class ScimSchemaDefinitionsTest {
         assertTrue(config.containsKey("pagination"));
         Map<?, ?> pagination = (Map<?, ?>) config.get("pagination");
         assertFalse((Boolean) pagination.get("cursor"));
-        assertTrue((Boolean) pagination.get("index"));
         assertTrue(config.containsKey("changePassword"));
+        Map<?, ?> changePassword = (Map<?, ?>) config.get("changePassword");
+        assertEquals(true, changePassword.get("supported"));
         assertTrue(config.containsKey("sort"));
         assertTrue(config.containsKey("etag"));
         assertTrue(config.containsKey("authenticationSchemes"));

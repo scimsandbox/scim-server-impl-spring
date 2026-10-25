@@ -386,7 +386,7 @@ public class ScimPatchEngine {
             case "locale" -> user.setLocale(toString(value));
             case "timezone" -> user.setTimezone(toString(value));
             case "active" -> user.setActive(toBoolean(value));
-            case "password" -> user.setPassword(toString(value));
+            case "password" -> user.setPassword(ScimUserMapper.hashPassword(toString(value)));
             default -> throw new ScimException(400, "noTarget", "Unknown attribute: " + attr);
         }
     }

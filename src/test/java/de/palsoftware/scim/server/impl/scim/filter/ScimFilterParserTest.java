@@ -175,6 +175,24 @@ class ScimFilterParserTest {
         assertEquals("lastModified", ScimFilterParser.resolveUserSortAttribute("meta.lastModified"));
         assertEquals("id", ScimFilterParser.resolveUserSortAttribute("id"));
 
+        // Emails sorting resolution (RFC 7644 §3.4.2.3 R5)
+        assertEquals("emails", ScimFilterParser.resolveUserSortAttribute("emails"));
+        assertEquals("emails", ScimFilterParser.resolveUserSortAttribute("emails.value"));
+        assertEquals("emails", ScimFilterParser.resolveUserSortAttribute("Emails"));
+        assertEquals("emails", ScimFilterParser.resolveUserSortAttribute("EMAILS.VALUE"));
+        assertEquals("emails", ScimFilterParser.resolveUserSortAttribute("urn:ietf:params:scim:schemas:core:2.0:User:emails"));
+        assertEquals("emails", ScimFilterParser.resolveUserSortAttribute("urn:ietf:params:scim:schemas:core:2.0:User:emails.value"));
+
+        // Core URN prefix stripping
+        assertEquals("title", ScimFilterParser.resolveUserSortAttribute("urn:ietf:params:scim:schemas:core:2.0:User:title"));
+        assertEquals("displayName", ScimFilterParser.resolveGroupSortAttribute("urn:ietf:params:scim:schemas:core:2.0:Group:displayName"));
+
+        // Unsupported multi-valued sorting throws 400 invalidValue
+        assertThrows(ScimException.class, () -> ScimFilterParser.resolveUserSortAttribute("roles"));
+        assertThrows(ScimException.class, () -> ScimFilterParser.resolveUserSortAttribute("addresses"));
+        assertThrows(ScimException.class, () -> ScimFilterParser.resolveUserSortAttribute("phoneNumbers"));
+        assertThrows(ScimException.class, () -> ScimFilterParser.resolveUserSortAttribute("emails.type"));
+
         assertEquals("displayName", ScimFilterParser.resolveGroupSortAttribute(null));
         assertEquals("displayName", ScimFilterParser.resolveGroupSortAttribute("displayName"));
         assertEquals("externalId", ScimFilterParser.resolveGroupSortAttribute("externalId"));
@@ -475,5 +493,41 @@ class ScimFilterParserTest {
         ScimException exNe = assertThrows(ScimException.class, () -> neInvalid.toPredicate(root, query, cb));
         assertEquals(400, exNe.getHttpStatus());
         assertEquals("invalidFilter", exNe.getScimType());
+    }
+
+    @Test
+    void testMetaResourceTypeFilter() {
+        Predicate mockTrue = Mockito.mock(Predicate.class);
+        Predicate mockFalse = Mockito.mock(Predicate.class);
+        when(cb.conjunction()).thenReturn(mockTrue);
+        when(cb.disjunction()).thenReturn(mockFalse);
+
+        // User filter
+        Specification<ScimUser> userEqUser = ScimFilterParser.parseUserFilter("meta.resourceType eq \"User\"", workspaceId);
+        assertNotNull(userEqUser);
+        userEqUser.toPredicate(root, query, cb);
+
+        Specification<ScimUser> userEqGroup = ScimFilterParser.parseUserFilter("meta.resourceType eq \"Group\"", workspaceId);
+        assertNotNull(userEqGroup);
+        userEqGroup.toPredicate(root, query, cb);
+
+        Specification<ScimUser> userPr = ScimFilterParser.parseUserFilter("meta.resourceType pr", workspaceId);
+        assertNotNull(userPr);
+        userPr.toPredicate(root, query, cb);
+
+        // Group filter
+        Root<ScimGroup> groupRoot = Mockito.mock(Root.class);
+        Path groupWsPath = Mockito.mock(Path.class);
+        Path groupWsIdPath = Mockito.mock(Path.class);
+        when(groupRoot.get("workspace")).thenReturn(groupWsPath);
+        when(groupWsPath.get("id")).thenReturn(groupWsIdPath);
+
+        Specification<ScimGroup> groupEqGroup = ScimFilterParser.parseGroupFilter("meta.resourceType eq \"Group\"", workspaceId);
+        assertNotNull(groupEqGroup);
+        groupEqGroup.toPredicate(groupRoot, query, cb);
+
+        Specification<ScimGroup> groupEqUser = ScimFilterParser.parseGroupFilter("meta.resourceType eq \"User\"", workspaceId);
+        assertNotNull(groupEqUser);
+        groupEqUser.toPredicate(groupRoot, query, cb);
     }
 }

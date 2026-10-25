@@ -10,6 +10,7 @@ import de.palsoftware.scim.server.impl.model.ScimUserPhoneNumber;
 import de.palsoftware.scim.server.impl.model.ScimUserPhoto;
 import de.palsoftware.scim.server.impl.model.ScimUserRole;
 import de.palsoftware.scim.server.impl.model.ScimUserX509Certificate;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.util.*;
 
@@ -18,6 +19,8 @@ import java.util.*;
  * All SCIM responses are built as Map<String,Object> for maximum flexibility.
  */
 public class ScimUserMapper {
+
+    private static final BCryptPasswordEncoder PASSWORD_ENCODER = new BCryptPasswordEncoder();
 
     private ScimUserMapper() {
     }
@@ -267,7 +270,20 @@ public class ScimUserMapper {
         if (input.containsKey(KEY_LOCALE)) user.setLocale((String) input.get(KEY_LOCALE));
         if (input.containsKey(KEY_TIMEZONE)) user.setTimezone((String) input.get(KEY_TIMEZONE));
         if (input.containsKey(KEY_ACTIVE)) user.setActive(toBoolean(input.get(KEY_ACTIVE)));
-        if (input.containsKey("password")) user.setPassword((String) input.get("password"));
+        if (input.containsKey("password")) {
+            Object pwObj = input.get("password");
+            user.setPassword(hashPassword(pwObj != null ? pwObj.toString() : null));
+        }
+    }
+
+    public static String hashPassword(String password) {
+        if (password == null || password.isEmpty()) {
+            return password;
+        }
+        if (password.startsWith("$2a$") || password.startsWith("$2b$") || password.startsWith("$2y$")) {
+            return password;
+        }
+        return PASSWORD_ENCODER.encode(password);
     }
 
     @SuppressWarnings("unchecked")
