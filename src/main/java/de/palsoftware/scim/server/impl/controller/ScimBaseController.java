@@ -1,7 +1,10 @@
 package de.palsoftware.scim.server.impl.controller;
 
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -155,5 +158,14 @@ abstract class ScimBaseController {
             return str.isBlank() ? null : str.trim();
         }
         return value.toString().trim();
+    }
+
+    protected static <T> ResponseEntity<T> buildAsyncAcceptedResponse(String baseUrl, UUID txnId) {
+        String location = baseUrl + "/Events/" + txnId;
+        return ResponseEntity.status(HttpStatus.ACCEPTED)
+                .header(ScimPreferHeaderUtil.SET_TXN_HEADER, txnId.toString())
+                .header(ScimPreferHeaderUtil.PREFERENCE_APPLIED_HEADER, ScimPreferHeaderUtil.RESPOND_ASYNC_TOKEN)
+                .header("Location", location)
+                .build();
     }
 }

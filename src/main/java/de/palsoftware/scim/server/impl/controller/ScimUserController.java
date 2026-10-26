@@ -8,6 +8,10 @@ import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
 import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
 import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
+import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
+import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.lang.Nullable;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -28,9 +32,17 @@ public class ScimUserController extends ScimBaseController {
     private static final String RESOURCE_USER = "User";
 
     private final ScimUserService userService;
+    private final ScimAsyncEventService asyncEventService;
 
     public ScimUserController(ScimUserService userService) {
+        this(userService, null);
+    }
+
+    @Autowired
+    public ScimUserController(ScimUserService userService,
+                              @Nullable ScimAsyncEventService asyncEventService) {
         this.userService = userService;
+        this.asyncEventService = asyncEventService;
     }
 
     /**
@@ -46,6 +58,17 @@ public class ScimUserController extends ScimBaseController {
         UUID wsId = resolveWorkspaceId(workspaceId);
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
+
+        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "create", "User", null, compatBaseUrl, () -> {
+                ScimUser user = userService.createUser(wsId, body);
+                List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+                CompatMode compatMode = CompatMode.fromString(compat);
+                Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
+                return applyCompat(scimResponse, compatMode);
+            });
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+        }
 
         ScimUser user = userService.createUser(wsId, body);
         List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
@@ -220,6 +243,18 @@ public class ScimUserController extends ScimBaseController {
         
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
+
+        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "put", "User", uid, compatBaseUrl, () -> {
+                ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
+                List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+                CompatMode compatMode = CompatMode.fromString(compat);
+                Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
+                return applyCompat(scimResponse, compatMode);
+            });
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+        }
+
         ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
         List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
         CompatMode compatMode = CompatMode.fromString(compat);
@@ -262,6 +297,17 @@ public class ScimUserController extends ScimBaseController {
         List<Map<String, Object>> operations = (List<Map<String, Object>>) body.get("Operations");
         if (operations == null || operations.isEmpty()) {
             throw new ScimException(400, "invalidValue", "PATCH Operations is required");
+        }
+
+        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "patch", "User", uid, compatBaseUrl, () -> {
+                ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
+                List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+                CompatMode compatMode = CompatMode.fromString(compat);
+                Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
+                return applyCompat(scimResponse, compatMode);
+            });
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
         }
 
         ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
@@ -341,13 +387,31 @@ public class ScimUserController extends ScimBaseController {
     public ResponseEntity<Void> deleteUser(
             @PathVariable String workspaceId,
             @PathVariable String userId,
-            @PathVariable(name = "compat", required = false) String compat) {
+            @PathVariable(name = "compat", required = false) String compat,
+            HttpServletRequest request) {
 
         UUID wsId = resolveWorkspaceId(workspaceId);
         UUID uid = parseUUID(userId, "User");
+        String compatBaseUrl = request != null ? buildBaseUrl(request, workspaceId, compat) : "";
+
+        if (asyncEventService != null && request != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "delete", "User", uid, compatBaseUrl, () -> {
+                userService.deleteUser(wsId, uid);
+                return Collections.emptyMap();
+            });
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+        }
+
         userService.deleteUser(wsId, uid);
 
         return ResponseEntity.noContent().build();
+    }
+
+    public ResponseEntity<Void> deleteUser(
+            String workspaceId,
+            String userId,
+            String compat) {
+        return deleteUser(workspaceId, userId, compat, null);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

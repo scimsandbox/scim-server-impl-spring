@@ -90,6 +90,9 @@ public class ScimSchemaDefinitions {
                 config.put("changePassword", Map.of(ATTR_SUPPORTED, true));
                 config.put("sort", Map.of(ATTR_SUPPORTED, true));
                 config.put("etag", Map.of(ATTR_SUPPORTED, true));
+                config.put("securityEvents", Map.of(
+                                ATTR_SUPPORTED, true,
+                                "asyncRequest", "request"));
                 config.put("authenticationSchemes", List.of(Map.of(
                                 "type", "oauthbearertoken",
                                 ATTR_NAME, "OAuth Bearer Token",
@@ -484,6 +487,19 @@ public class ScimSchemaDefinitions {
                                 specUri,
                                 docUri));
                 attrs.add(authSchemes);
+
+                Map<String, Object> securityEvents = attr("securityEvents", TYPE_COMPLEX, true, MUT_READ_ONLY,
+                                UNIQ_NONE,
+                                "Security Event Tokens and asynchronous operations configuration", false);
+                Map<String, Object> asyncRequest = attr("asyncRequest", TYPE_STRING, true, MUT_READ_ONLY, UNIQ_NONE,
+                                "Whether async request is supported: request, long, or none", false);
+                asyncRequest.put(KEY_CANONICAL_VALUES, List.of("request", "long", "none"));
+
+                securityEvents.put(KEY_SUB_ATTRIBUTES, List.of(
+                                attr(ATTR_SUPPORTED, TYPE_BOOLEAN, true, MUT_READ_ONLY, UNIQ_NONE,
+                                                "Whether security events and asynchronous operations are supported", false),
+                                asyncRequest));
+                attrs.add(securityEvents);
 
                 schema.put(KEY_ATTRIBUTES, attrs);
                 Map<String, Object> meta = new LinkedHashMap<>();

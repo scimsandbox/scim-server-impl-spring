@@ -7,6 +7,9 @@ import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
+import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 
@@ -429,5 +432,85 @@ class ScimGroupControllerTest {
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidValue", ex.getScimType());
         assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testCreateGroup_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("create"), eq("Group"), isNull(), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+        Map<String, Object> body = Map.of(DISPLAY_NAME, "Async Group");
+
+        ResponseEntity<Map<String, Object>> response = asyncController.createGroup(
+                workspaceId.toString(), body, null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertEquals(ScimPreferHeaderUtil.RESPOND_ASYNC_TOKEN, response.getHeaders().getFirst(ScimPreferHeaderUtil.PREFERENCE_APPLIED_HEADER));
+        assertEquals("http://localhost:8080/ws/" + workspaceId + "/scim/v2/Events/" + txnId, response.getHeaders().getFirst("Location"));
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void testReplaceGroup_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("put"), eq("Group"), eq(groupId), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+        Map<String, Object> body = Map.of(DISPLAY_NAME, "Async Group");
+
+        ResponseEntity<Map<String, Object>> response = asyncController.replaceGroup(
+                workspaceId.toString(), groupId.toString(), body, null, null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void testPatchGroup_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("patch"), eq("Group"), eq(groupId), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:PatchOp"),
+                "Operations", List.of(Map.of("op", "replace", "path", "displayName", "value", "New Group Name"))
+        );
+
+        ResponseEntity<Map<String, Object>> response = asyncController.patchGroup(
+                workspaceId.toString(), groupId.toString(), body, null, null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void testDeleteGroup_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("delete"), eq("Group"), eq(groupId), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+
+        ResponseEntity<Void> response = asyncController.deleteGroup(
+                workspaceId.toString(), groupId.toString(), null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertNull(response.getBody());
     }
 }

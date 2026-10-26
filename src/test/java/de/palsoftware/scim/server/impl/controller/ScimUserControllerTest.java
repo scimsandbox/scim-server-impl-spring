@@ -13,6 +13,10 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import java.time.Instant;
 import java.util.*;
 
+import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
+import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
+import org.springframework.http.HttpStatus;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
@@ -499,5 +503,86 @@ class ScimUserControllerTest {
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidValue", ex.getScimType());
         assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testCreateUser_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimUserController asyncController = new ScimUserController(userService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("create"), eq("User"), isNull(), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+        Map<String, Object> body = Map.of("userName", "async.user");
+
+        ResponseEntity<Map<String, Object>> response = asyncController.createUser(
+                workspaceId.toString(), body, null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertEquals(ScimPreferHeaderUtil.RESPOND_ASYNC_TOKEN, response.getHeaders().getFirst(ScimPreferHeaderUtil.PREFERENCE_APPLIED_HEADER));
+        assertEquals("http://localhost:8080/ws/" + workspaceId + "/scim/v2/Events/" + txnId, response.getHeaders().getFirst("Location"));
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void testReplaceUser_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimUserController asyncController = new ScimUserController(userService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("put"), eq("User"), eq(userId), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+        Map<String, Object> body = Map.of("userName", "async.user");
+
+        ResponseEntity<Map<String, Object>> response = asyncController.replaceUser(
+                workspaceId.toString(), userId.toString(), body, null, null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertEquals(ScimPreferHeaderUtil.RESPOND_ASYNC_TOKEN, response.getHeaders().getFirst(ScimPreferHeaderUtil.PREFERENCE_APPLIED_HEADER));
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void testPatchUser_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimUserController asyncController = new ScimUserController(userService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("patch"), eq("User"), eq(userId), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:PatchOp"),
+                "Operations", List.of(Map.of("op", "replace", "path", "displayName", "value", "New Display"))
+        );
+
+        ResponseEntity<Map<String, Object>> response = asyncController.patchUser(
+                workspaceId.toString(), userId.toString(), body, null, null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void testDeleteUser_RespondAsync() {
+        ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimUserController asyncController = new ScimUserController(userService, asyncService);
+        UUID txnId = UUID.randomUUID();
+        when(asyncService.submitAsync(eq(workspaceId), eq("delete"), eq("User"), eq(userId), anyString(), any()))
+                .thenReturn(txnId);
+
+        request.addHeader("Prefer", "respond-async");
+
+        ResponseEntity<Void> response = asyncController.deleteUser(
+                workspaceId.toString(), userId.toString(), null, request);
+
+        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
+        assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
+        assertNull(response.getBody());
     }
 }

@@ -5,7 +5,11 @@ import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimGroupMapper;
 import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
 import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
+import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
+import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.lang.Nullable;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -25,9 +29,17 @@ public class ScimGroupController extends ScimBaseController {
     private static final String RESOURCE_GROUP = "Group";
 
     private final ScimGroupService groupService;
+    private final ScimAsyncEventService asyncEventService;
 
     public ScimGroupController(ScimGroupService groupService) {
+        this(groupService, null);
+    }
+
+    @Autowired
+    public ScimGroupController(ScimGroupService groupService,
+                               @Nullable ScimAsyncEventService asyncEventService) {
         this.groupService = groupService;
+        this.asyncEventService = asyncEventService;
     }
 
     @PostMapping
@@ -39,6 +51,14 @@ public class ScimGroupController extends ScimBaseController {
 
         UUID wsId = resolveWorkspaceId(workspaceId);
         String baseUrl = buildBaseUrl(request, workspaceId, compat);
+
+        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "create", "Group", null, baseUrl, () -> {
+                ScimGroup group = groupService.createGroup(wsId, body);
+                return ScimGroupMapper.toScimResponse(group, baseUrl);
+            });
+            return buildAsyncAcceptedResponse(baseUrl, txnId);
+        }
 
         ScimGroup group = groupService.createGroup(wsId, body);
         Map<String, Object> scimResponse = ScimGroupMapper.toScimResponse(group, baseUrl);
@@ -187,6 +207,14 @@ public class ScimGroupController extends ScimBaseController {
         
         String baseUrl = buildBaseUrl(request, workspaceId, compat);
 
+        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "put", "Group", gid, baseUrl, () -> {
+                ScimGroup group = groupService.replaceGroup(wsId, gid, body, ifMatch);
+                return ScimGroupMapper.toScimResponse(group, baseUrl);
+            });
+            return buildAsyncAcceptedResponse(baseUrl, txnId);
+        }
+
         ScimGroup group = groupService.replaceGroup(wsId, gid, body, ifMatch);
         Map<String, Object> scimResponse = ScimGroupMapper.toScimResponse(group, baseUrl);
 
@@ -221,6 +249,14 @@ public class ScimGroupController extends ScimBaseController {
         List<Map<String, Object>> operations = (List<Map<String, Object>>) body.get("Operations");
         if (operations == null || operations.isEmpty()) {
             throw new ScimException(400, "invalidValue", "PATCH Operations is required");
+        }
+
+        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "patch", "Group", gid, baseUrl, () -> {
+                ScimGroup group = groupService.patchGroup(wsId, gid, operations, ifMatch);
+                return ScimGroupMapper.toScimResponse(group, baseUrl);
+            });
+            return buildAsyncAcceptedResponse(baseUrl, txnId);
         }
 
         ScimGroup group = groupService.patchGroup(wsId, gid, operations, ifMatch);
@@ -294,13 +330,31 @@ public class ScimGroupController extends ScimBaseController {
     public ResponseEntity<Void> deleteGroup(
             @PathVariable String workspaceId,
             @PathVariable String groupId,
-            @PathVariable(name = "compat", required = false) String compat) {
+            @PathVariable(name = "compat", required = false) String compat,
+            HttpServletRequest request) {
 
         UUID wsId = resolveWorkspaceId(workspaceId);
         UUID gid = parseUUID(groupId, RESOURCE_GROUP);
+        String baseUrl = request != null ? buildBaseUrl(request, workspaceId, compat) : "";
+
+        if (asyncEventService != null && request != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "delete", "Group", gid, baseUrl, () -> {
+                groupService.deleteGroup(wsId, gid);
+                return Collections.emptyMap();
+            });
+            return buildAsyncAcceptedResponse(baseUrl, txnId);
+        }
+
         groupService.deleteGroup(wsId, gid);
 
         return ResponseEntity.noContent().build();
+    }
+
+    public ResponseEntity<Void> deleteGroup(
+            String workspaceId,
+            String groupId,
+            String compat) {
+        return deleteGroup(workspaceId, groupId, compat, null);
     }
 
     private static String buildResourceUrl(String baseUrl, UUID groupId) {

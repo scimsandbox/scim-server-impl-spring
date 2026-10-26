@@ -27,6 +27,10 @@ class ScimSchemaDefinitionsTest {
         assertEquals(true, changePassword.get("supported"));
         assertTrue(config.containsKey("sort"));
         assertTrue(config.containsKey("etag"));
+        assertTrue(config.containsKey("securityEvents"));
+        Map<?, ?> securityEvents = (Map<?, ?>) config.get("securityEvents");
+        assertEquals(true, securityEvents.get("supported"));
+        assertEquals("request", securityEvents.get("asyncRequest"));
         assertTrue(config.containsKey("authenticationSchemes"));
     }
 
@@ -52,6 +56,21 @@ class ScimSchemaDefinitionsTest {
                 .orElse(null);
         assertNotNull(modeAttr);
         assertEquals(List.of("cursor", "index"), modeAttr.get("canonicalValues"));
+
+        Map<String, Object> securityEventsAttr = attrs.stream()
+                .filter(a -> "securityEvents".equals(a.get("name")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(securityEventsAttr);
+        List<Map<String, Object>> secSubAttrs = (List<Map<String, Object>>) securityEventsAttr.get("subAttributes");
+        assertNotNull(secSubAttrs);
+        assertTrue(secSubAttrs.stream().anyMatch(sa -> "supported".equals(sa.get("name"))));
+        Map<String, Object> asyncReqAttr = secSubAttrs.stream()
+                .filter(sa -> "asyncRequest".equals(sa.get("name")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(asyncReqAttr);
+        assertEquals(List.of("request", "long", "none"), asyncReqAttr.get("canonicalValues"));
     }
 
     @Test
