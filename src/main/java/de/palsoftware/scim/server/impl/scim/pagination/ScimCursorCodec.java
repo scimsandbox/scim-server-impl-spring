@@ -24,8 +24,8 @@ public final class ScimCursorCodec {
 
     public record CursorPayload(
             @JsonProperty("w") String w,
-            @JsonProperty("o") int o,
-            @JsonProperty("exp") long exp
+            @JsonProperty("o") Integer o,
+            @JsonProperty("exp") Long exp
     ) {}
 
     private ScimCursorCodec() {
@@ -140,9 +140,17 @@ public final class ScimCursorCodec {
                     "Cursor workspace mismatch: expected " + workspaceId + " but got " + tokenWorkspaceId);
         }
 
+        if (payload.o() == null) {
+            throw new ScimException(400, "invalidCursor", "Cursor missing offset parameter");
+        }
+
         if (payload.o() < 0) {
             throw new ScimException(400, "invalidCursor",
                     "Cursor offset cannot be negative: " + payload.o());
+        }
+
+        if (payload.exp() == null) {
+            throw new ScimException(400, "invalidCursor", "Cursor missing expiration timestamp");
         }
 
         long now = Instant.now().getEpochSecond();

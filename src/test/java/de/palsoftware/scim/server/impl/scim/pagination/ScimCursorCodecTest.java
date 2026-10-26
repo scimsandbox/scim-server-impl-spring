@@ -127,4 +127,42 @@ class ScimCursorCodecTest {
         assertThrows(IllegalArgumentException.class, () -> ScimCursorCodec.encodeCursor(workspaceId, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> ScimCursorCodec.encodeCursor(workspaceId, 0, -10));
     }
+
+    @Test
+    void testDecodeMissingOffsetThrowsInvalidCursor() {
+        long futureExp = Instant.now().getEpochSecond() + 3600;
+        String rawJson = String.format("{\"w\":\"%s\",\"exp\":%d}", workspaceId, futureExp);
+        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidCursor", ex.getScimType());
+        assertTrue(ex.getMessage().contains("offset"));
+    }
+
+    @Test
+    void testDecodeMissingExpirationThrowsInvalidCursor() {
+        String rawJson = String.format("{\"w\":\"%s\",\"o\":10}", workspaceId);
+        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidCursor", ex.getScimType());
+        assertTrue(ex.getMessage().contains("expiration"));
+    }
+
+    @Test
+    void testDecodeMissingWorkspaceThrowsInvalidCursor() {
+        long futureExp = Instant.now().getEpochSecond() + 3600;
+        String rawJson = String.format("{\"o\":10,\"exp\":%d}", futureExp);
+        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidCursor", ex.getScimType());
+        assertTrue(ex.getMessage().contains("workspace"));
+    }
 }
