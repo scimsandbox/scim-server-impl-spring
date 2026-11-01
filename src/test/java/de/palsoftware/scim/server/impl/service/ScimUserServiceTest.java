@@ -353,6 +353,19 @@ class ScimUserServiceTest {
     }
 
     @Test
+    void replaceUser_wildcardIfMatch_success() {
+        when(userRepository.findByIdAndWorkspaceId(userId, workspaceId)).thenReturn(Optional.of(user));
+        when(userRepository.save(any(ScimUser.class))).thenReturn(user);
+        Map<String, Object> input = Map.of("userName", "testuser", "displayName", "Replaced Wildcard");
+
+        ScimUser result = service.replaceUser(workspaceId, userId, input, "*");
+
+        assertThat(result).isNotNull();
+        verify(userRepository).save(user);
+        assertThat(user.getDisplayName()).isEqualTo("Replaced Wildcard");
+    }
+
+    @Test
     void patchUser_eTagMismatch_throwsError() {
         when(userRepository.findByIdAndWorkspaceId(userId, workspaceId)).thenReturn(Optional.of(user));
         
@@ -360,6 +373,20 @@ class ScimUserServiceTest {
         
         assertThat(error).isNotNull();
         assertThat(error.getHttpStatus()).isEqualTo(412);
+    }
+
+    @Test
+    void patchUser_wildcardIfMatch_success() {
+        when(userRepository.findByIdAndWorkspaceId(userId, workspaceId)).thenReturn(Optional.of(user));
+        when(userRepository.save(any(ScimUser.class))).thenReturn(user);
+
+        List<Map<String, Object>> ops = List.of(Map.of("op", "replace", "path", "displayName", "value", "Patched Wildcard"));
+
+        ScimUser result = service.patchUser(workspaceId, userId, ops, "*");
+
+        assertThat(result).isNotNull();
+        verify(userRepository).save(user);
+        assertThat(user.getDisplayName()).isEqualTo("Patched Wildcard");
     }
 
     @Test
@@ -435,5 +462,29 @@ class ScimUserServiceTest {
             .containsEntry("value", groupId.toString())
             .containsEntry("display", "Batch Group")
             .containsEntry("$ref", "http://loc/Groups/" + groupId);
+    }
+
+    @Test
+    void createUser_deduplicatesEmailsAndMergesPrimaryFlag() {
+        when(workspaceRepository.findById(workspaceId)).thenReturn(Optional.of(workspace));
+        when(userRepository.save(any(ScimUser.class))).thenAnswer(i -> {
+            ScimUser u = i.getArgument(0);
+            u.setId(userId);
+            return u;
+        });
+
+        Map<String, Object> input = Map.of(
+            "userName", "dedupuser",
+            "emails", List.of(
+                Map.of("value", "dup@example.com", "type", "work", "primary", false),
+                Map.of("value", "DUP@EXAMPLE.COM", "type", "WORK", "primary", true)
+            )
+        );
+
+        ScimUser result = service.createUser(workspaceId, input);
+
+        assertThat(result.getEmails()).hasSize(1);
+        assertThat(result.getEmails().get(0).getValue()).isEqualTo("dup@example.com");
+        assertThat(result.getEmails().get(0).isPrimaryFlag()).isTrue();
     }
 }

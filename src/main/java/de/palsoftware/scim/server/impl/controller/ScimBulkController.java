@@ -203,22 +203,22 @@ public class ScimBulkController extends ScimBaseController {
         Map<String, Object> result = new LinkedHashMap<>();
         BulkTarget target = parseBulkTarget(path, false);
 
+        if (bulkId == null || bulkId.isBlank()) {
+            throw new ScimException(400, "invalidValue", "bulkId is required for POST operations");
+        }
+
         switch (target.type()) {
             case USERS -> {
                 ScimUser user = userService.createUser(wsId, data);
                 result.put(KEY_STATUS, "201");
                 result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_USERS, user.getId()));
-                if (bulkId != null) {
-                    bulkIdMap.put(bulkId, user.getId().toString());
-                }
+                bulkIdMap.put(bulkId, user.getId().toString());
             }
             case GROUPS -> {
                 ScimGroup group = groupService.createGroup(wsId, data);
                 result.put(KEY_STATUS, "201");
                 result.put(KEY_LOCATION, buildResourceLocation(baseUrl, RESOURCE_GROUPS, group.getId()));
-                if (bulkId != null) {
-                    bulkIdMap.put(bulkId, group.getId().toString());
-                }
+                bulkIdMap.put(bulkId, group.getId().toString());
             }
         }
         return result;

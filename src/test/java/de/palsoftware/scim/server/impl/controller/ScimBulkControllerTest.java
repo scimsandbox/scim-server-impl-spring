@@ -481,4 +481,37 @@ class ScimBulkControllerTest {
         assertEquals("400", results.get(2).get("status"));
         assertEquals("invalidPath", ((Map<String, Object>) results.get(2).get("response")).get("scimType"));
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testProcessBulk_PostMissingBulkId_Returns400OperationError() {
+        // BLK_20: RFC 7644 §3.7 - The bulkId attribute is mandatory for 'POST' operations
+        Map<String, Object> opNoBulkId = Map.of(
+                "method", "POST",
+                "path", "/Users",
+                "data", Map.of("userName", "nobulkid@test.com")
+        );
+
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(opNoBulkId)
+        );
+
+        ResponseEntity<Map<String, Object>> response = controller.processBulk(workspaceId.toString(), body, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("Operations");
+        assertEquals(1, results.size());
+
+        Map<String, Object> opResult = results.get(0);
+        assertEquals("400", opResult.get("status"));
+        assertNull(opResult.get("bulkId"));
+
+        Map<String, Object> errorResp = (Map<String, Object>) opResult.get("response");
+        assertNotNull(errorResp);
+        assertEquals("400", errorResp.get("status"));
+        assertEquals("invalidValue", errorResp.get("scimType"));
+        List<String> schemas = (List<String>) errorResp.get("schemas");
+        assertTrue(schemas.contains("urn:ietf:params:scim:api:messages:2.0:Error"));
+    }
 }

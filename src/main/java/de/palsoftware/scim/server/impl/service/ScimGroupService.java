@@ -153,8 +153,8 @@ public class ScimGroupService {
     public ScimGroup replaceGroup(UUID workspaceId, UUID groupId, Map<String, Object> input, String ifMatch) {
         ScimGroup existing = getGroup(workspaceId, groupId);
 
-        // Validate If-Match ETag for optimistic concurrency control
-        if (ifMatch != null) {
+        // Validate If-Match ETag for optimistic concurrency control (RFC 7232 §3.1: * matches any current representation)
+        if (ifMatch != null && !isWildcardETag(ifMatch)) {
             String currentETag = "W/\"" + existing.getVersion() + "\"";
             if (!ifMatch.equals(currentETag)) {
                 throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
@@ -177,11 +177,38 @@ public class ScimGroupService {
         Object externalId = input.get(KEY_EXTERNAL_ID);
         existing.setExternalId(externalId != null ? externalId.toString() : null);
 
+        List<Map<String, Object>> members = (List<Map<String, Object>>) input.get(KEY_MEMBERS);
+
+        // GRP_21: RFC 7643 §4.2 - Group member sub-attributes 'value' and 'type' are immutable
+        Map<UUID, String> existingMemberTypes = new HashMap<>();
+        for (ScimGroupMembership m : existing.getMembers()) {
+            existingMemberTypes.put(m.getMemberValue(), m.getMemberType());
+        }
+        if (members != null) {
+            for (Map<String, Object> m : members) {
+                Object memberValObj = m.get(KEY_VALUE);
+                if (memberValObj != null) {
+                    try {
+                        UUID memberId = UUID.fromString(memberValObj.toString());
+                        String existingType = existingMemberTypes.get(memberId);
+                        if (existingType != null && m.get("type") != null) {
+                            String newType = m.get("type").toString();
+                            if (!existingType.equalsIgnoreCase(newType)) {
+                                throw new ScimException(400, "mutability",
+                                        "Group member type is immutable and cannot be changed for member: " + memberId);
+                            }
+                        }
+                    } catch (IllegalArgumentException ignored) {
+                        // Will be validated in addMember
+                    }
+                }
+            }
+        }
+
         // Replace members entirely
         existing.getMembers().clear();
         groupRepository.saveAndFlush(existing);
 
-        List<Map<String, Object>> members = (List<Map<String, Object>>) input.get(KEY_MEMBERS);
         if (members != null) {
             for (Map<String, Object> m : members) {
                 addMember(existing, workspaceId, m);
@@ -199,8 +226,8 @@ public class ScimGroupService {
         ScimGroup group = getGroup(workspaceId, groupId);
         String originalDisplayName = group.getDisplayName();
 
-        // Validate If-Match ETag for optimistic concurrency control
-        if (ifMatch != null) {
+        // Validate If-Match ETag for optimistic concurrency control (RFC 7232 §3.1: * matches any current representation)
+        if (ifMatch != null && !isWildcardETag(ifMatch)) {
             String currentETag = "W/\"" + group.getVersion() + "\"";
             if (!ifMatch.equals(currentETag)) {
                 throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
@@ -233,7 +260,12 @@ public class ScimGroupService {
         Object value = op.get(KEY_VALUE);
 
         switch (opType) {
-            case "add" -> applyAddOperation(group, workspaceId, path, value);
+            case "add" -> {
+                if (!op.containsKey(KEY_VALUE) || value == null) {
+                    throw new ScimException(400, "invalidValue", "PATCH 'add' operation must contain a 'value' member");
+                }
+                applyAddOperation(group, workspaceId, path, value);
+            }
             case "replace" -> applyReplaceOperation(group, workspaceId, path, value);
             case "remove" -> applyRemoveOperation(group, path, value);
             default -> throw new ScimException(400, "invalidValue", "Unsupported PATCH op: " + opType);
@@ -431,5 +463,10 @@ public class ScimGroupService {
             return matcher.group(1);
         }
         return null;
+    }
+
+    private boolean isWildcardETag(String etag) {
+        String trimmed = etag.trim();
+        return "*".equals(trimmed) || "\"*\"".equals(trimmed);
     }
 }

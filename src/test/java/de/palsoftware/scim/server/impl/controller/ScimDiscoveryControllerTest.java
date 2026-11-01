@@ -221,6 +221,27 @@ class ScimDiscoveryControllerTest {
     void rootMethodNotAllowedReturns405() {
         ResponseEntity<Map<String, Object>> response = controller.rootMethodNotAllowed(null);
         assertEquals(405, response.getStatusCode().value());
+        assertEquals("GET", response.getHeaders().getFirst("Allow"));
+    }
+
+    @Test
+    void discoveryEndpoints_MethodNotAllowed_EmitsAllowHeader() {
+        // DSC_11/12: RFC 7644 §4 / RFC 7231 §6.5.5 - 405 Method Not Allowed must emit Allow header
+        ResponseEntity<Map<String, Object>> spcResp = controller.serviceProviderConfigMethodNotAllowed(null);
+        assertEquals(405, spcResp.getStatusCode().value());
+        assertEquals("GET", spcResp.getHeaders().getFirst("Allow"));
+
+        ResponseEntity<Map<String, Object>> schemasResp = controller.schemasMethodNotAllowed(null, null);
+        assertEquals(405, schemasResp.getStatusCode().value());
+        assertEquals("GET", schemasResp.getHeaders().getFirst("Allow"));
+
+        ResponseEntity<Map<String, Object>> rtResp = controller.resourceTypesMethodNotAllowed(null, null);
+        assertEquals(405, rtResp.getStatusCode().value());
+        assertEquals("GET", rtResp.getHeaders().getFirst("Allow"));
+
+        ResponseEntity<Map<String, Object>> searchResp = controller.searchMethodNotAllowed(null);
+        assertEquals(405, searchResp.getStatusCode().value());
+        assertEquals("POST", searchResp.getHeaders().getFirst("Allow"));
     }
 
     @Test

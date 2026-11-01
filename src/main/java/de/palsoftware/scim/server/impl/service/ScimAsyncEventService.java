@@ -31,6 +31,7 @@ public class ScimAsyncEventService {
     private final ObjectMapper objectMapper;
     private final TaskExecutor taskExecutor;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ScimAsyncEventService(ScimAsyncEventRepository asyncEventRepository,
                                  WorkspaceRepository workspaceRepository,
                                  ObjectMapper objectMapper,

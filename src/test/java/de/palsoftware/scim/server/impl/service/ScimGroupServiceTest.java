@@ -269,4 +269,73 @@ class ScimGroupServiceTest {
         assertThat(order.isDescending()).isTrue();
         assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_FIRST);
     }
+
+    @Test
+    void replaceGroup_wildcardIfMatch_success() {
+        when(groupRepository.findByIdAndWorkspaceId(groupId, workspaceId)).thenReturn(Optional.of(group));
+        when(groupRepository.save(any(ScimGroup.class))).thenReturn(group);
+        Map<String, Object> input = Map.of("displayName", "WildcardGroup");
+
+        ScimGroup result = service.replaceGroup(workspaceId, groupId, input, "*");
+
+        assertThat(result).isNotNull();
+        assertThat(group.getDisplayName()).isEqualTo("WildcardGroup");
+    }
+
+    @Test
+    void patchGroup_wildcardIfMatch_success() {
+        when(groupRepository.findByIdAndWorkspaceId(groupId, workspaceId)).thenReturn(Optional.of(group));
+        when(groupRepository.save(any(ScimGroup.class))).thenReturn(group);
+
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "path", "displayName", "value", "WildcardPatched")
+        );
+
+        ScimGroup result = service.patchGroup(workspaceId, groupId, ops, "*");
+
+        assertThat(result).isNotNull();
+        assertThat(group.getDisplayName()).isEqualTo("WildcardPatched");
+    }
+
+    @Test
+    void replaceGroup_alterMemberType_throwsMutabilityError() {
+        // Setup group with existing User member
+        ScimGroupMembership membership = new ScimGroupMembership();
+        membership.setGroup(group);
+        membership.setMemberValue(user.getId());
+        membership.setMemberType("User");
+        group.getMembers().add(membership);
+
+        when(groupRepository.findByIdAndWorkspaceId(groupId, workspaceId)).thenReturn(Optional.of(group));
+
+        Map<String, Object> input = Map.of(
+            "displayName", group.getDisplayName(),
+            "members", List.of(
+                Map.of("value", user.getId().toString(), "type", "Group")
+            )
+        );
+
+        ScimException error = catchThrowableOfType(ScimException.class,
+                () -> service.replaceGroup(workspaceId, groupId, input, null));
+
+        assertThat(error).isNotNull();
+        assertThat(error.getHttpStatus()).isEqualTo(400);
+        assertThat(error.getScimType()).isEqualTo("mutability");
+    }
+
+    @Test
+    void patchGroup_addWithoutValue_throws400() {
+        when(groupRepository.findByIdAndWorkspaceId(groupId, workspaceId)).thenReturn(Optional.of(group));
+
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "add", "path", "displayName")
+        );
+
+        ScimException error = catchThrowableOfType(ScimException.class,
+                () -> service.patchGroup(workspaceId, groupId, ops, null));
+
+        assertThat(error).isNotNull();
+        assertThat(error.getHttpStatus()).isEqualTo(400);
+        assertThat(error.getScimType()).isEqualTo("invalidValue");
+    }
 }

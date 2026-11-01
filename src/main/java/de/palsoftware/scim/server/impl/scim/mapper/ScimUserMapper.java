@@ -37,6 +37,23 @@ public class ScimUserMapper {
     private static final Set<String> IM_TYPES = Set.of("aim", "gtalk", "icq", "xmpp", "skype", "qq", "msn", "yahoo");
     private static final Set<String> PHOTO_TYPES = Set.of("photo", "thumbnail");
     private static final Set<String> ADDRESS_TYPES = Set.of("work", "home", VALUE_OTHER);
+    private static final Set<String> ISO_ALPHA2_COUNTRIES = Set.of(Locale.getISOCountries());
+    private static final Map<String, String> ISO_ALPHA3_TO_ALPHA2;
+
+    static {
+        Map<String, String> map = new HashMap<>();
+        for (String alpha2 : ISO_ALPHA2_COUNTRIES) {
+            try {
+                String alpha3 = Locale.of("", alpha2).getISO3Country();
+                if (alpha3 != null && !alpha3.isEmpty()) {
+                    map.put(alpha3.toUpperCase(Locale.ROOT), alpha2);
+                }
+            } catch (MissingResourceException ignored) {
+                // Skip countries without an ISO alpha-3 equivalent
+            }
+        }
+        ISO_ALPHA3_TO_ALPHA2 = Collections.unmodifiableMap(map);
+    }
 
     // Common SCIM attribute keys
     private static final String KEY_SCHEMAS = "schemas";
@@ -149,9 +166,12 @@ public class ScimUserMapper {
         Map<String, Object> meta = new LinkedHashMap<>(6);
         meta.put("resourceType", "User");
         meta.put("created", user.getCreatedAt().toString());
-        meta.put("lastModified", user.getLastModified().toString());
+        String lastModified = (user.getVersion() == null || user.getVersion() == 0)
+                ? user.getCreatedAt().toString()
+                : user.getLastModified().toString();
+        meta.put("lastModified", lastModified);
         meta.put("location", baseUrl + "/Users/" + user.getId());
-        meta.put("version", "W/\"" + user.getVersion() + "\"");
+        meta.put("version", "W/\"" + (user.getVersion() != null ? user.getVersion() : 0) + "\"");
         result.put("meta", meta);
     }
 
@@ -311,8 +331,143 @@ public class ScimUserMapper {
         if (items == null) {
             return;
         }
+        addAndNormalizeItems(items, target, mapper, KEY_EMAILS.equals(key));
+    }
+
+    public static <T> void addAndNormalizeItems(List<Map<String, Object>> items, List<T> target,
+                                                java.util.function.Function<Map<String, Object>, T> mapper,
+                                                boolean caseInsensitive) {
         for (Map<String, Object> item : items) {
-            target.add(mapper.apply(item));
+            T newItem = mapper.apply(item);
+            T existingDuplicate = findDuplicateItem(target, newItem, caseInsensitive);
+            boolean newIsPrimary = isPrimaryItem(newItem);
+            if (existingDuplicate != null) {
+                if (newIsPrimary) {
+                    for (T other : target) {
+                        setPrimaryItem(other, false);
+                    }
+                    setPrimaryItem(existingDuplicate, true);
+                }
+            } else {
+                if (newIsPrimary) {
+                    for (T other : target) {
+                        setPrimaryItem(other, false);
+                    }
+                }
+                target.add(newItem);
+            }
+        }
+    }
+
+    public static <T> void deduplicateAndNormalizeCollection(List<T> collection, boolean caseInsensitive) {
+        if (collection == null || collection.size() <= 1) {
+            return;
+        }
+        List<T> normalized = new ArrayList<>(collection.size());
+        for (T item : collection) {
+            T existingDuplicate = findDuplicateItem(normalized, item, caseInsensitive);
+            boolean itemIsPrimary = isPrimaryItem(item);
+            if (existingDuplicate != null) {
+                if (itemIsPrimary) {
+                    for (T other : normalized) {
+                        setPrimaryItem(other, false);
+                    }
+                    setPrimaryItem(existingDuplicate, true);
+                }
+            } else {
+                if (itemIsPrimary) {
+                    for (T other : normalized) {
+                        setPrimaryItem(other, false);
+                    }
+                }
+                normalized.add(item);
+            }
+        }
+        collection.clear();
+        collection.addAll(normalized);
+    }
+
+    private static <T> T findDuplicateItem(List<T> target, T candidate, boolean caseInsensitive) {
+        String candidateValue = getItemValue(candidate);
+        if (candidateValue == null) {
+            return null;
+        }
+        String candidateType = getItemType(candidate);
+        for (T existing : target) {
+            String existingValue = getItemValue(existing);
+            if (existingValue == null) {
+                continue;
+            }
+            String existingType = getItemType(existing);
+            if (caseInsensitive) {
+                String normCandType = candidateType != null ? candidateType.trim() : "";
+                String normExistType = existingType != null ? existingType.trim() : "";
+                if (normCandType.equalsIgnoreCase(normExistType)
+                        && candidateValue.trim().equalsIgnoreCase(existingValue.trim())) {
+                    return existing;
+                }
+            } else {
+                if (Objects.equals(candidateType, existingType) && Objects.equals(candidateValue, existingValue)) {
+                    return existing;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String getItemValue(Object item) {
+        return switch (item) {
+            case ScimUserEmail e -> e.getValue();
+            case ScimUserPhoneNumber p -> p.getValue();
+            case ScimUserIm i -> i.getValue();
+            case ScimUserPhoto ph -> ph.getValue();
+            case ScimUserEntitlement ent -> ent.getValue();
+            case ScimUserRole r -> r.getValue();
+            case ScimUserX509Certificate c -> c.getValue();
+            default -> null;
+        };
+    }
+
+    private static String getItemType(Object item) {
+        return switch (item) {
+            case ScimUserEmail e -> e.getType();
+            case ScimUserPhoneNumber p -> p.getType();
+            case ScimUserAddress a -> a.getType();
+            case ScimUserIm i -> i.getType();
+            case ScimUserPhoto ph -> ph.getType();
+            case ScimUserEntitlement ent -> ent.getType();
+            case ScimUserRole r -> r.getType();
+            case ScimUserX509Certificate c -> c.getType();
+            default -> null;
+        };
+    }
+
+    private static boolean isPrimaryItem(Object item) {
+        return switch (item) {
+            case ScimUserEmail e -> e.isPrimaryFlag();
+            case ScimUserPhoneNumber p -> p.isPrimaryFlag();
+            case ScimUserAddress a -> a.isPrimaryFlag();
+            case ScimUserIm i -> i.isPrimaryFlag();
+            case ScimUserPhoto ph -> ph.isPrimaryFlag();
+            case ScimUserEntitlement ent -> ent.isPrimaryFlag();
+            case ScimUserRole r -> r.isPrimaryFlag();
+            case ScimUserX509Certificate c -> c.isPrimaryFlag();
+            default -> false;
+        };
+    }
+
+    private static void setPrimaryItem(Object item, boolean primary) {
+        switch (item) {
+            case ScimUserEmail e -> e.setPrimaryFlag(primary);
+            case ScimUserPhoneNumber p -> p.setPrimaryFlag(primary);
+            case ScimUserAddress a -> a.setPrimaryFlag(primary);
+            case ScimUserIm i -> i.setPrimaryFlag(primary);
+            case ScimUserPhoto ph -> ph.setPrimaryFlag(primary);
+            case ScimUserEntitlement ent -> ent.setPrimaryFlag(primary);
+            case ScimUserRole r -> r.setPrimaryFlag(primary);
+            case ScimUserX509Certificate c -> c.setPrimaryFlag(primary);
+            default -> {
+            }
         }
     }
 
@@ -369,10 +524,20 @@ public class ScimUserMapper {
         address.setLocality((String) item.get("locality"));
         address.setRegion((String) item.get("region"));
         address.setPostalCode((String) item.get("postalCode"));
-        address.setCountry((String) item.get("country"));
+        address.setCountry(normalizeCountry((String) item.get("country")));
         address.setType(normalizeCanonical((String) item.get(KEY_TYPE), ADDRESS_TYPES, "addresses.type"));
         address.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
         return address;
+    }
+
+    public static String normalizeCountry(String raw) {
+        if (raw == null) return null;
+        String c = raw.trim().toUpperCase(Locale.ROOT);
+        if (c.isEmpty()) return null;
+        if (c.length() == 2 && ISO_ALPHA2_COUNTRIES.contains(c)) {
+            return c;
+        }
+        return ISO_ALPHA3_TO_ALPHA2.get(c);
     }
 
     public static ScimUserIm buildIm(Map<String, Object> item) {

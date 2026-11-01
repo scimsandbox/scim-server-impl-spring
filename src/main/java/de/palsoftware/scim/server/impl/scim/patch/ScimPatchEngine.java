@@ -107,6 +107,9 @@ public class ScimPatchEngine {
 
     @SuppressWarnings("unchecked")
     private static void applyAdd(ScimUser user, String path, Object value) {
+        if (value == null) {
+            throw new ScimException(400, "invalidValue", "PATCH 'add' operation must contain a 'value' member");
+        }
         if (path == null || path.isEmpty()) {
             // No path → merge the value as a map into the resource
             if (value instanceof Map) {
@@ -240,41 +243,115 @@ public class ScimPatchEngine {
     private static void applyFilteredReplace(ScimUser user, String attr, String filter,
                                               String subAttr, Object value) {
         switch (attr) {
-                case ATTR_EMAILS -> applyFilteredUpdate(user.getEmails(), filter,
-                    email -> matchesFilter(email, filter),
-                    email -> setEmailSubAttribute(email, subAttr, value),
-                    ATTR_EMAILS);
-            case ATTR_PHONE_NUMBERS -> applyFilteredUpdate(user.getPhoneNumbers(), filter,
-                    phone -> matchesPhoneFilter(phone, filter),
-                    phone -> setPhoneSubAttribute(phone, subAttr, value),
-                    ATTR_PHONE_NUMBERS);
-            case ATTR_ADDRESSES -> applyFilteredUpdate(user.getAddresses(), filter,
-                    address -> matchesAddressFilter(address, filter),
-                    address -> setAddressSubAttribute(address, subAttr, value),
-                    ATTR_ADDRESSES);
-            case ATTR_IMS -> applyFilteredUpdate(user.getIms(), filter,
-                    im -> matchesImFilter(im, filter),
-                    im -> setImSubAttribute(im, subAttr, value),
-                    ATTR_IMS);
-            case ATTR_PHOTOS -> applyFilteredUpdate(user.getPhotos(), filter,
-                    photo -> matchesPhotoFilter(photo, filter),
-                    photo -> setPhotoSubAttribute(photo, subAttr, value),
-                    ATTR_PHOTOS);
-            case ATTR_ROLES -> applyFilteredUpdate(user.getRoles(), filter,
-                    role -> matchesRoleFilter(role, filter),
-                    role -> setRoleSubAttribute(role, subAttr, value),
-                    ATTR_ROLES);
-            case ATTR_ENTITLEMENTS -> applyFilteredUpdate(user.getEntitlements(), filter,
-                    entitlement -> matchesEntitlementFilter(entitlement, filter),
-                    entitlement -> setEntitlementSubAttribute(entitlement, subAttr, value),
-                    ATTR_ENTITLEMENTS);
-            case ATTR_X509 -> applyFilteredUpdate(user.getX509Certificates(), filter,
-                    cert -> matchesCertFilter(cert, filter),
-                    cert -> setCertSubAttribute(cert, subAttr, value),
-                    ATTR_X509);
+            case ATTR_EMAILS -> {
+                applyFilteredUpdate(user.getEmails(), filter,
+                        email -> matchesFilter(email, filter),
+                        email -> {
+                            setEmailSubAttribute(email, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getEmails().forEach(other -> { if (other != email) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_EMAILS);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getEmails(), true);
+            }
+            case ATTR_PHONE_NUMBERS -> {
+                applyFilteredUpdate(user.getPhoneNumbers(), filter,
+                        phone -> matchesPhoneFilter(phone, filter),
+                        phone -> {
+                            setPhoneSubAttribute(phone, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getPhoneNumbers().forEach(other -> { if (other != phone) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_PHONE_NUMBERS);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getPhoneNumbers(), false);
+            }
+            case ATTR_ADDRESSES -> {
+                applyFilteredUpdate(user.getAddresses(), filter,
+                        address -> matchesAddressFilter(address, filter),
+                        address -> {
+                            setAddressSubAttribute(address, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getAddresses().forEach(other -> { if (other != address) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_ADDRESSES);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getAddresses(), false);
+            }
+            case ATTR_IMS -> {
+                applyFilteredUpdate(user.getIms(), filter,
+                        im -> matchesImFilter(im, filter),
+                        im -> {
+                            setImSubAttribute(im, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getIms().forEach(other -> { if (other != im) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_IMS);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getIms(), false);
+            }
+            case ATTR_PHOTOS -> {
+                applyFilteredUpdate(user.getPhotos(), filter,
+                        photo -> matchesPhotoFilter(photo, filter),
+                        photo -> {
+                            setPhotoSubAttribute(photo, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getPhotos().forEach(other -> { if (other != photo) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_PHOTOS);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getPhotos(), false);
+            }
+            case ATTR_ROLES -> {
+                applyFilteredUpdate(user.getRoles(), filter,
+                        role -> matchesRoleFilter(role, filter),
+                        role -> {
+                            setRoleSubAttribute(role, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getRoles().forEach(other -> { if (other != role) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_ROLES);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getRoles(), false);
+            }
+            case ATTR_ENTITLEMENTS -> {
+                applyFilteredUpdate(user.getEntitlements(), filter,
+                        entitlement -> matchesEntitlementFilter(entitlement, filter),
+                        entitlement -> {
+                            setEntitlementSubAttribute(entitlement, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getEntitlements().forEach(other -> { if (other != entitlement) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_ENTITLEMENTS);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getEntitlements(), false);
+            }
+            case ATTR_X509 -> {
+                applyFilteredUpdate(user.getX509Certificates(), filter,
+                        cert -> matchesCertFilter(cert, filter),
+                        cert -> {
+                            setCertSubAttribute(cert, subAttr, value);
+                            if (isSettingPrimaryTrue(subAttr, value)) {
+                                user.getX509Certificates().forEach(other -> { if (other != cert) other.setPrimaryFlag(false); });
+                            }
+                        },
+                        ATTR_X509);
+                ScimUserMapper.deduplicateAndNormalizeCollection(user.getX509Certificates(), false);
+            }
             case "members" -> throw new ScimException(400, "noTarget", "Use group-specific PATCH for members");
             default -> throw new ScimException(400, "noTarget", "Filtered path not supported for attribute: " + attr);
         }
+    }
+
+    private static boolean isSettingPrimaryTrue(String subAttr, Object value) {
+        if (KEY_PRIMARY.equalsIgnoreCase(subAttr)) {
+            return toBoolean(value);
+        }
+        if (subAttr == null && value instanceof Map<?, ?> rawMap) {
+            return toBoolean(rawMap.get(KEY_PRIMARY));
+        }
+        return false;
     }
 
     private static void applyFilteredRemove(ScimUser user, String attr, String filter) {
@@ -519,14 +596,14 @@ public class ScimPatchEngine {
         }
 
         switch (attr) {
-            case ATTR_EMAILS -> addItems(items, user.getEmails(), ScimUserMapper::buildEmail);
-            case ATTR_PHONE_NUMBERS -> addItems(items, user.getPhoneNumbers(), ScimUserMapper::buildPhone);
-            case ATTR_ADDRESSES -> addItems(items, user.getAddresses(), ScimUserMapper::buildAddress);
-            case ATTR_IMS -> addItems(items, user.getIms(), ScimUserMapper::buildIm);
-            case ATTR_PHOTOS -> addItems(items, user.getPhotos(), ScimUserMapper::buildPhoto);
-            case ATTR_ROLES -> addItems(items, user.getRoles(), ScimUserMapper::buildRole);
-            case ATTR_ENTITLEMENTS -> addItems(items, user.getEntitlements(), ScimUserMapper::buildEntitlement);
-            case ATTR_X509 -> addItems(items, user.getX509Certificates(), ScimUserMapper::buildCertificate);
+            case ATTR_EMAILS -> addItems(items, user.getEmails(), ScimUserMapper::buildEmail, true);
+            case ATTR_PHONE_NUMBERS -> addItems(items, user.getPhoneNumbers(), ScimUserMapper::buildPhone, false);
+            case ATTR_ADDRESSES -> addItems(items, user.getAddresses(), ScimUserMapper::buildAddress, false);
+            case ATTR_IMS -> addItems(items, user.getIms(), ScimUserMapper::buildIm, false);
+            case ATTR_PHOTOS -> addItems(items, user.getPhotos(), ScimUserMapper::buildPhoto, false);
+            case ATTR_ROLES -> addItems(items, user.getRoles(), ScimUserMapper::buildRole, false);
+            case ATTR_ENTITLEMENTS -> addItems(items, user.getEntitlements(), ScimUserMapper::buildEntitlement, false);
+            case ATTR_X509 -> addItems(items, user.getX509Certificates(), ScimUserMapper::buildCertificate, false);
             default -> throw new ScimException(400, "noTarget", "Cannot add to attribute: " + attr);
         }
     }
@@ -568,7 +645,15 @@ public class ScimPatchEngine {
     }
 
     private static void setEmailSubAttribute(ScimUserEmail email, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setEmailSubAttribute(email, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setEmailSubAttribute(email, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setEmailSubAttribute(email, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setEmailSubAttribute(email, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> email.setValue(toString(value));
             case KEY_TYPE -> email.setType(normalizeCanonical(toString(value), EMAIL_TYPES, "emails.type"));
@@ -579,7 +664,15 @@ public class ScimPatchEngine {
     }
 
     private static void setPhoneSubAttribute(ScimUserPhoneNumber phone, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setPhoneSubAttribute(phone, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setPhoneSubAttribute(phone, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setPhoneSubAttribute(phone, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setPhoneSubAttribute(phone, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> phone.setValue(toString(value));
             case KEY_TYPE -> phone.setType(normalizeCanonical(toString(value), PHONE_TYPES, "phoneNumbers.type"));
@@ -590,14 +683,26 @@ public class ScimPatchEngine {
     }
 
     private static void setAddressSubAttribute(ScimUserAddress address, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_FORMATTED)) setAddressSubAttribute(address, KEY_FORMATTED, rawMap.get(KEY_FORMATTED));
+                if (rawMap.containsKey("streetAddress")) setAddressSubAttribute(address, "streetAddress", rawMap.get("streetAddress"));
+                if (rawMap.containsKey("locality")) setAddressSubAttribute(address, "locality", rawMap.get("locality"));
+                if (rawMap.containsKey("region")) setAddressSubAttribute(address, "region", rawMap.get("region"));
+                if (rawMap.containsKey("postalCode")) setAddressSubAttribute(address, "postalCode", rawMap.get("postalCode"));
+                if (rawMap.containsKey("country")) setAddressSubAttribute(address, "country", rawMap.get("country"));
+                if (rawMap.containsKey(KEY_TYPE)) setAddressSubAttribute(address, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_PRIMARY)) setAddressSubAttribute(address, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_FORMATTED -> address.setFormatted(toString(value));
             case "streetAddress" -> address.setStreetAddress(toString(value));
             case "locality" -> address.setLocality(toString(value));
             case "region" -> address.setRegion(toString(value));
             case "postalCode" -> address.setPostalCode(toString(value));
-            case "country" -> address.setCountry(toString(value));
+            case "country" -> address.setCountry(ScimUserMapper.normalizeCountry(toString(value)));
             case KEY_TYPE -> address.setType(normalizeCanonical(toString(value), ADDRESS_TYPES, "addresses.type"));
             case KEY_PRIMARY -> address.setPrimaryFlag(toBoolean(value));
             default -> throw new ScimException(400, "noTarget", "Unknown address sub-attribute: " + subAttr);
@@ -605,7 +710,15 @@ public class ScimPatchEngine {
     }
 
     private static void setImSubAttribute(ScimUserIm im, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setImSubAttribute(im, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setImSubAttribute(im, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setImSubAttribute(im, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setImSubAttribute(im, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> im.setValue(toString(value));
             case KEY_TYPE -> im.setType(normalizeCanonical(toString(value), IM_TYPES, "ims.type"));
@@ -616,7 +729,15 @@ public class ScimPatchEngine {
     }
 
     private static void setPhotoSubAttribute(ScimUserPhoto photo, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setPhotoSubAttribute(photo, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setPhotoSubAttribute(photo, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setPhotoSubAttribute(photo, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setPhotoSubAttribute(photo, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> {
                 String ref = toString(value);
@@ -630,7 +751,15 @@ public class ScimPatchEngine {
     }
 
     private static void setRoleSubAttribute(ScimUserRole role, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setRoleSubAttribute(role, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setRoleSubAttribute(role, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setRoleSubAttribute(role, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setRoleSubAttribute(role, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> role.setValue(toString(value));
             case KEY_TYPE -> role.setType(toString(value));
@@ -641,7 +770,15 @@ public class ScimPatchEngine {
     }
 
     private static void setEntitlementSubAttribute(ScimUserEntitlement ent, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setEntitlementSubAttribute(ent, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setEntitlementSubAttribute(ent, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setEntitlementSubAttribute(ent, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setEntitlementSubAttribute(ent, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> ent.setValue(toString(value));
             case KEY_TYPE -> ent.setType(toString(value));
@@ -652,7 +789,15 @@ public class ScimPatchEngine {
     }
 
     private static void setCertSubAttribute(ScimUserX509Certificate cert, String subAttr, Object value) {
-        if (subAttr == null) return;
+        if (subAttr == null) {
+            if (value instanceof Map<?, ?> rawMap) {
+                if (rawMap.containsKey(KEY_VALUE)) setCertSubAttribute(cert, KEY_VALUE, rawMap.get(KEY_VALUE));
+                if (rawMap.containsKey(KEY_TYPE)) setCertSubAttribute(cert, KEY_TYPE, rawMap.get(KEY_TYPE));
+                if (rawMap.containsKey(KEY_DISPLAY)) setCertSubAttribute(cert, KEY_DISPLAY, rawMap.get(KEY_DISPLAY));
+                if (rawMap.containsKey(KEY_PRIMARY)) setCertSubAttribute(cert, KEY_PRIMARY, rawMap.get(KEY_PRIMARY));
+            }
+            return;
+        }
         switch (subAttr) {
             case KEY_VALUE -> {
                 String binary = toString(value);
@@ -684,10 +829,9 @@ public class ScimPatchEngine {
     }
 
     private static <T> void addItems(List<Map<String, Object>> items, List<T> target,
-                                     java.util.function.Function<Map<String, Object>, T> mapper) {
-        for (Map<String, Object> item : items) {
-            target.add(mapper.apply(item));
-        }
+                                     java.util.function.Function<Map<String, Object>, T> mapper,
+                                     boolean caseInsensitive) {
+        ScimUserMapper.addAndNormalizeItems(items, target, mapper, caseInsensitive);
     }
 
     private static FilterClause parseEqFilter(String filter) {

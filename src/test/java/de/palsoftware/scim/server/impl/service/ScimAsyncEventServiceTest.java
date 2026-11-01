@@ -155,4 +155,29 @@ class ScimAsyncEventServiceTest {
         assertTrue(result.isPresent());
         assertEquals(txnId, result.get().getTxnId());
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAutowiredConstructorPresentAndResolvesObjectProvider() throws NoSuchMethodException {
+        var ctor = ScimAsyncEventService.class.getConstructor(
+                ScimAsyncEventRepository.class,
+                WorkspaceRepository.class,
+                ObjectMapper.class,
+                org.springframework.beans.factory.ObjectProvider.class
+        );
+        assertTrue(ctor.isAnnotationPresent(org.springframework.beans.factory.annotation.Autowired.class));
+
+        org.springframework.beans.factory.ObjectProvider<org.springframework.core.task.TaskExecutor> provider =
+                Mockito.mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable(any())).thenReturn(new SyncTaskExecutor());
+
+        ScimAsyncEventService autowiredService = new ScimAsyncEventService(
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                provider
+        );
+        assertNotNull(autowiredService);
+        verify(provider).getIfAvailable(any());
+    }
 }

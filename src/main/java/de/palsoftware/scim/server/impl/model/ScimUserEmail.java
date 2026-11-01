@@ -1,5 +1,7 @@
 package de.palsoftware.scim.server.impl.model;
 
+import java.util.Objects;
+
 public class ScimUserEmail {
 
     private String value;
@@ -42,5 +44,21 @@ public class ScimUserEmail {
 
     public void setPrimaryFlag(boolean primaryFlag) {
         this.primaryFlag = primaryFlag;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        ScimUserEmail that = (ScimUserEmail) o;
+        return primaryFlag == that.primaryFlag &&
+                Objects.equals(value, that.value) &&
+                Objects.equals(type, that.type) &&
+                Objects.equals(display, that.display);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(value, type, display, primaryFlag);
     }
 }

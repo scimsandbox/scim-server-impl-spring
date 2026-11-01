@@ -75,6 +75,9 @@ public class ScimUserController extends ScimBaseController {
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
+        if (request != null) {
+            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
+        }
 
         String resourceUrl = buildResourceUrl(compatBaseUrl, user.getId());
         return ResponseEntity.status(201)
@@ -260,6 +263,9 @@ public class ScimUserController extends ScimBaseController {
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
+        if (request != null) {
+            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
+        }
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
@@ -315,6 +321,9 @@ public class ScimUserController extends ScimBaseController {
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
+        if (request != null) {
+            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
+        }
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)

@@ -199,7 +199,7 @@ class ScimPatchEngineTest {
         assertEquals("123 Main St", user.getAddresses().get(0).getStreetAddress());
         assertEquals("12345", user.getAddresses().get(0).getPostalCode());
         assertEquals("NY", user.getAddresses().get(0).getRegion());
-        assertEquals("USA", user.getAddresses().get(0).getCountry());
+        assertEquals("US", user.getAddresses().get(0).getCountry());
         
         assertEquals(1, user.getIms().size());
         assertEquals("bob_aim", user.getIms().get(0).getValue());
@@ -218,6 +218,23 @@ class ScimPatchEngineTest {
         
         List<Map<String, Object>> opsErr2 = List.of(Map.of("op", "add", "path", "unknownCollection", "value", List.of("123")));
         assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsErr2));
+    }
+
+    @Test
+    void testAddOperation_missingValue_throws400() {
+        // PAT_24: RFC 7644 §3.5.2.1 - The 'add' operation MUST contain a 'value' member
+        List<Map<String, Object>> opsWithoutValue = List.of(Map.of("op", "add", "path", "title"));
+        ScimException ex = assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsWithoutValue));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+
+        Map<String, Object> opWithNullValue = new HashMap<>();
+        opWithNullValue.put("op", "add");
+        opWithNullValue.put("path", "title");
+        opWithNullValue.put("value", null);
+        ScimException exNull = assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, List.of(opWithNullValue)));
+        assertEquals(400, exNull.getHttpStatus());
+        assertEquals("invalidValue", exNull.getScimType());
     }
 
     // ── REPLACE TESTS ──
@@ -559,5 +576,102 @@ class ScimPatchEngineTest {
         ScimPatchEngine.applyPatchOperations(user, opsRemove);
         assertNull(user.getNameFamilyName());
         assertNull(user.getNameGivenName());
+    }
+
+    @Test
+    void testPat27_filteredReplacePrimary_unsetsExistingPrimary() {
+        ScimUserEmail workEmail = new ScimUserEmail();
+        workEmail.setValue("work@example.com");
+        workEmail.setType("work");
+        workEmail.setPrimaryFlag(true);
+
+        ScimUserEmail homeEmail = new ScimUserEmail();
+        homeEmail.setValue("home@example.com");
+        homeEmail.setType("home");
+        homeEmail.setPrimaryFlag(false);
+
+        user.getEmails().add(workEmail);
+        user.getEmails().add(homeEmail);
+
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "path", "emails[type eq \"home\"].primary", "value", true)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+
+        assertFalse(workEmail.isPrimaryFlag());
+        assertTrue(homeEmail.isPrimaryFlag());
+        assertEquals(1, user.getEmails().stream().filter(ScimUserEmail::isPrimaryFlag).count());
+
+        // Filtered replace with Map value (no subAttr) setting primary: true on work
+        List<Map<String, Object>> mapReplaceOps = List.of(
+            Map.of("op", "replace", "path", "emails[type eq \"work\"]",
+                   "value", Map.of("value", "work2@example.com", "type", "work", "primary", true))
+        );
+        ScimPatchEngine.applyPatchOperations(user, mapReplaceOps);
+
+        assertEquals("work2@example.com", user.getEmails().get(0).getValue());
+        assertTrue(user.getEmails().get(0).isPrimaryFlag());
+        assertFalse(user.getEmails().get(1).isPrimaryFlag());
+        assertEquals(1, user.getEmails().stream().filter(ScimUserEmail::isPrimaryFlag).count());
+    }
+
+    @Test
+    void testPat27_addAndReplaceMultiValued_normalizesSinglePrimary() {
+        ScimUserEmail existing = new ScimUserEmail();
+        existing.setValue("first@example.com");
+        existing.setType("work");
+        existing.setPrimaryFlag(true);
+        user.getEmails().add(existing);
+
+        // PATCH add with primary: true should unset existing primary
+        List<Map<String, Object>> addOps = List.of(
+            Map.of("op", "add", "path", "emails",
+                   "value", List.of(Map.of("value", "second@example.com", "type", "home", "primary", true)))
+        );
+        ScimPatchEngine.applyPatchOperations(user, addOps);
+
+        assertEquals(2, user.getEmails().size());
+        assertFalse(user.getEmails().get(0).isPrimaryFlag());
+        assertTrue(user.getEmails().get(1).isPrimaryFlag());
+
+        // Whole-array PATCH replace with multiple primary: true entries keeps at most one primary
+        List<Map<String, Object>> replaceOps = List.of(
+            Map.of("op", "replace", "path", "emails", "value", List.of(
+                Map.of("value", "a@example.com", "type", "work", "primary", true),
+                Map.of("value", "b@example.com", "type", "home", "primary", true)
+            ))
+        );
+        ScimPatchEngine.applyPatchOperations(user, replaceOps);
+
+        assertEquals(2, user.getEmails().size());
+        assertEquals(1, user.getEmails().stream().filter(ScimUserEmail::isPrimaryFlag).count());
+        assertFalse(user.getEmails().get(0).isPrimaryFlag());
+        assertTrue(user.getEmails().get(1).isPrimaryFlag());
+    }
+
+    @Test
+    void testAddEmails_deduplicatesCaseInsensitivelyAndMergesPrimary() {
+        ScimUserEmail existingWork = new ScimUserEmail();
+        existingWork.setValue("dup@example.com");
+        existingWork.setType("work");
+        existingWork.setPrimaryFlag(false);
+
+        ScimUserEmail existingHome = new ScimUserEmail();
+        existingHome.setValue("home@example.com");
+        existingHome.setType("home");
+        existingHome.setPrimaryFlag(true);
+
+        user.getEmails().add(existingWork);
+        user.getEmails().add(existingHome);
+
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "add", "path", "emails",
+                   "value", List.of(Map.of("value", "DUP@EXAMPLE.COM", "type", "WORK", "primary", true)))
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+
+        assertEquals(2, user.getEmails().size());
+        assertTrue(user.getEmails().get(0).isPrimaryFlag());
+        assertFalse(user.getEmails().get(1).isPrimaryFlag());
     }
 }

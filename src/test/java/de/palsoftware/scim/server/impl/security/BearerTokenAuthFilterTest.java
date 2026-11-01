@@ -116,10 +116,12 @@ class BearerTokenAuthFilterTest {
 
         assertEquals(401, response.getStatus());
         assertEquals("application/scim+json;charset=UTF-8", response.getContentType());
+        assertEquals("UTF-8", response.getCharacterEncoding());
         assertEquals(ScimRequestMetricAttributes.AUTH_FAILED,
                 request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
         String body = response.getContentAsString();
         assertTrue(body.contains("urn:ietf:params:scim:api:messages:2.0:Error"));
+        assertTrue(body.contains("\"status\":\"401\""));
     }
 
     @Test

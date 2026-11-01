@@ -151,8 +151,8 @@ public class ScimUserService {
     public ScimUser replaceUser(UUID workspaceId, UUID userId, Map<String, Object> input, String ifMatch) {
         ScimUser existing = getUser(workspaceId, userId);
 
-        // Validate If-Match ETag for optimistic concurrency control
-        if (ifMatch != null) {
+        // Validate If-Match ETag for optimistic concurrency control (RFC 7232 §3.1: * matches any current representation)
+        if (ifMatch != null && !isWildcardETag(ifMatch)) {
             String currentETag = "W/\"" + existing.getVersion() + "\"";
             if (!ifMatch.equals(currentETag)) {
                 throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
@@ -192,8 +192,8 @@ public class ScimUserService {
         ScimUser user = getUser(workspaceId, userId);
         String originalUserName = user.getUserName();
 
-        // Validate If-Match ETag for optimistic concurrency control
-        if (ifMatch != null) {
+        // Validate If-Match ETag for optimistic concurrency control (RFC 7232 §3.1: * matches any current representation)
+        if (ifMatch != null && !isWildcardETag(ifMatch)) {
             String currentETag = "W/\"" + user.getVersion() + "\"";
             if (!ifMatch.equals(currentETag)) {
                 throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
@@ -291,5 +291,10 @@ public class ScimUserService {
             }
         }
         return null;
+    }
+
+    private boolean isWildcardETag(String etag) {
+        String trimmed = etag.trim();
+        return "*".equals(trimmed) || "\"*\"".equals(trimmed);
     }
 }

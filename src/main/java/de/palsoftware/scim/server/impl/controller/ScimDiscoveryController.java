@@ -256,7 +256,7 @@ public class ScimDiscoveryController extends ScimBaseController {
         if (compat != null && !compat.isBlank() && CompatMode.fromString(compat) == CompatMode.NONE) {
             throw new ScimException(404, null, "Resource or endpoint not found: " + compat);
         }
-        return methodNotAllowed();
+        return methodNotAllowed("POST");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -708,11 +708,16 @@ public class ScimDiscoveryController extends ScimBaseController {
     }
 
     private ResponseEntity<Map<String, Object>> methodNotAllowed() {
+        return methodNotAllowed("GET");
+    }
+
+    private ResponseEntity<Map<String, Object>> methodNotAllowed(String allowedMethods) {
         Map<String, Object> error = new LinkedHashMap<>();
         error.put(KEY_SCHEMAS, List.of("urn:ietf:params:scim:api:messages:2.0:Error"));
         error.put("status", "405");
         error.put("detail", "Method not allowed on discovery endpoint");
         return ResponseEntity.status(405)
+                .header("Allow", allowedMethods)
                 .contentType(SCIM_JSON)
                 .body(error);
     }

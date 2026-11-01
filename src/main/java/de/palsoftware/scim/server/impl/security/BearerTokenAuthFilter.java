@@ -110,6 +110,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
     private void sendScimError(HttpServletResponse response, int status, String scimType, String detail)
             throws IOException {
         response.setStatus(status);
+        response.setCharacterEncoding("UTF-8");
         response.setContentType("application/scim+json;charset=UTF-8");
 
         // RFC 7644 §3.12: 401 responses MUST include WWW-Authenticate header
@@ -124,5 +125,6 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         error.put("detail", detail);
 
         response.getWriter().write(objectMapper.writeValueAsString(error));
+        response.getWriter().flush();
     }
 }

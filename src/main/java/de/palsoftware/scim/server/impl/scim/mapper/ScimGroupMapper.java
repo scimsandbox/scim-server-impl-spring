@@ -41,9 +41,12 @@ public class ScimGroupMapper {
         Map<String, Object> meta = new LinkedHashMap<>(6);
         meta.put("resourceType", "Group");
         meta.put("created", group.getCreatedAt().toString());
-        meta.put("lastModified", group.getLastModified().toString());
+        String lastModified = (group.getVersion() == null || group.getVersion() == 0)
+                ? group.getCreatedAt().toString()
+                : group.getLastModified().toString();
+        meta.put("lastModified", lastModified);
         meta.put("location", baseUrl + "/Groups/" + group.getId());
-        meta.put("version", "W/\"" + group.getVersion() + "\"");
+        meta.put("version", "W/\"" + (group.getVersion() != null ? group.getVersion() : 0) + "\"");
         result.put("meta", meta);
 
         return result;

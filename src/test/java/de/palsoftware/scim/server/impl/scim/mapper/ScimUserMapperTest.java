@@ -161,4 +161,154 @@ class ScimUserMapperTest {
         ScimUserMapper.applyFromScimInput(newUser, input);
         assertNull(newUser.getPassword());
     }
+
+    @Test
+    void testReplaceCollection_emailDeduplicationPreservesPrimaryFlag() {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("userName", "dedupUser");
+        input.put("emails", List.of(
+                Map.of("value", "dup@example.com", "type", "work", "primary", false),
+                Map.of("value", "DUP@EXAMPLE.COM", "type", "WORK", "primary", true)
+        ));
+
+        ScimUser targetUser = new ScimUser();
+        ScimUserMapper.applyFromScimInput(targetUser, input);
+
+        assertEquals(1, targetUser.getEmails().size());
+        assertEquals("dup@example.com", targetUser.getEmails().get(0).getValue());
+        assertTrue(targetUser.getEmails().get(0).isPrimaryFlag());
+    }
+
+    @Test
+    void testReplaceCollection_caseSensitiveForCertificatesAndPhotos() {
+        // Base64 strings that are both valid base64 ("test" = "dGVzdA==" and "\u0074\u0065..." vs "TGVzdA==" = "Lest")
+        String cert1 = Base64.getEncoder().encodeToString("test".getBytes()); // dGVzdA==
+        String cert2 = "DGVzdA=="; // valid base64 differing only in first character case ('d' vs 'D')
+
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("userName", "certUser");
+        input.put("x509Certificates", List.of(
+                Map.of("value", cert1, "type", "work", "primary", false),
+                Map.of("value", cert2, "type", "work", "primary", true)
+        ));
+        input.put("photos", List.of(
+                Map.of("value", "https://example.com/PhotoA.png", "type", "photo", "primary", false),
+                Map.of("value", "https://example.com/photoa.png", "type", "photo", "primary", true)
+        ));
+
+        ScimUser targetUser = new ScimUser();
+        ScimUserMapper.applyFromScimInput(targetUser, input);
+
+        assertEquals(2, targetUser.getX509Certificates().size());
+        assertEquals(cert1, targetUser.getX509Certificates().get(0).getValue());
+        assertEquals(cert2, targetUser.getX509Certificates().get(1).getValue());
+        assertFalse(targetUser.getX509Certificates().get(0).isPrimaryFlag());
+        assertTrue(targetUser.getX509Certificates().get(1).isPrimaryFlag());
+
+        assertEquals(2, targetUser.getPhotos().size());
+    }
+
+    @Test
+    void testMultiValuedPojos_equalsAndHashCode() {
+        ScimUserAddress a1 = new ScimUserAddress();
+        a1.setFormatted("123 Main");
+        a1.setStreetAddress("123 Main");
+        a1.setLocality("NYC");
+        a1.setRegion("NY");
+        a1.setPostalCode("10001");
+        a1.setCountry("US");
+        a1.setType("work");
+        a1.setPrimaryFlag(true);
+        ScimUserAddress a2 = new ScimUserAddress();
+        a2.setFormatted("123 Main");
+        a2.setStreetAddress("123 Main");
+        a2.setLocality("NYC");
+        a2.setRegion("NY");
+        a2.setPostalCode("10001");
+        a2.setCountry("US");
+        a2.setType("work");
+        a2.setPrimaryFlag(true);
+        assertEquals(a1, a2);
+        assertEquals(a1.hashCode(), a2.hashCode());
+        a2.setPrimaryFlag(false);
+        assertNotEquals(a1, a2);
+
+        ScimUserEmail e1 = ScimUserMapper.buildEmail(Map.of("value", "a@b.com", "type", "work", "display", "A", "primary", true));
+        ScimUserEmail e2 = ScimUserMapper.buildEmail(Map.of("value", "a@b.com", "type", "work", "display", "A", "primary", true));
+        assertEquals(e1, e2);
+        assertEquals(e1.hashCode(), e2.hashCode());
+
+        ScimUserPhoneNumber p1 = ScimUserMapper.buildPhone(Map.of("value", "123", "type", "work", "display", "P", "primary", true));
+        ScimUserPhoneNumber p2 = ScimUserMapper.buildPhone(Map.of("value", "123", "type", "work", "display", "P", "primary", true));
+        assertEquals(p1, p2);
+        assertEquals(p1.hashCode(), p2.hashCode());
+
+        ScimUserIm im1 = ScimUserMapper.buildIm(Map.of("value", "im1", "type", "xmpp", "display", "IM", "primary", false));
+        ScimUserIm im2 = ScimUserMapper.buildIm(Map.of("value", "im1", "type", "xmpp", "display", "IM", "primary", false));
+        assertEquals(im1, im2);
+        assertEquals(im1.hashCode(), im2.hashCode());
+
+        ScimUserPhoto ph1 = ScimUserMapper.buildPhoto(Map.of("value", "https://example.com/p.png", "type", "photo", "display", "Ph", "primary", false));
+        ScimUserPhoto ph2 = ScimUserMapper.buildPhoto(Map.of("value", "https://example.com/p.png", "type", "photo", "display", "Ph", "primary", false));
+        assertEquals(ph1, ph2);
+        assertEquals(ph1.hashCode(), ph2.hashCode());
+
+        ScimUserEntitlement ent1 = ScimUserMapper.buildEntitlement(Map.of("value", "ent", "type", "t", "display", "E", "primary", false));
+        ScimUserEntitlement ent2 = ScimUserMapper.buildEntitlement(Map.of("value", "ent", "type", "t", "display", "E", "primary", false));
+        assertEquals(ent1, ent2);
+        assertEquals(ent1.hashCode(), ent2.hashCode());
+
+        ScimUserRole r1 = ScimUserMapper.buildRole(Map.of("value", "admin", "type", "t", "display", "R", "primary", true));
+        ScimUserRole r2 = ScimUserMapper.buildRole(Map.of("value", "admin", "type", "t", "display", "R", "primary", true));
+        assertEquals(r1, r2);
+        assertEquals(r1.hashCode(), r2.hashCode());
+
+        ScimUserX509Certificate c1 = ScimUserMapper.buildCertificate(Map.of("value", "dGVzdA==", "type", "work", "display", "C", "primary", false));
+        ScimUserX509Certificate c2 = ScimUserMapper.buildCertificate(Map.of("value", "dGVzdA==", "type", "work", "display", "C", "primary", false));
+        assertEquals(c1, c2);
+        assertEquals(c1.hashCode(), c2.hashCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testMapperTimestampParity_versionZeroAndPositive() {
+        java.time.Instant created = java.time.Instant.parse("2026-01-01T00:00:00Z");
+        java.time.Instant modified = java.time.Instant.parse("2026-01-02T00:00:00Z");
+
+        ScimUser u = new ScimUser();
+        u.setId(UUID.randomUUID());
+        u.setUserName("tsUser");
+        u.setCreatedAt(created);
+        u.setLastModified(modified);
+        u.setVersion(0L);
+
+        Map<String, Object> respV0 = ScimUserMapper.toScimResponse(u, "http://localhost", Collections.emptyList());
+        Map<String, Object> metaV0 = (Map<String, Object>) respV0.get("meta");
+        assertEquals(created.toString(), metaV0.get("created"));
+        assertEquals(created.toString(), metaV0.get("lastModified"));
+
+        u.setVersion(1L);
+        Map<String, Object> respV1 = ScimUserMapper.toScimResponse(u, "http://localhost", Collections.emptyList());
+        Map<String, Object> metaV1 = (Map<String, Object>) respV1.get("meta");
+        assertEquals(created.toString(), metaV1.get("created"));
+        assertEquals(modified.toString(), metaV1.get("lastModified"));
+
+        ScimGroup g = new ScimGroup();
+        g.setId(UUID.randomUUID());
+        g.setDisplayName("tsGroup");
+        g.setCreatedAt(created);
+        g.setLastModified(modified);
+        g.setVersion(0L);
+
+        Map<String, Object> grpV0 = ScimGroupMapper.toScimResponse(g, "http://localhost");
+        Map<String, Object> grpMetaV0 = (Map<String, Object>) grpV0.get("meta");
+        assertEquals(created.toString(), grpMetaV0.get("created"));
+        assertEquals(created.toString(), grpMetaV0.get("lastModified"));
+
+        g.setVersion(2L);
+        Map<String, Object> grpV2 = ScimGroupMapper.toScimResponse(g, "http://localhost");
+        Map<String, Object> grpMetaV2 = (Map<String, Object>) grpV2.get("meta");
+        assertEquals(created.toString(), grpMetaV2.get("created"));
+        assertEquals(modified.toString(), grpMetaV2.get("lastModified"));
+    }
 }

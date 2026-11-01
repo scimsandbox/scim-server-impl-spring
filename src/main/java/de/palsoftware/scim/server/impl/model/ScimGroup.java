@@ -47,7 +47,7 @@ public class ScimGroup {
     @PrePersist
     protected void onCreate() {
         createdAt = Instant.now();
-        lastModified = Instant.now();
+        lastModified = createdAt;
     }
 
     @PreUpdate
