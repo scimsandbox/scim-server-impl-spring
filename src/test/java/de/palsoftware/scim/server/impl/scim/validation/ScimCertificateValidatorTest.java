@@ -20,7 +20,7 @@ class ScimCertificateValidatorTest {
     // Minimal valid self-contained DER X.509v1 certificate bytes constructed via ASN.1 DER
     private static byte[] buildMinimalDerX509Cert(int serial) throws Exception {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(1024);
+        kpg.initialize(2048);
         KeyPair kp = kpg.generateKeyPair();
         byte[] spki = kp.getPublic().getEncoded(); // SubjectPublicKeyInfo DER SEQUENCE
 

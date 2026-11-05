@@ -5,11 +5,13 @@ import de.palsoftware.scim.server.impl.repository.ScimAsyncEventRepository;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -26,22 +28,35 @@ public class ScimAsyncEventStalePendingReaperService {
     private final ScimAsyncEventRepository asyncEventRepository;
     private final ScimAsyncEventService asyncEventService;
     private final TransactionOperations transactionOperations;
+    private final Clock clock;
     private final boolean reaperEnabled;
     private final Duration staleTimeout;
 
+    @Autowired
     public ScimAsyncEventStalePendingReaperService(
             ScimAsyncEventRepository asyncEventRepository,
             ScimAsyncEventService asyncEventService,
             TransactionOperations transactionOperations,
+            Clock clock,
             @Value("${app.cleanup.async-events.stale-pending.enabled:${scim.async.cleanup.stale-pending.enabled:${scim.async.stale-pending.enabled:true}}}") boolean reaperEnabled,
             @Value("${app.cleanup.async-events.stale-pending-timeout:${app.cleanup.async-events.stale-pending.timeout:${scim.async.cleanup.stale-pending-timeout:${scim.async.stale-pending-timeout:${scim.async.stale-pending.timeout:5m}}}}}") Duration staleTimeout) {
         this.asyncEventRepository = asyncEventRepository;
         this.asyncEventService = asyncEventService;
         this.transactionOperations = transactionOperations;
+        this.clock = clock != null ? clock : Clock.systemUTC();
         this.reaperEnabled = reaperEnabled;
         this.staleTimeout = (staleTimeout == null || staleTimeout.isNegative() || staleTimeout.isZero())
                 ? DEFAULT_STALE_PENDING_TIMEOUT
                 : staleTimeout;
+    }
+
+    ScimAsyncEventStalePendingReaperService(
+            ScimAsyncEventRepository asyncEventRepository,
+            ScimAsyncEventService asyncEventService,
+            TransactionOperations transactionOperations,
+            boolean reaperEnabled,
+            Duration staleTimeout) {
+        this(asyncEventRepository, asyncEventService, transactionOperations, Clock.systemUTC(), reaperEnabled, staleTimeout);
     }
 
     @Scheduled(cron = "${app.cleanup.async-events.stale-pending.cron:${scim.async.cleanup.stale-pending.cron:${scim.async.stale-pending.cron:0 */1 * * * *}}}",
@@ -65,7 +80,7 @@ public class ScimAsyncEventStalePendingReaperService {
         Duration effectiveTimeout = (timeout == null || timeout.isNegative() || timeout.isZero())
                 ? this.staleTimeout
                 : timeout;
-        Instant cutoff = Instant.now().minus(effectiveTimeout);
+        Instant cutoff = Instant.now(clock).minus(effectiveTimeout).truncatedTo(ChronoUnit.MICROS);
 
         List<ScimAsyncEvent> staleEvents;
         try {
@@ -91,7 +106,7 @@ public class ScimAsyncEventStalePendingReaperService {
                         new ScimException(500, null, TIMEOUT_ERROR_DETAIL)
                 );
 
-                Instant completedAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+                Instant completedAt = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
                 Integer updated = transactionOperations.execute(status ->
                         asyncEventRepository.transitionPendingToFailed(
                                 event.getTxnId(),

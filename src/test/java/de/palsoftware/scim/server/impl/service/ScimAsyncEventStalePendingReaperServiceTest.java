@@ -15,8 +15,11 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -236,27 +239,38 @@ class ScimAsyncEventStalePendingReaperServiceTest {
     @Test
     void sweepStalePendingEvents_timingPrecision_reapsStaleEventAndLeavesFreshEvent() {
         Duration timeout = Duration.ofMinutes(5);
-        ScimAsyncEventStalePendingReaperService service = createService(true, timeout);
+        // Simulate Linux JDK 25 nanosecond clock (.851123671Z) so sub-microsecond truncation is verified on all OSes
+        Instant nanoNow = Instant.parse("2026-11-05T12:00:00.851123671Z");
+        Instant expectedCutoff = Instant.parse("2026-11-05T11:55:00.851123Z");
+        ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
+                asyncEventRepository,
+                asyncEventService,
+                transactionOperations,
+                Clock.fixed(nanoNow, ZoneOffset.UTC),
+                true,
+                timeout
+        );
 
         UUID staleTxn = UUID.randomUUID();
         UUID freshTxn = UUID.randomUUID();
         UUID boundaryTxn = UUID.randomUUID();
 
         // Simulate repository query: WHERE e.status = 'PENDING' AND e.createdAt < :cutoff
-        // Event created at cutoff - 1ms is stale (< cutoff).
+        // Event created at cutoff - 1us is stale (< cutoff).
         // Event created at cutoff is not stale (not < cutoff).
-        // Event created at cutoff + 1ms is fresh (not < cutoff).
+        // Event created at cutoff + 1us is fresh (not < cutoff).
         when(asyncEventRepository.findStalePendingEvents(any(Instant.class))).thenAnswer(invocation -> {
             Instant queryCutoff = invocation.getArgument(0);
+            assertThat(queryCutoff).isEqualTo(expectedCutoff);
 
             ScimAsyncEvent staleEvent = createPendingEvent(staleTxn, "POST", "User", UUID.randomUUID());
-            staleEvent.setCreatedAt(queryCutoff.minusMillis(1));
+            staleEvent.setCreatedAt(queryCutoff.minus(1, ChronoUnit.MICROS));
 
             ScimAsyncEvent boundaryEvent = createPendingEvent(boundaryTxn, "POST", "User", UUID.randomUUID());
             boundaryEvent.setCreatedAt(queryCutoff);
 
             ScimAsyncEvent freshEvent = createPendingEvent(freshTxn, "POST", "User", UUID.randomUUID());
-            freshEvent.setCreatedAt(queryCutoff.plusMillis(1));
+            freshEvent.setCreatedAt(queryCutoff.plus(1, ChronoUnit.MICROS));
 
             List<ScimAsyncEvent> candidateEvents = List.of(staleEvent, boundaryEvent, freshEvent);
             return candidateEvents.stream()
@@ -264,8 +278,8 @@ class ScimAsyncEventStalePendingReaperServiceTest {
                     .toList();
         });
 
-        when(asyncEventService.buildErrorSetPayloadSafe(any(), eq(staleTxn), any(), any(), any(), any()))
-                .thenReturn("{\"txn\":\"" + staleTxn + "\"}");
+        when(asyncEventService.buildErrorSetPayloadSafe(any(), any(UUID.class), any(), any(), any(), any()))
+                .thenAnswer(invocation -> "{\"txn\":\"" + invocation.getArgument(1) + "\"}");
         when(asyncEventRepository.transitionPendingToFailed(eq(staleTxn), any(), any())).thenReturn(1);
 
         int reaped = service.sweepStalePendingEvents(timeout);

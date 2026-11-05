@@ -131,7 +131,7 @@ abstract class ScimBaseController {
             Object rawPath = op.get("path");
             if (rawPath instanceof String p && !p.isBlank()) {
                 // Normalize filtered valuePath 'emails[type eq "work"].value' -> 'emails.value'
-                String cleaned = p.trim().replaceAll("\\[[^\\]]*\\]", "");
+                String cleaned = stripBracketFilters(p.trim());
                 if (!cleaned.isEmpty()) {
                     attrs.add(cleaned);
                 }
@@ -157,6 +157,38 @@ abstract class ScimBaseController {
             }
         }
         return new ArrayList<>(attrs);
+    }
+
+    /**
+     * Strips bracketed valuePath filter segments (e.g. {@code emails[type eq "work"].value -> emails.value})
+     * in linear O(n) time without regular expressions to avoid polynomial backtracking on unclosed brackets.
+     */
+    static String stripBracketFilters(String path) {
+        if (path == null) {
+            return "";
+        }
+        int firstOpen = path.indexOf('[');
+        if (firstOpen < 0) {
+            return path;
+        }
+        int len = path.length();
+        StringBuilder sb = new StringBuilder(len);
+        int cursor = 0;
+        int openIdx = firstOpen;
+        while (openIdx >= 0) {
+            sb.append(path, cursor, openIdx);
+            int closeIdx = path.indexOf(']', openIdx + 1);
+            if (closeIdx < 0) {
+                sb.append(path, openIdx, len);
+                return sb.toString();
+            }
+            cursor = closeIdx + 1;
+            openIdx = path.indexOf('[', cursor);
+        }
+        if (cursor < len) {
+            sb.append(path, cursor, len);
+        }
+        return sb.toString();
     }
 
     protected static Set<String> parseAttrList(String attrList) {

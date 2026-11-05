@@ -3,7 +3,12 @@ package de.palsoftware.scim.server.impl.controller;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * The base URL built here becomes the authority of every {@code meta.location} and {@code $ref} in a
@@ -60,5 +65,32 @@ class ScimBaseControllerTest {
 
         assertEquals("https://api2.scimsandbox.net/ws/" + WORKSPACE_ID + "/scim/v2/v2",
                 ScimBaseController.buildBaseUrl(request, WORKSPACE_ID, "v2"));
+    }
+
+    @Test
+    void stripBracketFiltersNormalizesValuePathsAndPreservesUnclosedSegments() {
+        assertEquals("userName", ScimBaseController.stripBracketFilters("userName"));
+        assertEquals("emails.value", ScimBaseController.stripBracketFilters("emails[type eq \"work\"].value"));
+        assertEquals("emails.value",
+                ScimBaseController.stripBracketFilters("emails[type eq \"work\"][primary eq true].value"));
+        assertEquals("", ScimBaseController.stripBracketFilters("[]"));
+        assertEquals("emails[[[unclosed", ScimBaseController.stripBracketFilters("emails[[[unclosed"));
+        assertEquals("emails.value", ScimBaseController.stripBracketFilters("emails[[[nested].value"));
+    }
+
+    @Test
+    void extractModifiedPatchAttributesHandlesRepeatedUnclosedBracketsInLinearTime() {
+        String adversarialPath = "[".repeat(50_000);
+        List<Map<String, Object>> ops = List.of(
+                Map.of("op", "replace", "path", adversarialPath, "value", "x"),
+                Map.of("op", "replace", "path", "emails[type eq \"work\"].value", "value", "a@example.com")
+        );
+
+        List<String> extracted = assertTimeoutPreemptively(
+                Duration.ofSeconds(1),
+                () -> ScimBaseController.extractModifiedPatchAttributes(ops)
+        );
+
+        assertEquals(List.of(adversarialPath, "emails.value"), extracted);
     }
 }
