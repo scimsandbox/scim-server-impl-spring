@@ -5,14 +5,21 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.UUID;
 
 /**
  * Codec for RFC 9865 Stateless Cursor Tokens.
  *
- * Token format: scim_cur_<base64url> (unpadded URL-safe Base64)
+ * Token format: scim_cur_<base64url(hmac16 || jsonBytes)> (unpadded URL-safe Base64)
  * Payload format: {"w":"<workspaceUUID>","o":<zeroBasedOffset>,"exp":<unixEpochSeconds>}
  */
 public final class ScimCursorCodec {
@@ -20,7 +27,10 @@ public final class ScimCursorCodec {
     public static final String CURSOR_PREFIX = "scim_cur_";
     public static final int DEFAULT_CURSOR_TIMEOUT_SECONDS = 3600;
 
+    private static final int HMAC_TAG_BYTES = 16;
+    private static final String HMAC_ALGO = "HmacSHA256";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final byte[] HMAC_SECRET = initHmacSecret();
 
     public record CursorPayload(
             @JsonProperty("w") String w,
@@ -30,6 +40,47 @@ public final class ScimCursorCodec {
 
     private ScimCursorCodec() {
         // Utility class
+    }
+
+    private static byte[] initHmacSecret() {
+        String configured = System.getenv("SCIM_CURSOR_SECRET");
+        if (configured != null && !configured.isBlank()) {
+            try {
+                return MessageDigest.getInstance("SHA-256")
+                        .digest(configured.getBytes(StandardCharsets.UTF_8));
+            } catch (GeneralSecurityException e) {
+                throw new IllegalStateException("Failed to initialize cursor HMAC key", e);
+            }
+        }
+        byte[] randomKey = new byte[32];
+        new SecureRandom().nextBytes(randomKey);
+        return randomKey;
+    }
+
+    private static byte[] computeHmac16(byte[] payloadBytes) {
+        try {
+            Mac mac = Mac.getInstance(HMAC_ALGO);
+            mac.init(new SecretKeySpec(HMAC_SECRET, HMAC_ALGO));
+            byte[] fullMac = mac.doFinal(payloadBytes);
+            return Arrays.copyOf(fullMac, HMAC_TAG_BYTES);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("Failed to compute cursor HMAC", e);
+        }
+    }
+
+    private static String signAndEncode(byte[] jsonBytes) {
+        byte[] mac16 = computeHmac16(jsonBytes);
+        byte[] combined = new byte[HMAC_TAG_BYTES + jsonBytes.length];
+        System.arraycopy(mac16, 0, combined, 0, HMAC_TAG_BYTES);
+        System.arraycopy(jsonBytes, 0, combined, HMAC_TAG_BYTES, jsonBytes.length);
+        return CURSOR_PREFIX + Base64.getUrlEncoder().withoutPadding().encodeToString(combined);
+    }
+
+    /**
+     * Package-private helper for testing semantic validation of signed raw JSON payloads.
+     */
+    static String encodeRawJsonForTest(String rawJson) {
+        return signAndEncode(rawJson.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -51,8 +102,7 @@ public final class ScimCursorCodec {
 
         try {
             byte[] jsonBytes = OBJECT_MAPPER.writeValueAsBytes(payload);
-            String base64Url = Base64.getUrlEncoder().withoutPadding().encodeToString(jsonBytes);
-            return CURSOR_PREFIX + base64Url;
+            return signAndEncode(jsonBytes);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to serialize cursor payload", e);
         }
@@ -98,65 +148,75 @@ public final class ScimCursorCodec {
         }
 
         if (!token.startsWith(CURSOR_PREFIX)) {
-            throw new ScimException(400, "invalidCursor",
-                    "Cursor must start with prefix '" + CURSOR_PREFIX + "'");
+            throw new ScimException(400, "invalidCursor", "Invalid cursor prefix");
         }
 
         String base64Part = token.substring(CURSOR_PREFIX.length());
         if (base64Part.isEmpty()) {
-            throw new ScimException(400, "invalidCursor", "Cursor token payload is empty");
+            throw new ScimException(400, "invalidCursor", "Invalid cursor encoding");
         }
 
-        byte[] jsonBytes;
+        byte[] decoded;
         try {
-            jsonBytes = Base64.getUrlDecoder().decode(base64Part);
+            decoded = Base64.getUrlDecoder().decode(base64Part);
         } catch (IllegalArgumentException e) {
-            throw new ScimException(400, "invalidCursor",
-                    "Malformed Base64URL in cursor token: " + e.getMessage(), e);
+            throw new ScimException(400, "invalidCursor", "Invalid cursor encoding");
+        }
+
+        // Reject non-canonical Base64URL representations (e.g. mutated unused trailing padding bits)
+        String canonical = Base64.getUrlEncoder().withoutPadding().encodeToString(decoded);
+        if (!canonical.equals(base64Part)) {
+            throw new ScimException(400, "invalidCursor", "Invalid cursor encoding");
+        }
+
+        if (decoded.length <= HMAC_TAG_BYTES) {
+            throw new ScimException(400, "invalidCursor", "Invalid cursor token");
+        }
+
+        byte[] mac = Arrays.copyOfRange(decoded, 0, HMAC_TAG_BYTES);
+        byte[] jsonBytes = Arrays.copyOfRange(decoded, HMAC_TAG_BYTES, decoded.length);
+        byte[] expectedMac = computeHmac16(jsonBytes);
+        if (!MessageDigest.isEqual(mac, expectedMac)) {
+            throw new ScimException(400, "invalidCursor", "Invalid cursor signature");
         }
 
         CursorPayload payload;
         try {
             payload = OBJECT_MAPPER.readValue(jsonBytes, CursorPayload.class);
         } catch (Exception e) {
-            throw new ScimException(400, "invalidCursor",
-                    "Malformed JSON payload in cursor token: " + e.getMessage(), e);
+            throw new ScimException(400, "invalidCursor", "Invalid cursor payload");
         }
 
         if (payload.w() == null || payload.w().isBlank()) {
-            throw new ScimException(400, "invalidCursor", "Cursor missing workspace identifier");
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: missing workspace");
         }
 
         UUID tokenWorkspaceId;
         try {
             tokenWorkspaceId = UUID.fromString(payload.w());
         } catch (IllegalArgumentException e) {
-            throw new ScimException(400, "invalidCursor",
-                    "Invalid workspace UUID format in cursor token: " + payload.w());
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: invalid workspace format");
         }
 
         if (!workspaceId.equals(tokenWorkspaceId)) {
-            throw new ScimException(400, "invalidCursor",
-                    "Cursor workspace mismatch: expected " + workspaceId + " but got " + tokenWorkspaceId);
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: workspace mismatch");
         }
 
         if (payload.o() == null) {
-            throw new ScimException(400, "invalidCursor", "Cursor missing offset parameter");
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: missing offset");
         }
 
         if (payload.o() < 0) {
-            throw new ScimException(400, "invalidCursor",
-                    "Cursor offset cannot be negative: " + payload.o());
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: negative offset");
         }
 
         if (payload.exp() == null) {
-            throw new ScimException(400, "invalidCursor", "Cursor missing expiration timestamp");
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: missing expiration");
         }
 
         long now = Instant.now().getEpochSecond();
         if (payload.exp() <= now) {
-            throw new ScimException(400, "invalidCursor",
-                    "Cursor has expired (exp=" + payload.exp() + ", now=" + now + ")");
+            throw new ScimException(400, "invalidCursor", "Invalid cursor: token has expired");
         }
 
         return payload.o();

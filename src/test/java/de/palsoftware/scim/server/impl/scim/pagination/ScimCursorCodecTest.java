@@ -3,9 +3,7 @@ package de.palsoftware.scim.server.impl.scim.pagination;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,16 +62,17 @@ class ScimCursorCodecTest {
     }
 
     @Test
-    void testDecodeMalformedJsonThrowsInvalidCursor() {
-        String badJson = Base64.getUrlEncoder().withoutPadding().encodeToString("{not_json}".getBytes(StandardCharsets.UTF_8));
+    void testDecodeMalformedJsonThrowsInvalidCursorWithoutInternalLeak() {
+        String token = ScimCursorCodec.encodeRawJsonForTest("{not_json}");
         ScimException ex = assertThrows(ScimException.class, () ->
-                ScimCursorCodec.decodeCursor("scim_cur_" + badJson, workspaceId));
+                ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
+        assertFalse(ex.getMessage().toLowerCase().contains("exception"));
     }
 
     @Test
-    void testDecodeWorkspaceMismatchThrowsInvalidCursor() {
+    void testDecodeWorkspaceMismatchThrowsInvalidCursorWithoutUuidLeak() {
         UUID otherWorkspace = UUID.randomUUID();
         String token = ScimCursorCodec.encodeCursor(workspaceId, 10, 3600);
 
@@ -82,16 +81,35 @@ class ScimCursorCodecTest {
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("workspace mismatch"));
+        assertFalse(ex.getMessage().contains(workspaceId.toString()));
+        assertFalse(ex.getMessage().contains(otherWorkspace.toString()));
+    }
+
+    @Test
+    void testDecodeSingleCharTamperAlwaysFailsAcrossOffsets() {
+        for (int offset = 0; offset < 50; offset++) {
+            String token = ScimCursorCodec.encodeCursor(workspaceId, offset, 3600);
+            char last = token.charAt(token.length() - 1);
+            char flipped = (last == 'a') ? 'b' : 'a';
+            String tampered = token.substring(0, token.length() - 1) + flipped;
+
+            ScimException ex = assertThrows(ScimException.class, () ->
+                    ScimCursorCodec.decodeCursor(tampered, workspaceId),
+                    "Tampered cursor must fail for offset " + offset);
+            assertEquals(400, ex.getHttpStatus());
+            assertEquals("invalidCursor", ex.getScimType());
+            assertFalse(ex.getMessage().contains(workspaceId.toString()));
+        }
     }
 
     @Test
     void testDecodeNegativeOffsetThrowsInvalidCursor() {
         long futureExp = Instant.now().getEpochSecond() + 3600;
         String rawJson = String.format("{\"w\":\"%s\",\"o\":-5,\"exp\":%d}", workspaceId, futureExp);
-        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
-                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+                ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("negative"));
@@ -101,10 +119,10 @@ class ScimCursorCodecTest {
     void testDecodeExpiredCursorThrowsInvalidCursor() {
         long pastExp = Instant.now().getEpochSecond() - 60; // expired 1 minute ago
         String rawJson = String.format("{\"w\":\"%s\",\"o\":10,\"exp\":%d}", workspaceId, pastExp);
-        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
-                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+                ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("expired"));
@@ -132,10 +150,10 @@ class ScimCursorCodecTest {
     void testDecodeMissingOffsetThrowsInvalidCursor() {
         long futureExp = Instant.now().getEpochSecond() + 3600;
         String rawJson = String.format("{\"w\":\"%s\",\"exp\":%d}", workspaceId, futureExp);
-        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
-                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+                ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("offset"));
@@ -144,10 +162,10 @@ class ScimCursorCodecTest {
     @Test
     void testDecodeMissingExpirationThrowsInvalidCursor() {
         String rawJson = String.format("{\"w\":\"%s\",\"o\":10}", workspaceId);
-        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
-                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+                ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("expiration"));
@@ -157,10 +175,10 @@ class ScimCursorCodecTest {
     void testDecodeMissingWorkspaceThrowsInvalidCursor() {
         long futureExp = Instant.now().getEpochSecond() + 3600;
         String rawJson = String.format("{\"o\":10,\"exp\":%d}", futureExp);
-        String base64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rawJson.getBytes(StandardCharsets.UTF_8));
+        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
-                ScimCursorCodec.decodeCursor("scim_cur_" + base64, workspaceId));
+                ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("workspace"));

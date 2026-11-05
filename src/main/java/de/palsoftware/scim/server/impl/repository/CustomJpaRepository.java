@@ -62,22 +62,31 @@ public class CustomJpaRepository<T, ID> extends SimpleJpaRepository<T, ID> {
         List<Order> jpaOrders = new ArrayList<>();
         for (Sort.Order order : sort) {
             Path<?> path = getPath(root, order.getProperty());
+            Expression<?> sortExpression = toSortExpression(path, order, builder);
             boolean isAscending = order.isAscending();
             Sort.NullHandling nullHandling = order.getNullHandling();
 
             if (nullHandling == Sort.NullHandling.NULLS_LAST) {
                 jpaOrders.add(builder.asc(builder.selectCase().when(builder.isNull(path), 1).otherwise(0)));
-                jpaOrders.add(isAscending ? builder.asc(path) : builder.desc(path));
+                jpaOrders.add(isAscending ? builder.asc(sortExpression) : builder.desc(sortExpression));
             } else if (nullHandling == Sort.NullHandling.NULLS_FIRST) {
                 jpaOrders.add(builder.asc(builder.selectCase().when(builder.isNull(path), 0).otherwise(1)));
-                jpaOrders.add(isAscending ? builder.asc(path) : builder.desc(path));
+                jpaOrders.add(isAscending ? builder.asc(sortExpression) : builder.desc(sortExpression));
             } else {
-                jpaOrders.add(isAscending ? builder.asc(path) : builder.desc(path));
+                jpaOrders.add(isAscending ? builder.asc(sortExpression) : builder.desc(sortExpression));
             }
         }
         query.orderBy(jpaOrders);
 
         return entityManager.createQuery(query);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Expression<?> toSortExpression(Path<?> path, Sort.Order order, CriteriaBuilder builder) {
+        if (order.isIgnoreCase() && String.class.equals(path.getJavaType())) {
+            return builder.lower((Expression<String>) path);
+        }
+        return path;
     }
 
     private Path<?> getPath(Root<?> root, String property) {

@@ -6,6 +6,7 @@ import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.repository.ScimAsyncEventRepository;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
+import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -15,12 +16,15 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ScimAsyncEventControllerTest {
@@ -55,7 +59,7 @@ class ScimAsyncEventControllerTest {
         ScimAsyncEvent event = new ScimAsyncEvent();
         event.setTxnId(txnId);
         event.setWorkspace(mockWorkspace);
-        event.setOperation("create");
+        event.setOperation("POST");
         event.setResourceType("User");
         event.setStatus("PENDING");
         event.setCreatedAt(Instant.now());
@@ -76,7 +80,7 @@ class ScimAsyncEventControllerTest {
         ScimAsyncEvent event = new ScimAsyncEvent();
         event.setTxnId(txnId);
         event.setWorkspace(mockWorkspace);
-        event.setOperation("create");
+        event.setOperation("POST");
         event.setResourceType("User");
         event.setStatus("PENDING");
         event.setCreatedAt(Instant.now());
@@ -99,14 +103,14 @@ class ScimAsyncEventControllerTest {
                 "jti", UUID.randomUUID().toString(),
                 "txn", txnId.toString(),
                 "sub_id", Map.of("format", "uri", "uri", "http://localhost:8080/ws/" + workspaceId + "/scim/v2/Users/" + UUID.randomUUID()),
-                "events", Map.of("urn:ietf:params:scim:event:prov:create:full", Map.of("userName", "alice"))
+                "events", Map.of("urn:ietf:params:scim:event:prov:create:full", Map.of("data", Map.of("userName", "alice")))
         );
         String payload = objectMapper.writeValueAsString(setJson);
 
         ScimAsyncEvent event = new ScimAsyncEvent();
         event.setTxnId(txnId);
         event.setWorkspace(mockWorkspace);
-        event.setOperation("create");
+        event.setOperation("POST");
         event.setResourceType("User");
         event.setStatus("COMPLETED");
         event.setSetPayload(payload);
@@ -136,18 +140,165 @@ class ScimAsyncEventControllerTest {
     }
 
     @Test
-    void testGetEvent_Failed() {
+    @SuppressWarnings("unchecked")
+    void testGetEvent_FailedWithErrorSet_Returns200PerRfc9967() throws Exception {
+        // Updated per RFC 9967 §2.5.1.3: failed async requests return 200 OK with misc:asyncresp error SET
+        Map<String, Object> errorSetJson = Map.of(
+                "iss", "http://localhost:8080/ws/" + workspaceId + "/scim/v2",
+                "iat", Instant.now().getEpochSecond(),
+                "jti", UUID.randomUUID().toString(),
+                "txn", txnId.toString(),
+                "events", Map.of(
+                        ScimAsyncEventService.ASYNC_RESP_EVENT_URI, Map.of(
+                                "status", "409",
+                                "response", Map.of(
+                                        "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:Error"),
+                                        "status", "409",
+                                        "scimType", "uniqueness",
+                                        "detail", "User already exists"
+                                )
+                        )
+                )
+        );
+
         ScimAsyncEvent event = new ScimAsyncEvent();
         event.setTxnId(txnId);
         event.setWorkspace(mockWorkspace);
         event.setStatus("FAILED");
-        event.setSetPayload("User already exists");
+        event.setSetPayload(objectMapper.writeValueAsString(errorSetJson));
+
+        when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId))).thenReturn(Optional.of(event));
+
+        ResponseEntity<?> response = controller.getEvent(workspaceId.toString(), txnId.toString(), null, request);
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertNotNull(body);
+        Map<String, Object> events = (Map<String, Object>) body.get("events");
+        Map<String, Object> asyncResp = (Map<String, Object>) events.get(ScimAsyncEventService.ASYNC_RESP_EVENT_URI);
+        assertEquals("409", asyncResp.get("status"));
+    }
+
+    @Test
+    void testGetEvent_FailedWithoutSetPayload_FallbackThrows500() {
+        ScimAsyncEvent event = new ScimAsyncEvent();
+        event.setTxnId(txnId);
+        event.setWorkspace(mockWorkspace);
+        event.setStatus("FAILED");
+        event.setSetPayload(null);
 
         when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId))).thenReturn(Optional.of(event));
 
         ScimException ex = assertThrows(ScimException.class, () ->
                 controller.getEvent(workspaceId.toString(), txnId.toString(), null, request));
         assertEquals(500, ex.getHttpStatus());
+    }
+
+    @Test
+    void testGetEvent_CompletedWithoutSetPayload_Throws500() {
+        ScimAsyncEvent event = new ScimAsyncEvent();
+        event.setTxnId(txnId);
+        event.setWorkspace(mockWorkspace);
+        event.setOperation("POST");
+        event.setResourceType("User");
+        event.setStatus("COMPLETED");
+        event.setSetPayload(null);
+        event.setCreatedAt(Instant.now().minusSeconds(5));
+        event.setCompletedAt(Instant.now());
+
+        when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId))).thenReturn(Optional.of(event));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                controller.getEvent(workspaceId.toString(), txnId.toString(), null, request));
+        assertEquals(500, ex.getHttpStatus());
+        assertEquals("Internal server error", ex.getMessage());
+    }
+
+    @Test
+    void testGetEvent_CompletedWithBlankSetPayload_Throws500() {
+        ScimAsyncEvent event = new ScimAsyncEvent();
+        event.setTxnId(txnId);
+        event.setWorkspace(mockWorkspace);
+        event.setOperation("POST");
+        event.setResourceType("User");
+        event.setStatus("COMPLETED");
+        event.setSetPayload("   ");
+        event.setCreatedAt(Instant.now().minusSeconds(5));
+        event.setCompletedAt(Instant.now());
+
+        when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId))).thenReturn(Optional.of(event));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                controller.getEvent(workspaceId.toString(), txnId.toString(), null, request));
+        assertEquals(500, ex.getHttpStatus());
+        assertEquals("Internal server error", ex.getMessage());
+    }
+
+    @Test
+    void testGetEvent_CompletedWithEmptyStringPayload_Throws500() {
+        ScimAsyncEvent event = new ScimAsyncEvent();
+        event.setTxnId(txnId);
+        event.setWorkspace(mockWorkspace);
+        event.setOperation("POST");
+        event.setResourceType("User");
+        event.setStatus("COMPLETED");
+        event.setSetPayload("");
+        event.setCreatedAt(Instant.now().minusSeconds(5));
+        event.setCompletedAt(Instant.now());
+
+        when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId))).thenReturn(Optional.of(event));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                controller.getEvent(workspaceId.toString(), txnId.toString(), null, request));
+        assertEquals(500, ex.getHttpStatus());
+        assertEquals("Internal server error", ex.getMessage());
+    }
+
+    @Test
+    void testGetEvent_CompletedWithWhitespaceTabsNewlinesPayload_Throws500() {
+        ScimAsyncEvent event = new ScimAsyncEvent();
+        event.setTxnId(txnId);
+        event.setWorkspace(mockWorkspace);
+        event.setOperation("POST");
+        event.setResourceType("User");
+        event.setStatus("COMPLETED");
+        event.setSetPayload(" \t\n\r ");
+        event.setCreatedAt(Instant.now().minusSeconds(5));
+        event.setCompletedAt(Instant.now());
+
+        when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId))).thenReturn(Optional.of(event));
+
+        ScimException ex = assertThrows(ScimException.class, () ->
+                controller.getEvent(workspaceId.toString(), txnId.toString(), null, request));
+        assertEquals(500, ex.getHttpStatus());
+        assertEquals("Internal server error", ex.getMessage());
+    }
+
+    @Test
+    void testGetEvent_PendingAwaitsInFlightAndTransitionsToCompleted() throws Exception {
+        ScimAsyncEventService mockAsyncService = Mockito.mock(ScimAsyncEventService.class);
+        ScimAsyncEventController awaitingController = new ScimAsyncEventController(repository, objectMapper, mockAsyncService);
+
+        ScimAsyncEvent pendingEvent = new ScimAsyncEvent();
+        pendingEvent.setTxnId(txnId);
+        pendingEvent.setWorkspace(mockWorkspace);
+        pendingEvent.setStatus("PENDING");
+
+        ScimAsyncEvent completedEvent = new ScimAsyncEvent();
+        completedEvent.setTxnId(txnId);
+        completedEvent.setWorkspace(mockWorkspace);
+        completedEvent.setStatus("COMPLETED");
+        completedEvent.setSetPayload(objectMapper.writeValueAsString(Map.of(
+                "txn", txnId.toString(),
+                "events", Map.of(ScimAsyncEventService.ASYNC_RESP_EVENT_URI, Map.of("status", "201"))
+        )));
+
+        when(repository.findByTxnIdAndWorkspaceId(eq(txnId), eq(workspaceId)))
+                .thenReturn(Optional.of(pendingEvent))
+                .thenReturn(Optional.of(completedEvent));
+
+        ResponseEntity<?> response = awaitingController.getEvent(workspaceId.toString(), txnId.toString(), null, request);
+        verify(mockAsyncService).awaitIfInFlight(eq(txnId), any());
+        assertEquals(HttpStatus.OK, response.getStatusCode());
     }
 
     @Test

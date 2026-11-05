@@ -59,15 +59,15 @@ public class ScimUserController extends ScimBaseController {
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
 
-        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
-            UUID txnId = asyncEventService.submitAsync(wsId, "create", "User", null, compatBaseUrl, () -> {
+        if (asyncEventService != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "POST", "User", null, compatBaseUrl, () -> {
                 ScimUser user = userService.createUser(wsId, body);
                 List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
                 CompatMode compatMode = CompatMode.fromString(compat);
                 Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
                 return applyCompat(scimResponse, compatMode);
             });
-            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId, request);
         }
 
         ScimUser user = userService.createUser(wsId, body);
@@ -168,6 +168,9 @@ public class ScimUserController extends ScimBaseController {
         }
 
         if (count < 0) count = 0;
+        if (isCursorPagination && count > 200) {
+            throw new ScimException(400, "tooMany", "Requested count exceeds maxPageSize (200)");
+        }
         if (count > 200) count = 200; // Enforce maxResults from ServiceProviderConfig
 
         Map<String, Object> result = userService.listUsers(wsId, filter, sortBy, sortOrder, effectiveStartIndex, count);
@@ -247,15 +250,15 @@ public class ScimUserController extends ScimBaseController {
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
 
-        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
-            UUID txnId = asyncEventService.submitAsync(wsId, "put", "User", uid, compatBaseUrl, () -> {
+        if (asyncEventService != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "PUT", "User", uid, compatBaseUrl, () -> {
                 ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
                 List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
                 CompatMode compatMode = CompatMode.fromString(compat);
                 Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
                 return applyCompat(scimResponse, compatMode);
             });
-            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId, request);
         }
 
         ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
@@ -293,27 +296,20 @@ public class ScimUserController extends ScimBaseController {
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
 
-        // Validate PATCH schema
-        List<String> schemas = (List<String>) body.get(KEY_SCHEMAS);
-        if (schemas == null || !schemas.contains("urn:ietf:params:scim:api:messages:2.0:PatchOp")) {
-            throw new ScimException(400, "invalidValue",
-                    "PATCH request must include PatchOp schema");
-        }
+        List<Map<String, Object>> operations = extractAndValidatePatchOperations(body);
 
-        List<Map<String, Object>> operations = (List<Map<String, Object>>) body.get("Operations");
-        if (operations == null || operations.isEmpty()) {
-            throw new ScimException(400, "invalidValue", "PATCH Operations is required");
-        }
-
-        if (asyncEventService != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
-            UUID txnId = asyncEventService.submitAsync(wsId, "patch", "User", uid, compatBaseUrl, () -> {
+        if (asyncEventService != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+            List<String> modifiedAttributes = extractModifiedPatchAttributes(operations);
+            UUID txnId = asyncEventService.submitAsync(wsId, "PATCH", "User", uid, compatBaseUrl, () -> {
                 ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
                 List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
                 CompatMode compatMode = CompatMode.fromString(compat);
                 Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
-                return applyCompat(scimResponse, compatMode);
+                Map<String, Object> out = new LinkedHashMap<>(applyCompat(scimResponse, compatMode));
+                out.put(ScimAsyncEventService.INTERNAL_MODIFIED_ATTRIBUTES_KEY, modifiedAttributes);
+                return out;
             });
-            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId, request);
         }
 
         ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
@@ -360,27 +356,15 @@ public class ScimUserController extends ScimBaseController {
             sortOrder = s;
         }
 
-        String cursor = null;
-        Object cursorObj = body.get("cursor");
-        if (cursorObj instanceof String s) {
-            cursor = s;
-        }
-
-        Integer startIndex = null;
-        Object startIndexObj = body.get("startIndex");
-        if (startIndexObj instanceof Number num) {
-            startIndex = num.intValue();
-        }
+        String cursor = extractOptionalStringParam(body, "cursor");
+        Integer startIndex = extractOptionalIntParam(body, "startIndex");
 
         if (cursor != null && startIndex != null) {
             throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
         }
 
-        int count = 100;
-        Object countObj = body.get("count");
-        if (countObj instanceof Number num) {
-            count = num.intValue();
-        }
+        Integer countParam = extractOptionalIntParam(body, "count");
+        int count = countParam != null ? countParam : 100;
 
         String attributes = extractAttributesParam(body.get("attributes"));
         String excludedAttributes = extractAttributesParam(body.get("excludedAttributes"));
@@ -402,16 +386,29 @@ public class ScimUserController extends ScimBaseController {
         UUID wsId = resolveWorkspaceId(workspaceId);
         UUID uid = parseUUID(userId, "User");
         String compatBaseUrl = request != null ? buildBaseUrl(request, workspaceId, compat) : "";
+        String ifMatch = request != null ? request.getHeader("If-Match") : null;
+        if (ifMatch != null && ifMatch.isBlank()) {
+            ifMatch = null;
+        }
+        final String effectiveIfMatch = ifMatch;
 
-        if (asyncEventService != null && request != null && ScimPreferHeaderUtil.hasRespondAsync(request)) {
-            UUID txnId = asyncEventService.submitAsync(wsId, "delete", "User", uid, compatBaseUrl, () -> {
-                userService.deleteUser(wsId, uid);
+        if (asyncEventService != null && request != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+            UUID txnId = asyncEventService.submitAsync(wsId, "DELETE", "User", uid, compatBaseUrl, () -> {
+                if (effectiveIfMatch != null) {
+                    userService.deleteUser(wsId, uid, effectiveIfMatch);
+                } else {
+                    userService.deleteUser(wsId, uid);
+                }
                 return Collections.emptyMap();
             });
-            return buildAsyncAcceptedResponse(compatBaseUrl, txnId);
+            return buildAsyncAcceptedResponse(compatBaseUrl, txnId, request);
         }
 
-        userService.deleteUser(wsId, uid);
+        if (effectiveIfMatch != null) {
+            userService.deleteUser(wsId, uid, effectiveIfMatch);
+        } else {
+            userService.deleteUser(wsId, uid);
+        }
 
         return ResponseEntity.noContent().build();
     }

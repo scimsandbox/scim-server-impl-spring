@@ -9,6 +9,7 @@ import org.springframework.transaction.support.TransactionOperations;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,7 +34,7 @@ public class WorkspaceActivityService {
     }
 
     public void touchWorkspace(UUID workspaceId) {
-        pendingUpdates.put(workspaceId, Instant.now(clock));
+        pendingUpdates.put(workspaceId, Instant.now(clock).truncatedTo(ChronoUnit.MICROS));
     }
 
     @Scheduled(cron = "${app.workspace.activity.flush-cron:0 0 * * * *}")

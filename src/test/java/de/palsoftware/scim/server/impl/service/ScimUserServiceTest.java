@@ -188,6 +188,24 @@ class ScimUserServiceTest {
         Sort.Order order = sort.getOrderFor("title");
         assertThat(order).isNotNull();
         assertThat(order.isAscending()).isTrue();
+        assertThat(order.isIgnoreCase()).isTrue();
+        assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_LAST);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_caseExactExternalId_doesNotIgnoreCase() {
+        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(1L);
+        when(userRepository.findAll(any(Specification.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(user)));
+
+        service.listUsers(workspaceId, null, "externalId", "ascending", 1, 10);
+
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(userRepository).findAll(any(Specification.class), pageableCaptor.capture());
+        Sort.Order order = pageableCaptor.getValue().getSort().getOrderFor("externalId");
+        assertThat(order).isNotNull();
+        assertThat(order.isIgnoreCase()).isFalse();
         assertThat(order.getNullHandling()).isEqualTo(Sort.NullHandling.NULLS_LAST);
     }
 
@@ -486,5 +504,57 @@ class ScimUserServiceTest {
         assertThat(result.getEmails()).hasSize(1);
         assertThat(result.getEmails().get(0).getValue()).isEqualTo("dup@example.com");
         assertThat(result.getEmails().get(0).isPrimaryFlag()).isTrue();
+    }
+
+    @Test
+    void createUser_resolvesEnterpriseManagerDisplayInSameWorkspace() {
+        UUID mgrId = UUID.randomUUID();
+        ScimUser manager = new ScimUser();
+        manager.setId(mgrId);
+        manager.setWorkspace(workspace);
+        manager.setUserName("boss");
+        manager.setDisplayName("Boss Person");
+
+        when(workspaceRepository.findById(workspaceId)).thenReturn(Optional.of(workspace));
+        when(userRepository.findByIdAndWorkspaceId(mgrId, workspaceId)).thenReturn(Optional.of(manager));
+        when(userRepository.save(any(ScimUser.class))).thenAnswer(i -> i.getArgument(0));
+
+        Map<String, Object> input = Map.of(
+                "userName", "report",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", Map.of(
+                        "manager", Map.of("value", mgrId.toString(), "displayName", "Forged Client Name")
+                )
+        );
+
+        ScimUser created = service.createUser(workspaceId, input);
+        assertThat(created.getEnterpriseManagerValue()).isEqualTo(mgrId.toString());
+        assertThat(created.getEnterpriseManagerDisplay()).isEqualTo("Boss Person");
+    }
+
+    @Test
+    void patchUser_noopDoesNotSaveOrBumpVersion() {
+        user.setDisplayName("Same Name");
+        when(userRepository.findByIdAndWorkspaceId(userId, workspaceId)).thenReturn(Optional.of(user));
+
+        List<Map<String, Object>> ops = List.of(
+                Map.of("op", "replace", "path", "displayName", "value", "Same Name")
+        );
+
+        ScimUser result = service.patchUser(workspaceId, userId, ops, null);
+        assertThat(result).isSameAs(user);
+        org.mockito.Mockito.verify(userRepository, org.mockito.Mockito.never()).save(any());
+    }
+
+    @Test
+    void patchUser_removeUserName_throwsMutability() {
+        when(userRepository.findByIdAndWorkspaceId(userId, workspaceId)).thenReturn(Optional.of(user));
+
+        List<Map<String, Object>> ops = List.of(Map.of("op", "remove", "path", "userName"));
+        ScimException error = catchThrowableOfType(ScimException.class,
+                () -> service.patchUser(workspaceId, userId, ops, null));
+
+        assertThat(error).isNotNull();
+        assertThat(error.getHttpStatus()).isEqualTo(400);
+        assertThat(error.getScimType()).isEqualTo("mutability");
     }
 }

@@ -4,6 +4,7 @@ import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimUser;
 import de.palsoftware.scim.server.impl.scim.compat.CompatMode;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.filter.ScimFilterParser;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimGroupMapper;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
 import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
@@ -49,11 +50,17 @@ public class ScimDiscoveryController extends ScimBaseController {
     // ─── ServiceProviderConfig ──────────────────────────────────────────
 
     @GetMapping("/ServiceProviderConfig")
-        public ResponseEntity<Map<String, Object>> getServiceProviderConfig(
-            @PathVariable(name = "compat", required = false) String compat) {
+    public ResponseEntity<Map<String, Object>> getServiceProviderConfig(
+            @PathVariable(name = "compat", required = false) String compat,
+            @RequestParam(name = "filter", required = false) String filter) {
+        rejectDiscoveryFilter(filter);
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
                 .body(ScimSchemaDefinitions.serviceProviderConfig());
+    }
+
+    public ResponseEntity<Map<String, Object>> getServiceProviderConfig(String compat) {
+        return getServiceProviderConfig(compat, null);
     }
 
     @RequestMapping(value = "/ServiceProviderConfig", method = {RequestMethod.POST, RequestMethod.PUT,
@@ -67,7 +74,9 @@ public class ScimDiscoveryController extends ScimBaseController {
 
     @GetMapping("/Schemas")
     public ResponseEntity<Map<String, Object>> getSchemas(
-            @PathVariable(name = "compat", required = false) String compat) {
+            @PathVariable(name = "compat", required = false) String compat,
+            @RequestParam(name = "filter", required = false) String filter) {
+        rejectDiscoveryFilter(filter);
         List<Map<String, Object>> schemas = ScimSchemaDefinitions.allSchemas();
         Map<String, Object> response = new LinkedHashMap<>();
         response.put(KEY_SCHEMAS, List.of("urn:ietf:params:scim:api:messages:2.0:ListResponse"));
@@ -78,6 +87,10 @@ public class ScimDiscoveryController extends ScimBaseController {
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
                 .body(response);
+    }
+
+    public ResponseEntity<Map<String, Object>> getSchemas(String compat) {
+        return getSchemas(compat, null);
     }
 
     @GetMapping("/Schemas/{schemaId}")
@@ -108,7 +121,9 @@ public class ScimDiscoveryController extends ScimBaseController {
     @GetMapping("/ResourceTypes")
     public ResponseEntity<Map<String, Object>> getResourceTypes(HttpServletRequest request,
             @PathVariable String workspaceId,
-            @PathVariable(name = "compat", required = false) String compat) {
+            @PathVariable(name = "compat", required = false) String compat,
+            @RequestParam(name = "filter", required = false) String filter) {
+        rejectDiscoveryFilter(filter != null ? filter : (request != null ? request.getParameter("filter") : null));
         String baseUrl = buildBaseUrl(request, workspaceId, compat);
         List<Map<String, Object>> types = ScimSchemaDefinitions.resourceTypes(baseUrl);
         Map<String, Object> response = new LinkedHashMap<>();
@@ -120,6 +135,18 @@ public class ScimDiscoveryController extends ScimBaseController {
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
                 .body(response);
+    }
+
+    public ResponseEntity<Map<String, Object>> getResourceTypes(HttpServletRequest request,
+            String workspaceId,
+            String compat) {
+        return getResourceTypes(request, workspaceId, compat, null);
+    }
+
+    private static void rejectDiscoveryFilter(String filter) {
+        if (filter != null && !filter.isBlank()) {
+            throw new ScimException(403, null, "Filtering is not supported on discovery endpoints");
+        }
     }
 
     @GetMapping("/ResourceTypes/{resourceTypeId}")
@@ -210,27 +237,15 @@ public class ScimDiscoveryController extends ScimBaseController {
             sortOrder = s;
         }
 
-        String cursor = null;
-        Object cursorObj = reqBody.get("cursor");
-        if (cursorObj instanceof String s) {
-            cursor = s;
-        }
-
-        Integer startIndex = null;
-        Object startIndexObj = reqBody.get("startIndex");
-        if (startIndexObj instanceof Number num) {
-            startIndex = num.intValue();
-        }
+        String cursor = extractOptionalStringParam(reqBody, "cursor");
+        Integer startIndex = extractOptionalIntParam(reqBody, "startIndex");
 
         if (cursor != null && startIndex != null) {
             throw new ScimException(400, "invalidValue", "Cannot specify both cursor and startIndex");
         }
 
-        int count = 100;
-        Object countObj = reqBody.get("count");
-        if (countObj instanceof Number num) {
-            count = num.intValue();
-        }
+        Integer countParam = extractOptionalIntParam(reqBody, "count");
+        int count = countParam != null ? countParam : 100;
 
         String attributes = extractAttributesParam(reqBody.get("attributes"));
         String excludedAttributes = extractAttributesParam(reqBody.get("excludedAttributes"));
@@ -262,16 +277,16 @@ public class ScimDiscoveryController extends ScimBaseController {
     // ─── Helpers ────────────────────────────────────────────────────────
 
     private static final Pattern USER_TYPE_PATTERN = Pattern.compile(
-            "(?i)\\b(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+eq\\s+[\"']?User[\"']?"
+            "(?i)^(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+eq\\s+[\"']?User[\"']?$"
     );
     private static final Pattern GROUP_TYPE_PATTERN = Pattern.compile(
-            "(?i)\\b(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+eq\\s+[\"']?Group[\"']?"
+            "(?i)^(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+eq\\s+[\"']?Group[\"']?$"
     );
     private static final Pattern NOT_USER_TYPE_PATTERN = Pattern.compile(
-            "(?i)\\b(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+ne\\s+[\"']?User[\"']?"
+            "(?i)^(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+ne\\s+[\"']?User[\"']?$"
     );
     private static final Pattern NOT_GROUP_TYPE_PATTERN = Pattern.compile(
-            "(?i)\\b(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+ne\\s+[\"']?Group[\"']?"
+            "(?i)^(?:urn:ietf:params:scim:schemas:core:2\\.0:(?:User|Group):)?meta\\.resourceType\\s+ne\\s+[\"']?Group[\"']?$"
     );
 
     private static class TargetResourceTypes {
@@ -288,21 +303,47 @@ public class ScimDiscoveryController extends ScimBaseController {
         if (filter == null || filter.isBlank()) {
             return new TargetResourceTypes(true, true);
         }
-        boolean hasUserEq = USER_TYPE_PATTERN.matcher(filter).find();
-        boolean hasGroupEq = GROUP_TYPE_PATTERN.matcher(filter).find();
-        boolean hasNotUser = NOT_USER_TYPE_PATTERN.matcher(filter).find();
-        boolean hasNotGroup = NOT_GROUP_TYPE_PATTERN.matcher(filter).find();
-
-        if (hasUserEq && hasGroupEq) {
-            return new TargetResourceTypes(true, true);
-        }
-        if (hasUserEq || hasNotGroup) {
+        String unwrapped = stripOuterParentheses(filter);
+        if (USER_TYPE_PATTERN.matcher(unwrapped).matches() || NOT_GROUP_TYPE_PATTERN.matcher(unwrapped).matches()) {
             return new TargetResourceTypes(true, false);
         }
-        if (hasGroupEq || hasNotUser) {
+        if (GROUP_TYPE_PATTERN.matcher(unwrapped).matches() || NOT_USER_TYPE_PATTERN.matcher(unwrapped).matches()) {
             return new TargetResourceTypes(false, true);
         }
         return new TargetResourceTypes(true, true);
+    }
+
+    private static String stripOuterParentheses(String filter) {
+        String s = filter.trim();
+        while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
+            int depth = 0;
+            boolean inQuotes = false;
+            boolean wrapsEntireExpression = true;
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                if (c == '"' && (i == 0 || s.charAt(i - 1) != '\\')) {
+                    inQuotes = !inQuotes;
+                } else if (!inQuotes) {
+                    if (c == '(') {
+                        depth++;
+                    } else if (c == ')') {
+                        depth--;
+                        if (depth == 0 && i < s.length() - 1) {
+                            wrapsEntireExpression = false;
+                            break;
+                        }
+                        if (depth < 0) {
+                            return s;
+                        }
+                    }
+                }
+            }
+            if (!wrapsEntireExpression || depth != 0 || inQuotes) {
+                break;
+            }
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        return s;
     }
 
     private static boolean isAttributeAbsenceError(ScimException e) {
@@ -361,6 +402,9 @@ public class ScimDiscoveryController extends ScimBaseController {
         }
 
         if (count < 0) count = 0;
+        if (isCursorPagination && count > 200) {
+            throw new ScimException(400, "tooMany", "Requested count exceeds maxPageSize (200)");
+        }
         if (count > 200) count = 200; // Enforce maxResults from ServiceProviderConfig
 
         TargetResourceTypes targets = resolveTargetResourceTypes(filter);
@@ -565,7 +609,9 @@ public class ScimDiscoveryController extends ScimBaseController {
 
     private Comparator<Map<String, Object>> buildCrossResourceComparator(String sortBy, String sortOrder) {
         boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
-        Comparator<String> strComp = String.CASE_INSENSITIVE_ORDER;
+        Comparator<String> strComp = ScimFilterParser.isSortByCaseExact(sortBy)
+                ? Comparator.naturalOrder()
+                : String.CASE_INSENSITIVE_ORDER;
         Comparator<String> valComparator = isDescending
                 ? Comparator.nullsFirst(strComp.reversed())
                 : Comparator.nullsLast(strComp);

@@ -56,11 +56,14 @@ public class ScimGroupMapper {
         Map<String, Object> map = new LinkedHashMap<>(5);
         map.put("value", m.getMemberValue().toString());
 
-        String type = m.getMemberType() != null ? m.getMemberType() : "User";
-        String resourcePath = "User".equalsIgnoreCase(type) ? "/Users/" : "/Groups/";
+        String rawType = m.getMemberType();
+        boolean hasType = rawType != null && !rawType.isBlank();
+        String resourcePath = (hasType && "Group".equalsIgnoreCase(rawType)) ? "/Groups/" : "/Users/";
         map.put("$ref", baseUrl + resourcePath + m.getMemberValue());
         if (m.getDisplay() != null) map.put("display", m.getDisplay());
-        map.put("type", type);
+        if (hasType) {
+            map.put("type", rawType);
+        }
         return map;
     }
 }

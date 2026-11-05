@@ -125,8 +125,21 @@ class ScimUserMapperTest {
         assertEquals("test@test.com", email.getValue());
         assertEquals("work", email.getType());
 
+        // RFC 7643 §7: canonicalValues on 'type' are advisory; custom string types are accepted
         item.put("type", "invalid");
+        ScimUserEmail customTypeEmail = ScimUserMapper.buildEmail(item);
+        assertEquals("invalid", customTypeEmail.getType());
+
+        // Non-string type must still fail with 400 invalidValue
+        item.put("type", 123);
         assertThrows(ScimException.class, () -> ScimUserMapper.buildEmail(item));
+
+        // Omitted emails.type defaults to "work" per RFC 7643 §2.4 / §4.1.2
+        Map<String, Object> defaultTypeEmailMap = new HashMap<>();
+        defaultTypeEmailMap.put("value", "Alice@EXAMPLE.COM");
+        ScimUserEmail defaultTypeEmail = ScimUserMapper.buildEmail(defaultTypeEmailMap);
+        assertEquals("Alice@example.com", defaultTypeEmail.getValue());
+        assertEquals("work", defaultTypeEmail.getType());
 
         item.clear();
         item.put("value", Base64.getEncoder().encodeToString("cert".getBytes()));
@@ -310,5 +323,146 @@ class ScimUserMapperTest {
         Map<String, Object> grpMetaV2 = (Map<String, Object>) grpV2.get("meta");
         assertEquals(created.toString(), grpMetaV2.get("created"));
         assertEquals(modified.toString(), grpMetaV2.get("lastModified"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testMicrosecondTimestampTruncation_matchesPostgresTimestamptzPrecision() {
+        java.time.Instant nanoCreated = java.time.Instant.parse("2026-11-03T08:57:34.851123671Z");
+        java.time.Instant nanoModified = java.time.Instant.parse("2026-11-03T09:12:45.999888777Z");
+        String expectedCreatedStr = "2026-11-03T08:57:34.851123Z";
+        String expectedModifiedStr = "2026-11-03T09:12:45.999888Z";
+
+        // 1. ScimUser & ScimGroup setters + SCIM meta serialization parity
+        ScimUser u = new ScimUser();
+        u.setId(UUID.randomUUID());
+        u.setUserName("nanoUser");
+        u.setCreatedAt(nanoCreated);
+        u.setLastModified(nanoModified);
+        u.setVersion(1L);
+
+        assertEquals(0, u.getCreatedAt().getNano() % 1_000);
+        assertEquals(0, u.getLastModified().getNano() % 1_000);
+        Map<String, Object> userMeta = (Map<String, Object>)
+                ScimUserMapper.toScimResponse(u, "http://localhost", Collections.emptyList()).get("meta");
+        assertEquals(expectedCreatedStr, userMeta.get("created"));
+        assertEquals(expectedModifiedStr, userMeta.get("lastModified"));
+
+        ScimGroup g = new ScimGroup();
+        g.setId(UUID.randomUUID());
+        g.setDisplayName("nanoGroup");
+        g.setCreatedAt(nanoCreated);
+        g.setLastModified(nanoModified);
+        g.setVersion(1L);
+
+        assertEquals(0, g.getCreatedAt().getNano() % 1_000);
+        assertEquals(0, g.getLastModified().getNano() % 1_000);
+        Map<String, Object> groupMeta = (Map<String, Object>)
+                ScimGroupMapper.toScimResponse(g, "http://localhost").get("meta");
+        assertEquals(expectedCreatedStr, groupMeta.get("created"));
+        assertEquals(expectedModifiedStr, groupMeta.get("lastModified"));
+
+        // 2. Lifecycle hooks (@PrePersist / @PreUpdate) across all persisted entities
+        var lifecycleUser = new ScimUser() {
+            void create() { onCreate(); }
+            void update() { onUpdate(); }
+        };
+        lifecycleUser.create();
+        assertEquals(lifecycleUser.getCreatedAt(), lifecycleUser.getLastModified());
+        assertEquals(0, lifecycleUser.getCreatedAt().getNano() % 1_000);
+        lifecycleUser.update();
+        assertEquals(0, lifecycleUser.getLastModified().getNano() % 1_000);
+
+        var lifecycleGroup = new ScimGroup() {
+            void create() { onCreate(); }
+            void update() { onUpdate(); }
+        };
+        lifecycleGroup.create();
+        assertEquals(lifecycleGroup.getCreatedAt(), lifecycleGroup.getLastModified());
+        assertEquals(0, lifecycleGroup.getCreatedAt().getNano() % 1_000);
+        lifecycleGroup.update();
+        assertEquals(0, lifecycleGroup.getLastModified().getNano() % 1_000);
+
+        var asyncEvent = new de.palsoftware.scim.server.impl.entity.ScimAsyncEvent() {
+            void create() { onCreate(); }
+        };
+        asyncEvent.setCreatedAt(nanoCreated);
+        asyncEvent.setCompletedAt(nanoModified);
+        assertEquals(expectedCreatedStr, asyncEvent.getCreatedAt().toString());
+        assertEquals(expectedModifiedStr, asyncEvent.getCompletedAt().toString());
+        asyncEvent.setCreatedAt(null);
+        asyncEvent.create();
+        assertEquals(0, asyncEvent.getCreatedAt().getNano() % 1_000);
+
+        var ws = new Workspace() {
+            void create() { onCreate(); }
+            void update() { onUpdate(); }
+        };
+        ws.setCreatedAt(nanoCreated);
+        ws.setUpdatedAt(nanoModified);
+        assertEquals(expectedCreatedStr, ws.getCreatedAt().toString());
+        assertEquals(expectedModifiedStr, ws.getUpdatedAt().toString());
+        ws.create();
+        assertEquals(0, ws.getCreatedAt().getNano() % 1_000);
+        ws.update();
+        assertEquals(0, ws.getUpdatedAt().getNano() % 1_000);
+
+        var token = new WorkspaceToken() {
+            void create() { onCreate(); }
+            void update() { onUpdate(); }
+        };
+        token.setExpiresAt(nanoCreated);
+        assertEquals(expectedCreatedStr, token.getExpiresAt().toString());
+        token.create();
+        assertEquals(0, token.getCreatedAt().getNano() % 1_000);
+        token.update();
+        assertEquals(0, token.getUpdatedAt().getNano() % 1_000);
+
+        var reqLog = new ScimRequestLog() {
+            void create() { onCreate(); }
+        };
+        reqLog.setCreatedAt(nanoCreated);
+        assertEquals(expectedCreatedStr, reqLog.getCreatedAt().toString());
+        reqLog.create();
+        assertEquals(0, reqLog.getCreatedAt().getNano() % 1_000);
+    }
+
+    @Test
+    // RFC7643-2.4-63934b
+    void applyEnterpriseManager_supportsRefOnlyClearsStaleRefAndRejectsConflicts() {
+        ScimUser user = new ScimUser();
+        UUID mgr1 = UUID.randomUUID();
+        UUID mgr2 = UUID.randomUUID();
+
+        // $ref-only manager populates enterpriseManagerValue and enterpriseManagerRef
+        ScimUserMapper.applyEnterpriseManager(user, Map.of(
+                "$ref", "https://legacy.example/scim/v1/Users/" + mgr1.toString().toUpperCase()));
+        assertEquals(mgr1.toString(), user.getEnterpriseManagerValue());
+        assertNotNull(user.getEnterpriseManagerRef());
+
+        // String manager clears stale enterpriseManagerRef
+        ScimUserMapper.applyEnterpriseManager(user, mgr2.toString());
+        assertEquals(mgr2.toString(), user.getEnterpriseManagerValue());
+        assertNull(user.getEnterpriseManagerRef());
+
+        // Conflicting value vs $ref, non-SCIM URI, and /Groups/<id> URI all fail with 400 invalidValue
+        ScimException conflict = assertThrows(ScimException.class, () ->
+                ScimUserMapper.applyEnterpriseManager(user, Map.of(
+                        "value", mgr1.toString(),
+                        "$ref", "/Users/" + mgr2)));
+        assertEquals(400, conflict.getHttpStatus());
+        assertEquals("invalidValue", conflict.getScimType());
+
+        ScimException nonScim = assertThrows(ScimException.class, () ->
+                ScimUserMapper.applyEnterpriseManager(user, Map.of(
+                        "$ref", "https://example.com/OtherPath/123")));
+        assertEquals(400, nonScim.getHttpStatus());
+        assertEquals("invalidValue", nonScim.getScimType());
+
+        ScimException wrongType = assertThrows(ScimException.class, () ->
+                ScimUserMapper.applyEnterpriseManager(user, Map.of(
+                        "$ref", "/Groups/" + mgr1)));
+        assertEquals(400, wrongType.getHttpStatus());
+        assertEquals("invalidValue", wrongType.getScimType());
     }
 }

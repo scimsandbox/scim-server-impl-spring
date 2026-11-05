@@ -83,7 +83,7 @@ public class ScimSchemaDefinitions {
                 config.put("pagination", Map.of(
                                 PAGINATION_CURSOR, true,
                                 PAGINATION_INDEX, true,
-                                "defaultPaginationMode", PAGINATION_INDEX,
+                                "defaultPaginationMethod", PAGINATION_INDEX,
                                 "defaultPageSize", 10,
                                 "maxPageSize", 200,
                                 "cursorTimeout", 3600));
@@ -97,7 +97,8 @@ public class ScimSchemaDefinitions {
                                 "type", "oauthbearertoken",
                                 ATTR_NAME, "OAuth Bearer Token",
                                 ATTR_DESCRIPTION, "Authentication scheme using the OAuth Bearer Token Standard",
-                                "specUri", "http://www.rfc-editor.org/info/rfc6750")));
+                                "specUri", "http://www.rfc-editor.org/info/rfc6750",
+                                KEY_DOCUMENTATION_URI, "https://datatracker.ietf.org/doc/html/rfc6750")));
                 return config;
         }
 
@@ -183,7 +184,7 @@ public class ScimSchemaDefinitions {
                 attrs.add(idAttr);
 
                 // externalId
-                attrs.add(withCaseExact(attr("externalId", TYPE_STRING, false, MUT_READ_WRITE, UNIQ_SERVER,
+                attrs.add(withCaseExact(attr("externalId", TYPE_STRING, false, MUT_READ_WRITE, UNIQ_NONE,
                                 "An identifier for the resource as defined by the provisioning client", false)));
 
                 // userName
@@ -329,7 +330,7 @@ public class ScimSchemaDefinitions {
                                 "Unique identifier", false));
                 idAttr.put(KEY_RETURNED, RETURNED_ALWAYS);
                 attrs.add(idAttr);
-                attrs.add(withCaseExact(attr("externalId", TYPE_STRING, false, MUT_READ_WRITE, UNIQ_SERVER,
+                attrs.add(withCaseExact(attr("externalId", TYPE_STRING, false, MUT_READ_WRITE, UNIQ_NONE,
                                 "External identifier", false)));
                 attrs.add(attr(ATTR_DISPLAY_NAME, TYPE_STRING, true, MUT_READ_WRITE, UNIQ_NONE,
                                 "A human-readable name for the Group", false));
@@ -673,8 +674,8 @@ public class ScimSchemaDefinitions {
         }
 
         private static Map<String, Object> paginationModeAttr() {
-                Map<String, Object> a = attr("defaultPaginationMode", TYPE_STRING, false, MUT_READ_ONLY, UNIQ_NONE,
-                                "Default pagination mode", false);
+                Map<String, Object> a = attr("defaultPaginationMethod", TYPE_STRING, false, MUT_READ_ONLY, UNIQ_NONE,
+                                "Default pagination method", false);
                 a.put(KEY_CANONICAL_VALUES, List.of(PAGINATION_CURSOR, PAGINATION_INDEX));
                 a.remove(KEY_UNIQUENESS);
                 return a;
@@ -744,7 +745,7 @@ public class ScimSchemaDefinitions {
         private static List<Map<String, Object>> imsSubAttributes() {
                 Map<String, Object> type = attr(ATTR_TYPE, TYPE_STRING, false, MUT_READ_WRITE, UNIQ_NONE,
                                 DESCRIPTION_TYPE_LABEL, false);
-                type.put(KEY_CANONICAL_VALUES, List.of("aim", "gtalk", "icq", "xmpp", "skype", "qq", "msn", "yahoo"));
+                type.put(KEY_CANONICAL_VALUES, List.of("aim", "gtalk", "icq", "xmpp", "skype", "qq", "msn", "yahoo", VALUE_OTHER));
                 return List.of(
                                 attr(ATTR_VALUE, TYPE_STRING, false, MUT_READ_WRITE, UNIQ_NONE, DESCRIPTION_THE_VALUE,
                                                 false),

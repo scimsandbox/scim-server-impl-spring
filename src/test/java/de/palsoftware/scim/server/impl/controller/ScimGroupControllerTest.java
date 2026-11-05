@@ -439,7 +439,7 @@ class ScimGroupControllerTest {
         ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
         ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
         UUID txnId = UUID.randomUUID();
-        when(asyncService.submitAsync(eq(workspaceId), eq("create"), eq("Group"), isNull(), anyString(), any()))
+        when(asyncService.submitAsync(eq(workspaceId), eq("POST"), eq("Group"), isNull(), anyString(), any()))
                 .thenReturn(txnId);
 
         request.addHeader("Prefer", "respond-async");
@@ -460,7 +460,7 @@ class ScimGroupControllerTest {
         ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
         ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
         UUID txnId = UUID.randomUUID();
-        when(asyncService.submitAsync(eq(workspaceId), eq("put"), eq("Group"), eq(groupId), anyString(), any()))
+        when(asyncService.submitAsync(eq(workspaceId), eq("PUT"), eq("Group"), eq(groupId), anyString(), any()))
                 .thenReturn(txnId);
 
         request.addHeader("Prefer", "respond-async");
@@ -479,7 +479,7 @@ class ScimGroupControllerTest {
         ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
         ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
         UUID txnId = UUID.randomUUID();
-        when(asyncService.submitAsync(eq(workspaceId), eq("patch"), eq("Group"), eq(groupId), anyString(), any()))
+        when(asyncService.submitAsync(eq(workspaceId), eq("PATCH"), eq("Group"), eq(groupId), anyString(), any()))
                 .thenReturn(txnId);
 
         request.addHeader("Prefer", "respond-async");
@@ -501,7 +501,7 @@ class ScimGroupControllerTest {
         ScimAsyncEventService asyncService = Mockito.mock(ScimAsyncEventService.class);
         ScimGroupController asyncController = new ScimGroupController(groupService, asyncService);
         UUID txnId = UUID.randomUUID();
-        when(asyncService.submitAsync(eq(workspaceId), eq("delete"), eq("Group"), eq(groupId), anyString(), any()))
+        when(asyncService.submitAsync(eq(workspaceId), eq("DELETE"), eq("Group"), eq(groupId), anyString(), any()))
                 .thenReturn(txnId);
 
         request.addHeader("Prefer", "respond-async");

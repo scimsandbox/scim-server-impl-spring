@@ -530,4 +530,43 @@ class ScimFilterParserTest {
         assertNotNull(groupEqUser);
         groupEqUser.toPredicate(groupRoot, query, cb);
     }
+
+    @Test
+    void testContainsValuePathAndSortCaseExact() {
+        assertTrue(ScimFilterParser.containsValuePath("emails[type eq \"work\"]"));
+        assertFalse(ScimFilterParser.containsValuePath("userName eq \"a[b]c\""));
+        assertFalse(ScimFilterParser.containsValuePath(null));
+
+        assertTrue(ScimFilterParser.isSortByCaseExact("externalId"));
+        assertTrue(ScimFilterParser.isSortByCaseExact("profileUrl"));
+        assertTrue(ScimFilterParser.isSortByCaseExact("id"));
+        assertFalse(ScimFilterParser.isSortByCaseExact("userName"));
+        assertFalse(ScimFilterParser.isSortByCaseExact("displayName"));
+    }
+
+    @Test
+    void testTopLevelCollectionPresenceAndCrossResourceAbsence() {
+        Predicate mockFalse = Mockito.mock(Predicate.class);
+        when(cb.disjunction()).thenReturn(mockFalse);
+
+        String[] collectionPr = {"emails pr", "phoneNumbers pr", "name pr",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User pr",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager pr",
+                "members pr"};
+        for (String f : collectionPr) {
+            Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(f, workspaceId);
+            assertNotNull(spec);
+            spec.toPredicate(root, query, cb);
+        }
+
+        Root<ScimGroup> groupRoot = Mockito.mock(Root.class);
+        Path groupWsPath = Mockito.mock(Path.class);
+        Path groupWsIdPath = Mockito.mock(Path.class);
+        when(groupRoot.get("workspace")).thenReturn(groupWsPath);
+        when(groupWsPath.get("id")).thenReturn(groupWsIdPath);
+
+        Specification<ScimGroup> crossGroup = ScimFilterParser.parseGroupFilter("userName eq \"alice\"", workspaceId);
+        assertNotNull(crossGroup);
+        crossGroup.toPredicate(groupRoot, query, cb);
+    }
 }

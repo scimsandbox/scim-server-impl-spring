@@ -81,5 +81,21 @@ class WorkspaceActivityServiceTest {
 
         verifyNoInteractions(workspaceRepository);
     }
+
+    @Test
+    void touchWorkspace_truncatesNanosecondClockToMicroseconds() {
+        Instant nanoTime = Instant.parse("2026-11-03T08:57:34.851123671Z");
+        Instant expectedMicros = Instant.parse("2026-11-03T08:57:34.851123Z");
+        WorkspaceActivityService nanoService = new WorkspaceActivityService(
+                workspaceRepository,
+                TransactionOperations.withoutTransaction(),
+                Clock.fixed(nanoTime, ZoneId.of("UTC")));
+
+        UUID wsId = UUID.randomUUID();
+        nanoService.touchWorkspace(wsId);
+        nanoService.flushToDatabase();
+
+        verify(workspaceRepository).touchUpdatedAt(wsId, expectedMicros);
+    }
 }
 

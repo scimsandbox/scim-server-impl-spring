@@ -2,6 +2,7 @@ package de.palsoftware.scim.server.impl.model;
 
 import jakarta.persistence.*;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 @Entity
@@ -32,13 +33,13 @@ public class Workspace {
 
     @PrePersist
     protected void onCreate() {
-        createdAt = Instant.now();
-        updatedAt = Instant.now();
+        createdAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        updatedAt = createdAt;
     }
 
     @PreUpdate
     protected void onUpdate() {
-        updatedAt = Instant.now();
+        updatedAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     // Getters and Setters
@@ -80,7 +81,7 @@ public class Workspace {
     }
 
     public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
+        this.createdAt = createdAt != null ? createdAt.truncatedTo(ChronoUnit.MICROS) : null;
     }
 
     public Instant getUpdatedAt() {
@@ -88,6 +89,6 @@ public class Workspace {
     }
 
     public void setUpdatedAt(Instant updatedAt) {
-        this.updatedAt = updatedAt;
+        this.updatedAt = updatedAt != null ? updatedAt.truncatedTo(ChronoUnit.MICROS) : null;
     }
 }

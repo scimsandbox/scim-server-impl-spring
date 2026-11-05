@@ -6,6 +6,7 @@ import org.hibernate.annotations.OnDelete;
 import org.hibernate.annotations.OnDeleteAction;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 /**
@@ -51,9 +52,7 @@ public class ScimAsyncEvent {
 
     @PrePersist
     protected void onCreate() {
-        if (createdAt == null) {
-            createdAt = Instant.now();
-        }
+        createdAt = (createdAt == null ? Instant.now() : createdAt).truncatedTo(ChronoUnit.MICROS);
     }
 
     public UUID getTxnId() {
@@ -117,7 +116,7 @@ public class ScimAsyncEvent {
     }
 
     public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
+        this.createdAt = createdAt != null ? createdAt.truncatedTo(ChronoUnit.MICROS) : null;
     }
 
     public Instant getCompletedAt() {
@@ -125,6 +124,6 @@ public class ScimAsyncEvent {
     }
 
     public void setCompletedAt(Instant completedAt) {
-        this.completedAt = completedAt;
+        this.completedAt = completedAt != null ? completedAt.truncatedTo(ChronoUnit.MICROS) : null;
     }
 }

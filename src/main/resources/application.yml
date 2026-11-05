@@ -83,6 +83,15 @@ app:
       cron: "0 0 * * * *"
       zone: UTC
       max-count: 10000
+    async-events:
+      enabled: true
+      cron: "0 0 * * * *"
+      zone: UTC
+      max-count: 5000
+      stale-pending:
+        enabled: true
+        cron: "0 */1 * * * *"
+        timeout: 5m
   workspace:
     activity:
       flush-cron: "0 0 * * * *"

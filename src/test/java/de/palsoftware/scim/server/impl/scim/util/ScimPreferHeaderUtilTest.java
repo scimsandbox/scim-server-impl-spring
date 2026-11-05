@@ -69,4 +69,29 @@ class ScimPreferHeaderUtilTest {
         reqOther.addHeader("Prefer", "return=minimal");
         assertFalse(ScimPreferHeaderUtil.hasRespondAsync(reqOther));
     }
+
+    @Test
+    void testWaitPreferenceAndShouldExecuteAsync() {
+        MockHttpServletRequest reqAsyncOnly = new MockHttpServletRequest();
+        reqAsyncOnly.addHeader("Prefer", "respond-async");
+        assertTrue(ScimPreferHeaderUtil.getWaitSeconds(reqAsyncOnly).isEmpty());
+        assertTrue(ScimPreferHeaderUtil.shouldExecuteAsync(reqAsyncOnly));
+        assertEquals("respond-async", ScimPreferHeaderUtil.buildPreferenceAppliedHeader(reqAsyncOnly));
+
+        MockHttpServletRequest reqWait10Comma = new MockHttpServletRequest();
+        reqWait10Comma.addHeader("Prefer", "respond-async, wait=10");
+        assertEquals(10, ScimPreferHeaderUtil.getWaitSeconds(reqWait10Comma).orElse(-1));
+        assertFalse(ScimPreferHeaderUtil.shouldExecuteAsync(reqWait10Comma));
+
+        MockHttpServletRequest reqWait10Semi = new MockHttpServletRequest();
+        reqWait10Semi.addHeader("Prefer", "respond-async; wait=10");
+        assertEquals(10, ScimPreferHeaderUtil.getWaitSeconds(reqWait10Semi).orElse(-1));
+        assertFalse(ScimPreferHeaderUtil.shouldExecuteAsync(reqWait10Semi));
+
+        MockHttpServletRequest reqWaitZero = new MockHttpServletRequest();
+        reqWaitZero.addHeader("Prefer", "respond-async, wait=0");
+        assertEquals(0, ScimPreferHeaderUtil.getWaitSeconds(reqWaitZero).orElse(-1));
+        assertTrue(ScimPreferHeaderUtil.shouldExecuteAsync(reqWaitZero));
+        assertEquals("respond-async, wait=0", ScimPreferHeaderUtil.buildPreferenceAppliedHeader(reqWaitZero));
+    }
 }
