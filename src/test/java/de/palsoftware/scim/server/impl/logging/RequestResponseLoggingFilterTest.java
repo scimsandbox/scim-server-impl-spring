@@ -189,4 +189,50 @@ class RequestResponseLoggingFilterTest {
         String nonPasswordJson = "{\"userName\":\"carol\",\"displayName\":\"Carol Dan\"}";
         assertEquals(nonPasswordJson, RequestResponseLoggingFilter.redactPasswords(nonPasswordJson));
     }
+
+    @Test
+    void bulkRequestStreamExceedingMaxPayloadSize_AbortsEarlyWith413() throws Exception {
+        byte[] oversizedBody = new byte[de.palsoftware.scim.server.impl.controller.ScimBulkController.MAX_PAYLOAD_SIZE + 512];
+        java.util.Arrays.fill(oversizedBody, (byte) 'a');
+
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setMethod("POST");
+        request.setRequestURI("/ws/" + workspaceId + "/scim/v2/Bulk");
+        request.setContentType("application/scim+json");
+        request.setContent(oversizedBody);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        FilterChain chain = (servletRequest, servletResponse) -> {
+            // Attempting to read the entire stream triggers the 1 MiB cap in BoundedBulkRequestWrapper
+            servletRequest.getInputStream().readAllBytes();
+        };
+
+        filter.doFilter(request, response, chain);
+
+        assertEquals(413, response.getStatus());
+        assertTrue(response.getContentAsString().contains("urn:ietf:params:scim:api:messages:2.0:Error"));
+        assertTrue(response.getContentAsString().contains("\"status\":\"413\""));
+    }
+
+    @Test
+    void redactWithRegexFallback_LinearTimeOnAdversarialMalformedInput() {
+        // 20,000-character malformed JSON payload with repeated "value":"..." segments and unclosed quotes
+        StringBuilder sb = new StringBuilder(22_000);
+        sb.append("{\"Operations\":[");
+        for (int i = 0; i < 400; i++) {
+            sb.append("{\"op\":\"replace\",\"value\":\"")
+              .append("a".repeat(30))
+              .append("\",\"extra\":\"unclosed");
+        }
+        sb.append("{\"op\":\"replace\",\"path\":\"password\",\"value\":\"FinalSecret!99");
+        String adversarial = sb.toString();
+
+        long startNanos = System.nanoTime();
+        String redacted = RequestResponseLoggingFilter.redactPasswords(adversarial);
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+
+        assertFalse(redacted.contains("FinalSecret!99"));
+        assertTrue(redacted.contains("\"[REDACTED]\""));
+        assertTrue(elapsedMs < 500, "Expected linear-time redaction (<500ms), took " + elapsedMs + "ms");
+    }
 }

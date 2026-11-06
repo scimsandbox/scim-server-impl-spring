@@ -46,6 +46,15 @@ public class ScimUserX509Certificate {
         this.primaryFlag = primaryFlag;
     }
 
+    public ScimUserX509Certificate copy() {
+        ScimUserX509Certificate copy = new ScimUserX509Certificate();
+        copy.setValue(this.value);
+        copy.setType(this.type);
+        copy.setDisplay(this.display);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

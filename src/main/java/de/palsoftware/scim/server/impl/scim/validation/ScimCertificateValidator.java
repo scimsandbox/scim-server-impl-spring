@@ -27,6 +27,12 @@ public final class ScimCertificateValidator {
         return value.trim();
     }
 
+    public static String validateAndCanonicalizeBase64(String value, String fieldName) {
+        validateSingleDerCertificateOrBinary(value, fieldName);
+        byte[] decoded = decodeBase64(value.trim(), fieldName);
+        return Base64.getEncoder().encodeToString(decoded);
+    }
+
     public static void validateSingleDerCertificateOrBinary(String value, String fieldName) {
         if (value == null || value.isBlank()) {
             throw new ScimException(400, "invalidValue", fieldName + " must not be blank");

@@ -82,7 +82,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
             filterChain.doFilter(request, response);
             return;
         }
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        if (authHeader == null || !authHeader.regionMatches(true, 0, "Bearer ", 0, 7)) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
             sendScimError(response, 401, null, "Missing or invalid Authorization header");
             return;

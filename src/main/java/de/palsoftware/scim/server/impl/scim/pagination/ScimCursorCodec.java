@@ -4,13 +4,14 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
@@ -29,8 +30,9 @@ public final class ScimCursorCodec {
 
     private static final int HMAC_TAG_BYTES = 16;
     private static final String HMAC_ALGO = "HmacSHA256";
+    private static final String DEFAULT_CLUSTER_HMAC_SECRET = "scim-cursor-default-cluster-hmac-key-v1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final byte[] HMAC_SECRET = initHmacSecret();
+    private static volatile byte[] hmacSecret = initHmacSecret();
 
     public record CursorPayload(
             @JsonProperty("w") String w,
@@ -42,26 +44,52 @@ public final class ScimCursorCodec {
         // Utility class
     }
 
-    private static byte[] initHmacSecret() {
-        String configured = System.getenv("SCIM_CURSOR_SECRET");
-        if (configured != null && !configured.isBlank()) {
-            try {
-                return MessageDigest.getInstance("SHA-256")
-                        .digest(configured.getBytes(StandardCharsets.UTF_8));
-            } catch (GeneralSecurityException e) {
-                throw new IllegalStateException("Failed to initialize cursor HMAC key", e);
-            }
+    static byte[] deriveHmacKey(String secret) {
+        try {
+            return MessageDigest.getInstance("SHA-256")
+                    .digest(("scim-cursor-hmac-v1:" + secret.trim()).getBytes(StandardCharsets.UTF_8));
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("Failed to initialize cursor HMAC key", e);
         }
-        byte[] randomKey = new byte[32];
-        new SecureRandom().nextBytes(randomKey);
-        return randomKey;
     }
 
-    private static byte[] computeHmac16(byte[] payloadBytes) {
+    private static byte[] initHmacSecret() {
+        String[] candidates = {
+                System.getenv("SCIM_CURSOR_SECRET"),
+                System.getProperty("scim.cursor.secret"),
+                System.getenv("SPRING_DATASOURCE_PASSWORD"),
+                System.getProperty("spring.datasource.password")
+        };
+        for (String candidate : candidates) {
+            if (candidate != null && !candidate.isBlank()) {
+                return deriveHmacKey(candidate);
+            }
+        }
+        return deriveHmacKey(DEFAULT_CLUSTER_HMAC_SECRET);
+    }
+
+    public static void configureSecret(String secret) {
+        if (secret != null && !secret.isBlank()) {
+            hmacSecret = deriveHmacKey(secret);
+        } else {
+            hmacSecret = initHmacSecret();
+        }
+    }
+
+    @Component
+    public static class ScimCursorSecretInitializer {
+        public ScimCursorSecretInitializer(@Value("${scim.cursor.secret:}") String configuredSecret) {
+            if (configuredSecret != null && !configuredSecret.isBlank()) {
+                ScimCursorCodec.configureSecret(configuredSecret);
+            }
+        }
+    }
+
+    static byte[] computeHmac(byte[] data) {
         try {
             Mac mac = Mac.getInstance(HMAC_ALGO);
-            mac.init(new SecretKeySpec(HMAC_SECRET, HMAC_ALGO));
-            byte[] fullMac = mac.doFinal(payloadBytes);
+            mac.init(new SecretKeySpec(hmacSecret, HMAC_ALGO));
+            byte[] fullMac = mac.doFinal(data);
             return Arrays.copyOf(fullMac, HMAC_TAG_BYTES);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("Failed to compute cursor HMAC", e);
@@ -69,18 +97,11 @@ public final class ScimCursorCodec {
     }
 
     private static String signAndEncode(byte[] jsonBytes) {
-        byte[] mac16 = computeHmac16(jsonBytes);
+        byte[] mac16 = computeHmac(jsonBytes);
         byte[] combined = new byte[HMAC_TAG_BYTES + jsonBytes.length];
         System.arraycopy(mac16, 0, combined, 0, HMAC_TAG_BYTES);
         System.arraycopy(jsonBytes, 0, combined, HMAC_TAG_BYTES, jsonBytes.length);
         return CURSOR_PREFIX + Base64.getUrlEncoder().withoutPadding().encodeToString(combined);
-    }
-
-    /**
-     * Package-private helper for testing semantic validation of signed raw JSON payloads.
-     */
-    static String encodeRawJsonForTest(String rawJson) {
-        return signAndEncode(rawJson.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -175,7 +196,7 @@ public final class ScimCursorCodec {
 
         byte[] mac = Arrays.copyOfRange(decoded, 0, HMAC_TAG_BYTES);
         byte[] jsonBytes = Arrays.copyOfRange(decoded, HMAC_TAG_BYTES, decoded.length);
-        byte[] expectedMac = computeHmac16(jsonBytes);
+        byte[] expectedMac = computeHmac(jsonBytes);
         if (!MessageDigest.isEqual(mac, expectedMac)) {
             throw new ScimException(400, "invalidCursor", "Invalid cursor signature");
         }

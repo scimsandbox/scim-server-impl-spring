@@ -63,7 +63,7 @@ class ScimCursorCodecTest {
 
     @Test
     void testDecodeMalformedJsonThrowsInvalidCursorWithoutInternalLeak() {
-        String token = ScimCursorCodec.encodeRawJsonForTest("{not_json}");
+        String token = ScimCursorTestHelper.encodeRawJsonForTest("{not_json}");
         ScimException ex = assertThrows(ScimException.class, () ->
                 ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
@@ -106,7 +106,7 @@ class ScimCursorCodecTest {
     void testDecodeNegativeOffsetThrowsInvalidCursor() {
         long futureExp = Instant.now().getEpochSecond() + 3600;
         String rawJson = String.format("{\"w\":\"%s\",\"o\":-5,\"exp\":%d}", workspaceId, futureExp);
-        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
+        String token = ScimCursorTestHelper.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
                 ScimCursorCodec.decodeCursor(token, workspaceId));
@@ -119,7 +119,7 @@ class ScimCursorCodecTest {
     void testDecodeExpiredCursorThrowsInvalidCursor() {
         long pastExp = Instant.now().getEpochSecond() - 60; // expired 1 minute ago
         String rawJson = String.format("{\"w\":\"%s\",\"o\":10,\"exp\":%d}", workspaceId, pastExp);
-        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
+        String token = ScimCursorTestHelper.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
                 ScimCursorCodec.decodeCursor(token, workspaceId));
@@ -150,7 +150,7 @@ class ScimCursorCodecTest {
     void testDecodeMissingOffsetThrowsInvalidCursor() {
         long futureExp = Instant.now().getEpochSecond() + 3600;
         String rawJson = String.format("{\"w\":\"%s\",\"exp\":%d}", workspaceId, futureExp);
-        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
+        String token = ScimCursorTestHelper.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
                 ScimCursorCodec.decodeCursor(token, workspaceId));
@@ -162,7 +162,7 @@ class ScimCursorCodecTest {
     @Test
     void testDecodeMissingExpirationThrowsInvalidCursor() {
         String rawJson = String.format("{\"w\":\"%s\",\"o\":10}", workspaceId);
-        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
+        String token = ScimCursorTestHelper.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
                 ScimCursorCodec.decodeCursor(token, workspaceId));
@@ -175,12 +175,37 @@ class ScimCursorCodecTest {
     void testDecodeMissingWorkspaceThrowsInvalidCursor() {
         long futureExp = Instant.now().getEpochSecond() + 3600;
         String rawJson = String.format("{\"o\":10,\"exp\":%d}", futureExp);
-        String token = ScimCursorCodec.encodeRawJsonForTest(rawJson);
+        String token = ScimCursorTestHelper.encodeRawJsonForTest(rawJson);
 
         ScimException ex = assertThrows(ScimException.class, () ->
                 ScimCursorCodec.decodeCursor(token, workspaceId));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("invalidCursor", ex.getScimType());
         assertTrue(ex.getMessage().contains("workspace"));
+    }
+
+    @Test
+    void testConfigureSecretAndCrossPodConsistency() {
+        try {
+            // Pod 1 configures shared secret
+            ScimCursorCodec.configureSecret("shared-cluster-secret-123");
+            String tokenFromPod1 = ScimCursorCodec.encodeCursor(workspaceId, 25, 3600);
+
+            // Simulate Pod 2 with a different secret -> fails
+            ScimCursorCodec.configureSecret("different-secret");
+            assertThrows(ScimException.class, () -> ScimCursorCodec.decodeCursor(tokenFromPod1, workspaceId));
+
+            // Pod 2 configured with the same shared secret -> decodes token from Pod 1
+            new ScimCursorCodec.ScimCursorSecretInitializer("  shared-cluster-secret-123  ");
+            assertEquals(25, ScimCursorCodec.decodeCursor(tokenFromPod1, workspaceId));
+
+            // Fallback to deterministic default when blank secret is passed
+            ScimCursorCodec.configureSecret("");
+            String defaultToken1 = ScimCursorCodec.encodeCursor(workspaceId, 7, 3600);
+            ScimCursorCodec.configureSecret(null);
+            assertEquals(7, ScimCursorCodec.decodeCursor(defaultToken1, workspaceId));
+        } finally {
+            ScimCursorCodec.configureSecret(null);
+        }
     }
 }

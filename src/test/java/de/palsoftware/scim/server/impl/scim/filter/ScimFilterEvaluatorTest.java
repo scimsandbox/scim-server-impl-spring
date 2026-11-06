@@ -223,4 +223,101 @@ class ScimFilterEvaluatorTest {
         assertThrows(ScimException.class, () -> ScimFilterParser.parseAst("addresses eq \"Main St\"", true));
         assertThrows(ScimException.class, () -> ScimFilterParser.parseAst("x509Certificates gt \"QUJD\"", true));
     }
+
+    @Test
+    void evaluateMultiValuedFiltersWithoutCrossPropertyOrCrossElementBleed() {
+        ScimUser user = new ScimUser();
+        user.setId(UUID.randomUUID());
+        user.setUserName("alice");
+
+        // Email 1: value="work@example.com", type="home", display="example.com"
+        ScimUserEmail emailHome = new ScimUserEmail();
+        emailHome.setValue("work@example.com");
+        emailHome.setType("home");
+        emailHome.setDisplay("example.com");
+
+        // Email 2: value="alice@other.org", type="work", display="example.com"
+        ScimUserEmail emailWork = new ScimUserEmail();
+        emailWork.setValue("alice@other.org");
+        emailWork.setType("work");
+        emailWork.setDisplay("example.com");
+
+        // Email 3: value="notype@other.org", type=null
+        ScimUserEmail emailNoType = new ScimUserEmail();
+        emailNoType.setValue("notype@other.org");
+        emailNoType.setType(null);
+
+        // User with only emailHome: emails.type eq "work" MUST be false even though value contains "work"
+        user.setEmails(List.of(emailHome));
+        assertFalse(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.type eq \"work\"", true)));
+        assertFalse(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.value eq \"home\"", true)));
+
+        // sw and ew on multi-valued attributes match only prefixes/suffixes of that specific sub-attribute
+        assertTrue(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.value sw \"work@\"", true)));
+        assertFalse(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.value sw \"example\"", true)));
+        assertTrue(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.value ew \".com\"", true)));
+        assertFalse(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.value ew \"work\"", true)));
+
+        // User with only emailWork: emails.value co "example.com" MUST be false even though display is "example.com"
+        user.setEmails(List.of(emailWork));
+        assertFalse(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.value co \"example.com\"", true)));
+
+        // User with both emailHome and emailWork: valuePath emails[type ne "work"] is true (existential over elements: emailHome has type="home" != "work"),
+        // whereas dotted emails.type ne "work" is false because emailWork has type=="work"
+        user.setEmails(List.of(emailHome, emailWork));
+        assertTrue(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails[type ne \"work\"]", true)));
+        assertFalse(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.type ne \"work\"", true)));
+
+        // User with only emailNoType (type == null): both emails.type ne "work" and emails[type ne "work"] are true because null != "work"
+        user.setEmails(List.of(emailNoType));
+        assertTrue(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails.type ne \"work\"", true)));
+        assertTrue(ScimFilterEvaluator.matchesUser(
+                user, List.of(), ScimFilterParser.parseAst("emails[type ne \"work\"]", true)));
+    }
+
+    @Test
+    void evaluateSchemasAndX509CertificatesBase64Canonicalization() {
+        ScimUser coreOnlyUser = new ScimUser();
+        coreOnlyUser.setId(UUID.randomUUID());
+        coreOnlyUser.setUserName("core");
+
+        ScimUser enterpriseUser = new ScimUser();
+        enterpriseUser.setId(UUID.randomUUID());
+        enterpriseUser.setUserName("ent");
+        enterpriseUser.setEnterpriseDepartment("Engineering");
+
+        FilterNode entSchemaFilter = ScimFilterParser.parseAst(
+                "schemas eq \"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User\"", true);
+        assertFalse(ScimFilterEvaluator.matchesUser(coreOnlyUser, List.of(), entSchemaFilter));
+        assertTrue(ScimFilterEvaluator.matchesUser(enterpriseUser, List.of(), entSchemaFilter));
+
+        FilterNode coreSchemaFilter = ScimFilterParser.parseAst(
+                "schemas eq \"urn:ietf:params:scim:schemas:core:2.0:User\"", true);
+        assertTrue(ScimFilterEvaluator.matchesUser(coreOnlyUser, List.of(), coreSchemaFilter));
+        assertTrue(ScimFilterEvaluator.matchesUser(enterpriseUser, List.of(), coreSchemaFilter));
+
+        // x509Certificates Base64 validation & padding/trim canonicalization
+        de.palsoftware.scim.server.impl.model.ScimUserX509Certificate cert =
+                new de.palsoftware.scim.server.impl.model.ScimUserX509Certificate();
+        cert.setValue("QUJDRA==");
+        coreOnlyUser.setX509Certificates(List.of(cert));
+
+        FilterNode certFilterUnpadded = ScimFilterParser.parseAst(
+                "x509Certificates.value eq \"  QUJDRA  \"", true);
+        assertTrue(ScimFilterEvaluator.matchesUser(coreOnlyUser, List.of(), certFilterUnpadded));
+
+        // Invalid Base64 in filter literal must throw 400 invalidFilter
+        assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst("x509Certificates.value eq \"!!!not-base64!!!\"", true));
+    }
 }

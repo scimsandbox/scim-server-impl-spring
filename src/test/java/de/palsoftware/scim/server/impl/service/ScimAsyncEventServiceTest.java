@@ -131,6 +131,7 @@ class ScimAsyncEventServiceTest {
         when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(invocation -> {
             ScimAsyncEvent event = invocation.getArgument(0);
             savedEvent.setTxnId(event.getTxnId());
+            savedEvent.setStatus(event.getStatus());
             savedEvent.setOperation(event.getOperation());
             return event;
         });
@@ -486,5 +487,34 @@ class ScimAsyncEventServiceTest {
         );
 
         assertEquals("POST", savedEvent.getOperation());
+    }
+
+    @Test
+    void testUpdateEventCompletedAndFailed_DoNotOverwriteAlreadyTerminalEvents() {
+        UUID txnId = UUID.randomUUID();
+        ScimAsyncEvent reapedEvent = new ScimAsyncEvent();
+        reapedEvent.setTxnId(txnId);
+        reapedEvent.setStatus("FAILED");
+        reapedEvent.setSetPayload("{\"reaped\":true}");
+
+        when(asyncEventRepository.transitionPendingToCompleted(eq(txnId), any(), any(), any())).thenReturn(0);
+        when(asyncEventRepository.transitionPendingToFailed(eq(txnId), any(), any())).thenReturn(0);
+        when(asyncEventRepository.findById(txnId)).thenReturn(Optional.of(reapedEvent));
+
+        service.updateEventCompleted(txnId, UUID.randomUUID(), "{\"completed\":true}");
+        assertEquals("FAILED", reapedEvent.getStatus());
+        assertEquals("{\"reaped\":true}", reapedEvent.getSetPayload());
+        verify(asyncEventRepository, never()).save(any());
+
+        ScimAsyncEvent completedEvent = new ScimAsyncEvent();
+        completedEvent.setTxnId(txnId);
+        completedEvent.setStatus("COMPLETED");
+        completedEvent.setSetPayload("{\"completed\":true}");
+        when(asyncEventRepository.findById(txnId)).thenReturn(Optional.of(completedEvent));
+
+        service.updateEventFailedWithPayload(txnId, "{\"failed\":true}");
+        assertEquals("COMPLETED", completedEvent.getStatus());
+        assertEquals("{\"completed\":true}", completedEvent.getSetPayload());
+        verify(asyncEventRepository, never()).save(any());
     }
 }

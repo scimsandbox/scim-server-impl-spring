@@ -41,7 +41,7 @@ class ScimDiscoveryControllerTest {
 
     @Test
     void getServiceProviderConfigReturns200() {
-        ResponseEntity<Map<String, Object>> response = controller.getServiceProviderConfig(null);
+        ResponseEntity<Map<String, Object>> response = controller.getServiceProviderConfig(null, null);
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
         assertTrue(response.getBody().containsKey("schemas"));
@@ -57,7 +57,7 @@ class ScimDiscoveryControllerTest {
 
     @Test
     void getSchemasReturns200() {
-        ResponseEntity<Map<String, Object>> response = controller.getSchemas(null);
+        ResponseEntity<Map<String, Object>> response = controller.getSchemas(null, null);
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
         assertEquals(List.of("urn:ietf:params:scim:api:messages:2.0:ListResponse"), response.getBody().get("schemas"));
@@ -103,7 +103,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, "meta.resourceType eq \"User\"", 1, 100, "userName", "ascending",
+                workspaceId, "meta.resourceType eq \"User\"", 1, 100, null, "userName", "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -130,7 +130,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(groupPageResult);
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, "meta.resourceType eq \"Group\"", 1, 100, "displayName", "ascending",
+                workspaceId, "meta.resourceType eq \"Group\"", 1, 100, null, "displayName", "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -161,7 +161,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, null, "ascending",
+                workspaceId, null, 1, 10, null, null, "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -213,7 +213,7 @@ class ScimDiscoveryControllerTest {
     @Test
     void rootSearchInvalidCompatReturns404() {
         assertThrows(ScimException.class, () ->
-                controller.rootSearchGet(workspaceId, null, 1, 10, null, "ascending",
+                controller.rootSearchGet(workspaceId, null, 1, 10, null, null, "ascending",
                         null, null, "invalid-compat-value", request));
     }
 
@@ -263,7 +263,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, "displayName", "ascending",
+                workspaceId, null, 1, 10, null, "displayName", "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -299,7 +299,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, "displayName", "descending",
+                workspaceId, null, 1, 10, null, "displayName", "descending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -335,7 +335,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, "displayName", "ascending",
+                workspaceId, null, 1, 10, null, "displayName", "ascending",
                 "id,meta.resourceType", null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -369,7 +369,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, "displayName", "ascending",
+                workspaceId, null, 1, 10, null, "displayName", "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -401,7 +401,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, "displayName", "descending",
+                workspaceId, null, 1, 10, null, "displayName", "descending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -470,7 +470,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 2, 1, "displayName", "ascending",
+                workspaceId, null, 2, 1, null, "displayName", "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -506,7 +506,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10,
+                workspaceId, null, 1, 10, null,
                 "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department", "ascending",
                 null, null, null, request);
 
@@ -542,7 +542,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, null, 1, 10, "emails", "ascending",
+                workspaceId, null, 1, 10, null, "emails", "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -677,7 +677,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, filter, 1, 10, null, "ascending",
+                workspaceId, filter, 1, 10, null, null, "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -708,7 +708,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
-                workspaceId, filter, 1, 10, null, "ascending",
+                workspaceId, filter, 1, 10, null, null, "ascending",
                 null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
@@ -719,5 +719,27 @@ class ScimDiscoveryControllerTest {
         assertEquals(2, resources.size());
         assertEquals("alice", resources.get(0).get("userName"));
         assertEquals("Engineers", resources.get(1).get("displayName"));
+    }
+
+    @Test
+    void testRootSearchGet_CountZeroWithCursor_OmitsNextAndPreviousCursors() {
+        String token = ScimCursorCodec.encodeCursor(wsUuid, 2, 3600);
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 3L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 2L, "Resources", Collections.emptyList()));
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, null, 0, token, null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertEquals(0, body.get("itemsPerPage"));
+        assertEquals(Collections.emptyList(), body.get("Resources"));
+        assertNull(body.get("nextCursor"));
+        assertNull(body.get("previousCursor"));
     }
 }

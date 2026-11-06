@@ -428,4 +428,31 @@ class ScimAsyncEventStalePendingReaperServiceTest {
         Map<String, Object> setJson = objectMapper.readValue(rawPayload, Map.class);
         assertThat(setJson.get("sub_id")).isNull();
     }
+
+    @Test
+    void sweepStalePendingEvents_skipsInFlightEventsOnThisNode() {
+        ScimAsyncEventStalePendingReaperService service = createService(true, Duration.ofMinutes(5));
+
+        UUID inFlightTxn = UUID.randomUUID();
+        ScimAsyncEvent inFlightEvent = createPendingEvent(inFlightTxn, "POST", "User", UUID.randomUUID());
+
+        UUID orphanedTxn = UUID.randomUUID();
+        ScimAsyncEvent orphanedEvent = createPendingEvent(orphanedTxn, "POST", "User", UUID.randomUUID());
+
+        when(asyncEventRepository.findStalePendingEvents(any())).thenReturn(List.of(inFlightEvent, orphanedEvent));
+        when(asyncEventService.isInFlight(inFlightTxn)).thenReturn(true);
+        when(asyncEventService.isInFlight(orphanedTxn)).thenReturn(false);
+
+        String orphanedErrorSet = "{\"txn\":\"" + orphanedTxn + "\"}";
+        when(asyncEventService.buildErrorSetPayloadSafe(any(), eq(orphanedTxn), any(), any(), any(), any()))
+                .thenReturn(orphanedErrorSet);
+        when(asyncEventRepository.transitionPendingToFailed(eq(orphanedTxn), any(), eq(orphanedErrorSet)))
+                .thenReturn(1);
+
+        int reaped = service.sweepStalePendingEvents();
+
+        assertThat(reaped).isEqualTo(1);
+        verify(asyncEventRepository, never()).transitionPendingToFailed(eq(inFlightTxn), any(), any());
+        verify(asyncEventRepository).transitionPendingToFailed(eq(orphanedTxn), any(), eq(orphanedErrorSet));
+    }
 }

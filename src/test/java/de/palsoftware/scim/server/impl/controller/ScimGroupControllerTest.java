@@ -26,6 +26,7 @@ class ScimGroupControllerTest {
     private static final String DISPLAY_NAME = "displayName";
 
     private ScimGroupService groupService;
+    private ScimAsyncEventService asyncEventService;
     private ScimGroupController controller;
     private ScimGroup mockGroup;
     private final UUID workspaceId = UUID.randomUUID();
@@ -35,7 +36,8 @@ class ScimGroupControllerTest {
     @BeforeEach
     void setUp() {
         groupService = Mockito.mock(ScimGroupService.class);
-        controller = new ScimGroupController(groupService);
+        asyncEventService = Mockito.mock(ScimAsyncEventService.class);
+        controller = new ScimGroupController(groupService, asyncEventService);
 
         mockGroup = new ScimGroup();
         mockGroup.setId(groupId);
@@ -85,7 +87,7 @@ class ScimGroupControllerTest {
         
         when(groupService.listGroups(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
 
-        ResponseEntity<Map<String, Object>> response = controller.listGroups(workspaceId.toString(), null, DISPLAY_NAME, "ascending", -1, 300, null, null, null, request);
+        ResponseEntity<Map<String, Object>> response = controller.listGroups(workspaceId.toString(), null, DISPLAY_NAME, "ascending", -1, 300, null, null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
@@ -137,7 +139,7 @@ class ScimGroupControllerTest {
     void deleteGroupReturnsNoContent() {
         Mockito.doNothing().when(groupService).deleteGroup(workspaceId, groupId);
 
-        ResponseEntity<Void> response = controller.deleteGroup(workspaceId.toString(), groupId.toString(), null);
+        ResponseEntity<Void> response = controller.deleteGroup(workspaceId.toString(), groupId.toString(), null, request);
 
         assertEquals(204, response.getStatusCode().value());
     }
@@ -512,5 +514,28 @@ class ScimGroupControllerTest {
         assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
         assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
         assertNull(response.getBody());
+    }
+
+    @Test
+    void testListGroups_CountZeroWithCursor_OmitsNextAndPreviousCursors() {
+        String token = ScimCursorCodec.encodeCursor(workspaceId, 2, 3600);
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", Collections.emptyList());
+        result.put("totalResults", 5L);
+
+        when(groupService.listGroups(eq(workspaceId), isNull(), eq(DISPLAY_NAME), eq("ascending"), eq(3), eq(0)))
+                .thenReturn(result);
+
+        ResponseEntity<Map<String, Object>> response = controller.listGroups(
+                workspaceId.toString(), null, DISPLAY_NAME, "ascending", null, 0, token, null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertEquals(0, body.get("itemsPerPage"));
+        assertEquals(Collections.emptyList(), body.get("Resources"));
+        assertNull(body.get("nextCursor"));
+        assertNull(body.get("previousCursor"));
     }
 }

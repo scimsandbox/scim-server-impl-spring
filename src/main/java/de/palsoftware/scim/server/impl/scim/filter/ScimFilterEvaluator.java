@@ -3,7 +3,9 @@ package de.palsoftware.scim.server.impl.scim.filter;
 import de.palsoftware.scim.server.impl.model.*;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.filter.ScimFilterParser.FilterNode;
+import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
 import de.palsoftware.scim.server.impl.scim.validation.ScimCanonicalizer;
+import de.palsoftware.scim.server.impl.scim.validation.ScimCertificateValidator;
 
 import java.time.Instant;
 import java.util.*;
@@ -166,6 +168,14 @@ public final class ScimFilterEvaluator {
                 if (!allowed.contains(parts[1])) {
                     throw new ScimException(400, "invalidFilter", "Unknown sub-attribute '" + parts[1] + "' on " + parts[0]);
                 }
+                if ("x509certificates".equals(parts[0]) && "value".equals(parts[1]) && !"pr".equals(op)) {
+                    if (!"eq".equals(op) && !"ne".equals(op)) {
+                        throw new ScimException(400, "invalidFilter",
+                                "Operator '" + op + "' is not supported for binary attribute x509Certificates.value");
+                    }
+                    ScimCertificateValidator.validateAndCanonicalizeBase64(val, "x509Certificates.value");
+                    return;
+                }
                 if ("primary".equals(parts[1]) && !"pr".equals(op)) {
                     validateBooleanOperatorAndValue(op, val, displayAttr);
                 } else if (!"pr".equals(op) && Set.of("gt", "ge", "lt", "le").contains(op)) {
@@ -264,35 +274,43 @@ public final class ScimFilterEvaluator {
     // ── RUNTIME EVALUATION ────────────────────────────────
 
     public static boolean matchesUser(ScimUser user, List<Map<String, Object>> userGroups, FilterNode node) {
+        return matchesUser(user, node, userGroups, "");
+    }
+
+    public static boolean matchesUser(ScimUser user, FilterNode node, List<Map<String, Object>> userGroups, String scimBaseUrl) {
         if (node == null) return true;
         return switch (node) {
-            case FilterNode.AndNode n -> matchesUser(user, userGroups, n.left()) && matchesUser(user, userGroups, n.right());
-            case FilterNode.OrNode n -> matchesUser(user, userGroups, n.left()) || matchesUser(user, userGroups, n.right());
-            case FilterNode.NotNode n -> !matchesUser(user, userGroups, n.inner());
-            case FilterNode.ValuePathNode n -> evalUserValuePath(user, userGroups, n.parentAttr(), n.inner());
-            case FilterNode.PresenceNode n -> evalUserPresence(user, userGroups, n.attrPath());
-            case FilterNode.ComparisonNode n -> evalUserComparison(user, userGroups, n.attrPath(), n.operator(), n.value());
+            case FilterNode.AndNode n -> matchesUser(user, n.left(), userGroups, scimBaseUrl) && matchesUser(user, n.right(), userGroups, scimBaseUrl);
+            case FilterNode.OrNode n -> matchesUser(user, n.left(), userGroups, scimBaseUrl) || matchesUser(user, n.right(), userGroups, scimBaseUrl);
+            case FilterNode.NotNode n -> !matchesUser(user, n.inner(), userGroups, scimBaseUrl);
+            case FilterNode.ValuePathNode n -> evalUserValuePath(user, userGroups, n.parentAttr(), n.inner(), scimBaseUrl);
+            case FilterNode.PresenceNode n -> evalUserPresence(user, userGroups, n.attrPath(), scimBaseUrl);
+            case FilterNode.ComparisonNode n -> evalUserComparison(user, userGroups, n.attrPath(), n.operator(), n.value(), scimBaseUrl);
         };
     }
 
     public static boolean matchesGroup(ScimGroup group, FilterNode node) {
+        return matchesGroup(group, node, "");
+    }
+
+    public static boolean matchesGroup(ScimGroup group, FilterNode node, String scimBaseUrl) {
         if (node == null) return true;
         return switch (node) {
-            case FilterNode.AndNode n -> matchesGroup(group, n.left()) && matchesGroup(group, n.right());
-            case FilterNode.OrNode n -> matchesGroup(group, n.left()) || matchesGroup(group, n.right());
-            case FilterNode.NotNode n -> !matchesGroup(group, n.inner());
-            case FilterNode.ValuePathNode n -> evalGroupValuePath(group, n.parentAttr(), n.inner());
-            case FilterNode.PresenceNode n -> evalGroupPresence(group, n.attrPath());
-            case FilterNode.ComparisonNode n -> evalGroupComparison(group, n.attrPath(), n.operator(), n.value());
+            case FilterNode.AndNode n -> matchesGroup(group, n.left(), scimBaseUrl) && matchesGroup(group, n.right(), scimBaseUrl);
+            case FilterNode.OrNode n -> matchesGroup(group, n.left(), scimBaseUrl) || matchesGroup(group, n.right(), scimBaseUrl);
+            case FilterNode.NotNode n -> !matchesGroup(group, n.inner(), scimBaseUrl);
+            case FilterNode.ValuePathNode n -> evalGroupValuePath(group, n.parentAttr(), n.inner(), scimBaseUrl);
+            case FilterNode.PresenceNode n -> evalGroupPresence(group, n.attrPath(), scimBaseUrl);
+            case FilterNode.ComparisonNode n -> evalGroupComparison(group, n.attrPath(), n.operator(), n.value(), scimBaseUrl);
         };
     }
 
-    private static boolean evalUserValuePath(ScimUser user, List<Map<String, Object>> userGroups, String rawParent, FilterNode inner) {
+    private static boolean evalUserValuePath(ScimUser user, List<Map<String, Object>> userGroups, String rawParent, FilterNode inner, String scimBaseUrl) {
         if (ScimFilterParser.isOtherResourceAttribute(rawParent, true)) {
             return false;
         }
         String parent = ScimFilterParser.stripCoreUrnPrefix(rawParent, true).toLowerCase(Locale.ROOT);
-        List<Map<String, Object>> elements = extractUserCollectionElements(user, userGroups, parent);
+        List<Map<String, Object>> elements = extractUserCollectionElements(user, userGroups, parent, scimBaseUrl);
         for (Map<String, Object> elem : elements) {
             if (evalElementNode(elem, parent, inner)) {
                 return true;
@@ -301,7 +319,7 @@ public final class ScimFilterEvaluator {
         return false;
     }
 
-    private static boolean evalGroupValuePath(ScimGroup group, String rawParent, FilterNode inner) {
+    private static boolean evalGroupValuePath(ScimGroup group, String rawParent, FilterNode inner, String scimBaseUrl) {
         if (ScimFilterParser.isOtherResourceAttribute(rawParent, false)) {
             return false;
         }
@@ -317,7 +335,8 @@ public final class ScimFilterEvaluator {
             return false;
         }
         if ("meta".equals(parent)) {
-            Map<String, Object> meta = buildMetaMap("Group", group.getCreatedAt(), group.getLastModified(), group.getVersion());
+            String loc = group.getId() != null ? formatResourceLocation(scimBaseUrl, "Groups", group.getId()) : null;
+            Map<String, Object> meta = buildMetaMap("Group", group.getCreatedAt(), group.getLastModified(), group.getVersion(), loc);
             return evalElementNode(meta, "meta", inner);
         }
         return false;
@@ -343,11 +362,27 @@ public final class ScimFilterEvaluator {
             }
             case FilterNode.ComparisonNode n -> {
                 Object v = lookupElementValue(elem, n.attrPath());
-                if (v == null) yield false;
+                if (v == null) yield "ne".equals(n.operator());
                 boolean caseExact = isElementAttrCaseExact(parentKey, n.attrPath());
+                if ("x509certificates".equals(parentKey) && "value".equalsIgnoreCase(n.attrPath())) {
+                    String canonActual = canonicalizeBase64Safe(v.toString());
+                    String canonTarget = canonicalizeBase64Safe(n.value());
+                    yield compareAttributeValue(n.attrPath(), canonActual, n.operator(), canonTarget, true);
+                }
                 yield compareAttributeValue(n.attrPath(), v, n.operator(), n.value(), caseExact);
             }
         };
+    }
+
+    private static String canonicalizeBase64Safe(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return ScimCertificateValidator.validateAndCanonicalizeBase64(raw, "x509Certificates.value");
+        } catch (Exception e) {
+            return raw.trim();
+        }
     }
 
     private static Object lookupElementValue(Map<String, Object> elem, String rawSubAttr) {
@@ -379,7 +414,7 @@ public final class ScimFilterEvaluator {
         return false;
     }
 
-    private static List<Map<String, Object>> extractUserCollectionElements(ScimUser u, List<Map<String, Object>> userGroups, String parent) {
+    private static List<Map<String, Object>> extractUserCollectionElements(ScimUser u, List<Map<String, Object>> userGroups, String parent, String scimBaseUrl) {
         List<Map<String, Object>> list = new ArrayList<>();
         switch (parent) {
             case "emails" -> {
@@ -459,7 +494,10 @@ public final class ScimFilterEvaluator {
                 if (u.getNameHonorificSuffix() != null) m.put("honorificsuffix", u.getNameHonorificSuffix());
                 if (!m.isEmpty()) list.add(m);
             }
-            case "meta" -> list.add(buildMetaMap("User", u.getCreatedAt(), u.getLastModified(), u.getVersion()));
+            case "meta" -> {
+                String loc = u.getId() != null ? formatResourceLocation(scimBaseUrl, "Users", u.getId()) : null;
+                list.add(buildMetaMap("User", u.getCreatedAt(), u.getLastModified(), u.getVersion(), loc));
+            }
             case ScimFilterParser.ENTERPRISE_URN -> {
                 Map<String, Object> m = new HashMap<>();
                 if (u.getEnterpriseEmployeeNumber() != null) m.put("employeenumber", u.getEnterpriseEmployeeNumber());
@@ -544,73 +582,134 @@ public final class ScimFilterEvaluator {
         return map;
     }
 
-    private static Map<String, Object> buildMetaMap(String resourceType, Instant created, Instant lastMod, Long version) {
+    private static String formatResourceLocation(String scimBaseUrl, String resourcePlural, UUID id) {
+        if (id == null) {
+            return null;
+        }
+        if (scimBaseUrl == null || scimBaseUrl.isBlank()) {
+            return "/" + resourcePlural + "/" + id;
+        }
+        String base = scimBaseUrl.endsWith("/") ? scimBaseUrl.substring(0, scimBaseUrl.length() - 1) : scimBaseUrl;
+        return base + "/" + resourcePlural + "/" + id;
+    }
+
+    private static Map<String, Object> buildMetaMap(String resourceType, Instant created, Instant lastMod, Long version, String location) {
         Map<String, Object> m = new HashMap<>();
         m.put("resourcetype", resourceType);
         if (created != null) m.put("created", created);
         Instant effectiveMod = (version == null || version == 0L) ? created : lastMod;
         if (effectiveMod != null) m.put("lastmodified", effectiveMod);
         m.put("version", "W/\"" + (version != null ? version : 0L) + "\"");
+        if (location != null) m.put("location", location);
         return m;
     }
 
-    private static boolean evalUserPresence(ScimUser u, List<Map<String, Object>> userGroups, String rawAttr) {
+    private static List<String> getUserSchemas(ScimUser u) {
+        List<String> schemas = new ArrayList<>(2);
+        schemas.add(ScimUserMapper.USER_SCHEMA);
+        if (hasEnterpriseAttributes(u)) {
+            schemas.add(ScimUserMapper.ENTERPRISE_SCHEMA);
+        }
+        return schemas;
+    }
+
+    private static boolean hasEnterpriseAttributes(ScimUser u) {
+        return (u.getEnterpriseEmployeeNumber() != null && !u.getEnterpriseEmployeeNumber().isBlank())
+                || (u.getEnterpriseCostCenter() != null && !u.getEnterpriseCostCenter().isBlank())
+                || (u.getEnterpriseOrganization() != null && !u.getEnterpriseOrganization().isBlank())
+                || (u.getEnterpriseDivision() != null && !u.getEnterpriseDivision().isBlank())
+                || (u.getEnterpriseDepartment() != null && !u.getEnterpriseDepartment().isBlank())
+                || (u.getEnterpriseManagerValue() != null && !u.getEnterpriseManagerValue().isBlank());
+    }
+
+    private static boolean evalMultiValuedCaseExactStrings(List<String> values, String op, String target) {
+        if ("ne".equals(op)) {
+            for (String v : values) {
+                if (v != null && compareSingleValue(v, "eq", target, true)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (String v : values) {
+            if (v != null && compareSingleValue(v, op, target, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean evalUserPresence(ScimUser u, List<Map<String, Object>> userGroups, String rawAttr, String scimBaseUrl) {
         if (ScimFilterParser.isOtherResourceAttribute(rawAttr, true)) {
             return false;
         }
         String stripped = ScimFilterParser.stripCoreUrnPrefix(rawAttr, true).toLowerCase(Locale.ROOT);
+        if ("schemas".equals(stripped)) {
+            return true;
+        }
         if (ScimFilterParser.JSON_COLLECTIONS.contains(stripped)
                 || "groups".equals(stripped)
                 || "name".equals(stripped)
                 || "meta".equals(stripped)
                 || ScimFilterParser.ENTERPRISE_URN.equals(stripped)
                 || (ScimFilterParser.ENTERPRISE_URN_PREFIX + "manager").equals(stripped)) {
-            return !extractUserCollectionElements(u, userGroups, stripped).isEmpty();
+            return !extractUserCollectionElements(u, userGroups, stripped, scimBaseUrl).isEmpty();
         }
         if (stripped.contains(".")) {
             String[] parts = stripped.split("\\.", 2);
             if (ScimFilterParser.JSON_COLLECTIONS.contains(parts[0]) || "groups".equals(parts[0])) {
-                for (Map<String, Object> elem : extractUserCollectionElements(u, userGroups, parts[0])) {
+                for (Map<String, Object> elem : extractUserCollectionElements(u, userGroups, parts[0], scimBaseUrl)) {
                     if (lookupElementValue(elem, parts[1]) != null) return true;
                 }
                 return false;
             }
         }
-        return extractUserScalarValue(u, stripped) != null;
+        return extractUserScalarValue(u, stripped, scimBaseUrl) != null;
     }
 
-    private static boolean evalUserComparison(ScimUser u, List<Map<String, Object>> userGroups, String rawAttr, String op, String target) {
+    private static boolean evalUserComparison(ScimUser u, List<Map<String, Object>> userGroups, String rawAttr, String op, String target, String scimBaseUrl) {
         if (ScimFilterParser.isOtherResourceAttribute(rawAttr, true)) {
             return false;
         }
         String stripped = ScimFilterParser.stripCoreUrnPrefix(rawAttr, true).toLowerCase(Locale.ROOT);
+        if ("schemas".equals(stripped)) {
+            return evalMultiValuedCaseExactStrings(getUserSchemas(u), op, target);
+        }
         if ((ScimFilterParser.JSON_COLLECTIONS.contains(stripped) && !"addresses".equals(stripped)) || "groups".equals(stripped)) {
             stripped = stripped + ".value";
         }
         if (stripped.contains(".")) {
             String[] parts = stripped.split("\\.", 2);
             if (ScimFilterParser.JSON_COLLECTIONS.contains(parts[0]) || "groups".equals(parts[0])) {
-                List<Map<String, Object>> elems = extractUserCollectionElements(u, userGroups, parts[0]);
+                List<Map<String, Object>> elems = extractUserCollectionElements(u, userGroups, parts[0], scimBaseUrl);
                 boolean caseExact = ScimFilterParser.isJsonSubAttributeCaseExact(parts[0], parts[1]);
+                boolean isCertValue = "x509certificates".equals(parts[0]) && "value".equals(parts[1]);
+                String effectiveTarget = isCertValue ? canonicalizeBase64Safe(target) : target;
                 if ("ne".equals(op)) {
                     for (Map<String, Object> elem : elems) {
                         Object v = lookupElementValue(elem, parts[1]);
-                        if (v != null && compareAttributeValue(parts[1], v, "eq", target, caseExact)) {
-                            return false;
+                        if (v != null) {
+                            Object effectiveActual = isCertValue ? canonicalizeBase64Safe(v.toString()) : v;
+                            if (compareAttributeValue(parts[1], effectiveActual, "eq", effectiveTarget, caseExact)) {
+                                return false;
+                            }
                         }
                     }
                     return true;
                 }
                 for (Map<String, Object> elem : elems) {
                     Object v = lookupElementValue(elem, parts[1]);
-                    if (v != null && compareAttributeValue(parts[1], v, op, target, caseExact)) {
-                        return true;
+                    if (v != null) {
+                        Object effectiveActual = isCertValue ? canonicalizeBase64Safe(v.toString()) : v;
+                        if (compareAttributeValue(parts[1], effectiveActual, op, effectiveTarget, caseExact)) {
+                            return true;
+                        }
                     }
                 }
                 return false;
             }
         }
-        Object actual = extractUserScalarValue(u, stripped);
+        Object actual = extractUserScalarValue(u, stripped, scimBaseUrl);
         if (actual == null) {
             return "ne".equals(op);
         }
@@ -621,7 +720,7 @@ public final class ScimFilterEvaluator {
         return compareAttributeValue(stripped, actual, op, target, caseExact);
     }
 
-    private static Object extractUserScalarValue(ScimUser u, String lower) {
+    private static Object extractUserScalarValue(ScimUser u, String lower, String scimBaseUrl) {
         if (lower.startsWith("name.")) {
             return switch (lower.substring(5)) {
                 case "formatted" -> u.getNameFormatted();
@@ -639,7 +738,7 @@ public final class ScimFilterEvaluator {
                 case "created" -> u.getCreatedAt();
                 case "lastmodified" -> (u.getVersion() == null || u.getVersion() == 0L) ? u.getCreatedAt() : u.getLastModified();
                 case "version" -> "W/\"" + (u.getVersion() != null ? u.getVersion() : 0L) + "\"";
-                case "location" -> u.getId() != null ? "/Users/" + u.getId() : null;
+                case "location" -> formatResourceLocation(scimBaseUrl, "Users", u.getId());
                 default -> null;
             };
         }
@@ -671,12 +770,12 @@ public final class ScimFilterEvaluator {
             case "locale" -> u.getLocale();
             case "timezone" -> u.getTimezone();
             case "active" -> u.isActive();
-            case "schemas" -> "urn:ietf:params:scim:schemas:core:2.0:User";
+            case "schemas" -> ScimUserMapper.USER_SCHEMA;
             default -> null;
         };
     }
 
-    private static boolean evalGroupPresence(ScimGroup g, String rawAttr) {
+    private static boolean evalGroupPresence(ScimGroup g, String rawAttr, String scimBaseUrl) {
         if (ScimFilterParser.isOtherResourceAttribute(rawAttr, false)) {
             return false;
         }
@@ -695,14 +794,17 @@ public final class ScimFilterEvaluator {
             }
             return false;
         }
-        return extractGroupScalarValue(g, stripped) != null;
+        return extractGroupScalarValue(g, stripped, scimBaseUrl) != null;
     }
 
-    private static boolean evalGroupComparison(ScimGroup g, String rawAttr, String op, String target) {
+    private static boolean evalGroupComparison(ScimGroup g, String rawAttr, String op, String target, String scimBaseUrl) {
         if (ScimFilterParser.isOtherResourceAttribute(rawAttr, false)) {
             return false;
         }
         String stripped = ScimFilterParser.stripCoreUrnPrefix(rawAttr, false).toLowerCase(Locale.ROOT);
+        if ("schemas".equals(stripped)) {
+            return evalMultiValuedCaseExactStrings(List.of("urn:ietf:params:scim:schemas:core:2.0:Group"), op, target);
+        }
         if ("members".equals(stripped)) {
             stripped = "members.value";
         }
@@ -723,7 +825,7 @@ public final class ScimFilterEvaluator {
             }
             return false;
         }
-        Object actual = extractGroupScalarValue(g, stripped);
+        Object actual = extractGroupScalarValue(g, stripped, scimBaseUrl);
         if (actual == null) {
             return "ne".equals(op);
         }
@@ -734,14 +836,14 @@ public final class ScimFilterEvaluator {
         return compareAttributeValue(stripped, actual, op, target, caseExact);
     }
 
-    private static Object extractGroupScalarValue(ScimGroup g, String lower) {
+    private static Object extractGroupScalarValue(ScimGroup g, String lower, String scimBaseUrl) {
         if (lower.startsWith("meta.")) {
             return switch (lower.substring(5)) {
                 case "resourcetype" -> "Group";
                 case "created" -> g.getCreatedAt();
                 case "lastmodified" -> (g.getVersion() == null || g.getVersion() == 0L) ? g.getCreatedAt() : g.getLastModified();
                 case "version" -> "W/\"" + (g.getVersion() != null ? g.getVersion() : 0L) + "\"";
-                case "location" -> g.getId() != null ? "/Groups/" + g.getId() : null;
+                case "location" -> formatResourceLocation(scimBaseUrl, "Groups", g.getId());
                 default -> null;
             };
         }
@@ -755,14 +857,18 @@ public final class ScimFilterEvaluator {
     }
 
     private static boolean compareAttributeValue(String attrName, Object actual, String op, String target, boolean caseExact) {
-        if (attrName != null && ("$ref".equalsIgnoreCase(attrName) || attrName.toLowerCase(Locale.ROOT).endsWith(".$ref"))) {
-            if ("eq".equals(op)) {
-                return compareSingleValue(actual, "eq", target, caseExact)
-                        || ScimCanonicalizer.scimRefsComparable(actual.toString(), target);
-            }
-            if ("ne".equals(op)) {
-                return !compareSingleValue(actual, "eq", target, caseExact)
-                        && !ScimCanonicalizer.scimRefsComparable(actual.toString(), target);
+        if (attrName != null) {
+            String lowerAttr = attrName.toLowerCase(Locale.ROOT);
+            if ("$ref".equals(lowerAttr) || lowerAttr.endsWith(".$ref")
+                    || "location".equals(lowerAttr) || "meta.location".equals(lowerAttr)) {
+                if ("eq".equals(op)) {
+                    return compareSingleValue(actual, "eq", target, caseExact)
+                            || ScimCanonicalizer.scimRefsComparable(actual.toString(), target);
+                }
+                if ("ne".equals(op)) {
+                    return !compareSingleValue(actual, "eq", target, caseExact)
+                            && !ScimCanonicalizer.scimRefsComparable(actual.toString(), target);
+                }
             }
         }
         return compareSingleValue(actual, op, target, caseExact);

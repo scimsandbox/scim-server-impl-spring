@@ -106,45 +106,9 @@ public class ScimGroupService {
 
     public Map<String, Object> listGroups(UUID workspaceId, String filter, String sortBy,
             String sortOrder, int startIndex, int count) {
-        if (ScimFilterParser.containsValuePath(filter)) {
-            ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(filter, false);
-            String sortAttr = ScimFilterParser.resolveGroupSortAttribute(sortBy);
-            boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
-
-            Specification<ScimGroup> wsSpec = ScimFilterParser.parseGroupFilter(null, workspaceId);
-            List<ScimGroup> candidates = groupRepository.findAll(wsSpec);
-            if (candidates == null) {
-                candidates = Collections.emptyList();
-            }
-
-            List<ScimGroup> matched = new ArrayList<>();
-            for (ScimGroup g : candidates) {
-                Hibernate.initialize(g.getMembers());
-                if (ScimFilterEvaluator.matchesGroup(g, ast)) {
-                    matched.add(g);
-                }
-            }
-
-            long totalResults = matched.size();
-            if (count == 0) {
-                return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
-            }
-
-            matched.sort(buildGroupInMemoryComparator(sortAttr, isDescending));
-            int offset = Math.max(0, startIndex - 1);
-            List<ScimGroup> page = offset >= matched.size()
-                    ? Collections.emptyList()
-                    : matched.subList(offset, Math.min(offset + count, matched.size()));
-            return buildListResponse(page, totalResults, startIndex, page.size());
-        }
-
-        Specification<ScimGroup> spec = ScimFilterParser.parseGroupFilter(filter, workspaceId);
-
-        long totalResults = groupRepository.count(spec);
-
-        if (count == 0) {
-            return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
-        }
+        boolean hasFilter = filter != null && !filter.isBlank();
+        ScimFilterParser.FilterNode ast = hasFilter ? ScimFilterParser.parseAst(filter, false) : null;
+        boolean requiresInMemoryEval = ast != null && ScimFilterParser.requiresInMemoryEvaluation(ast, false);
 
         String sortAttr = ScimFilterParser.resolveGroupSortAttribute(sortBy);
         boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
@@ -156,6 +120,44 @@ public class ScimGroupService {
         }
         Sort.Order tieBreaker = isDescending ? Sort.Order.desc("id") : Sort.Order.asc("id");
         Sort sort = "id".equals(sortAttr) ? Sort.by(primaryOrder) : Sort.by(primaryOrder, tieBreaker);
+
+        if (requiresInMemoryEval) {
+            Specification<ScimGroup> preFilterSpec = ScimFilterParser.buildGroupPreFilter(ast, workspaceId);
+            List<ScimGroup> candidates = groupRepository.findAll(preFilterSpec, sort);
+            if (candidates == null) {
+                candidates = groupRepository.findAll(preFilterSpec);
+            }
+            if (candidates == null) {
+                candidates = Collections.emptyList();
+            }
+
+            List<ScimGroup> matched = new ArrayList<>();
+            for (ScimGroup g : candidates) {
+                if (ScimFilterEvaluator.matchesGroup(g, ast, "")) {
+                    matched.add(g);
+                }
+            }
+
+            long totalResults = matched.size();
+            if (count <= 0) {
+                return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
+            }
+
+            int offset = Math.max(0, startIndex - 1);
+            List<ScimGroup> page = offset >= matched.size()
+                    ? Collections.emptyList()
+                    : matched.subList(offset, Math.min(offset + count, matched.size()));
+            page.forEach(g -> Hibernate.initialize(g.getMembers()));
+            return buildListResponse(page, totalResults, startIndex, page.size());
+        }
+
+        Specification<ScimGroup> spec = ScimFilterParser.parseGroupFilter(filter, workspaceId);
+
+        long totalResults = groupRepository.count(spec);
+
+        if (count <= 0) {
+            return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
+        }
 
         int offset = Math.max(0, startIndex - 1);
         Pageable pageable = new OffsetBasedPageRequest(offset, count, sort);

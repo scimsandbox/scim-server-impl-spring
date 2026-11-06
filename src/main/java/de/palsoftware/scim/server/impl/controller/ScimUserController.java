@@ -6,14 +6,10 @@ import de.palsoftware.scim.server.impl.scim.compat.CompatMode;
 import de.palsoftware.scim.server.impl.scim.mapper.MsScimUserMapper;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
-import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
 import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
 import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.lang.Nullable;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -27,20 +23,14 @@ import java.util.*;
 @RequestMapping({"/ws/{workspaceId}/scim/v2/Users", "/ws/{workspaceId}/scim/v2/{compat}/Users"})
 public class ScimUserController extends ScimBaseController {
 
-    private static final MediaType SCIM_JSON = MediaType.parseMediaType("application/scim+json");
     private static final String CONTENT_LOCATION_HEADER = "Content-Location";
     private static final String RESOURCE_USER = "User";
 
     private final ScimUserService userService;
     private final ScimAsyncEventService asyncEventService;
 
-    public ScimUserController(ScimUserService userService) {
-        this(userService, null);
-    }
-
-    @Autowired
     public ScimUserController(ScimUserService userService,
-                              @Nullable ScimAsyncEventService asyncEventService) {
+                              ScimAsyncEventService asyncEventService) {
         this.userService = userService;
         this.asyncEventService = asyncEventService;
     }
@@ -59,7 +49,7 @@ public class ScimUserController extends ScimBaseController {
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
 
-        if (asyncEventService != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+        if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "POST", "User", null, compatBaseUrl, () -> {
                 ScimUser user = userService.createUser(wsId, body);
                 List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
@@ -156,15 +146,12 @@ public class ScimUserController extends ScimBaseController {
         }
 
         boolean isCursorPagination = cursor != null;
-        int offset;
         int effectiveStartIndex;
         if (isCursorPagination) {
-            offset = ScimCursorCodec.decodeCursor(cursor, wsId);
-            effectiveStartIndex = offset + 1;
+            effectiveStartIndex = ScimCursorCodec.decodeCursor(cursor, wsId) + 1;
         } else {
             effectiveStartIndex = (startIndex != null) ? startIndex : 1;
             if (effectiveStartIndex < 1) effectiveStartIndex = 1;
-            offset = effectiveStartIndex - 1;
         }
 
         if (count < 0) count = 0;
@@ -194,42 +181,8 @@ public class ScimUserController extends ScimBaseController {
 
         Object totalObj = result.get("totalResults");
         long totalResults = totalObj instanceof Number num ? num.longValue() : resources.size();
-        int itemsPerPage = resources.size();
 
-        Map<String, Object> responseBody;
-        if (isCursorPagination) {
-            String previousCursor = null;
-            if (offset > 0) {
-                int prevOffset = Math.max(0, offset - count);
-                previousCursor = ScimCursorCodec.encodeCursor(wsId, prevOffset);
-            }
-            String nextCursor = null;
-            if ((long) offset + itemsPerPage < totalResults) {
-                nextCursor = ScimCursorCodec.encodeCursor(wsId, offset + itemsPerPage);
-            }
-            responseBody = ScimListResponse.ofCursor(resources, totalResults, nextCursor, previousCursor).toMap();
-        } else {
-            responseBody = ScimListResponse.ofIndex(resources, totalResults, effectiveStartIndex).toMap();
-        }
-
-        return ResponseEntity.ok()
-                .contentType(SCIM_JSON)
-                .body(responseBody);
-    }
-
-    public ResponseEntity<Map<String, Object>> listUsers(
-            String workspaceId,
-            String filter,
-            String sortBy,
-            String sortOrder,
-            int startIndex,
-            int count,
-            String attributes,
-            String excludedAttributes,
-            String compat,
-            HttpServletRequest request) {
-        return listUsers(workspaceId, filter, sortBy, sortOrder, (Integer) startIndex, count, null,
-                attributes, excludedAttributes, compat, request);
+        return buildPaginatedListResponse(wsId, effectiveStartIndex, cursor, count, totalResults, resources);
     }
 
     /**
@@ -250,7 +203,7 @@ public class ScimUserController extends ScimBaseController {
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
 
-        if (asyncEventService != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+        if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "PUT", "User", uid, compatBaseUrl, () -> {
                 ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
                 List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
@@ -298,7 +251,7 @@ public class ScimUserController extends ScimBaseController {
 
         List<Map<String, Object>> operations = extractAndValidatePatchOperations(body);
 
-        if (asyncEventService != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+        if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             List<String> modifiedAttributes = extractModifiedPatchAttributes(operations);
             UUID txnId = asyncEventService.submitAsync(wsId, "PATCH", "User", uid, compatBaseUrl, () -> {
                 ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
@@ -392,7 +345,7 @@ public class ScimUserController extends ScimBaseController {
         }
         final String effectiveIfMatch = ifMatch;
 
-        if (asyncEventService != null && request != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+        if (request != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "DELETE", "User", uid, compatBaseUrl, () -> {
                 if (effectiveIfMatch != null) {
                     userService.deleteUser(wsId, uid, effectiveIfMatch);
@@ -411,13 +364,6 @@ public class ScimUserController extends ScimBaseController {
         }
 
         return ResponseEntity.noContent().build();
-    }
-
-    public ResponseEntity<Void> deleteUser(
-            String workspaceId,
-            String userId,
-            String compat) {
-        return deleteUser(workspaceId, userId, compat, null);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

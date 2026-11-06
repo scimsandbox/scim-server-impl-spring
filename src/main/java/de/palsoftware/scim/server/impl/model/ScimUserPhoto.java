@@ -46,6 +46,15 @@ public class ScimUserPhoto {
         this.primaryFlag = primaryFlag;
     }
 
+    public ScimUserPhoto copy() {
+        ScimUserPhoto copy = new ScimUserPhoto();
+        copy.setValue(this.value);
+        copy.setType(this.type);
+        copy.setDisplay(this.display);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

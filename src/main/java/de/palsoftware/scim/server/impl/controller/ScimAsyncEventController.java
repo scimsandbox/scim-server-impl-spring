@@ -8,11 +8,9 @@ import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
 import de.palsoftware.scim.server.impl.service.ScimAsyncEventService;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.lang.Nullable;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
@@ -35,14 +33,8 @@ public class ScimAsyncEventController extends ScimBaseController {
     private final ScimAsyncEventService asyncEventService;
 
     public ScimAsyncEventController(ScimAsyncEventRepository asyncEventRepository,
-                                    ObjectMapper objectMapper) {
-        this(asyncEventRepository, objectMapper, null);
-    }
-
-    @Autowired
-    public ScimAsyncEventController(ScimAsyncEventRepository asyncEventRepository,
                                     ObjectMapper objectMapper,
-                                    @Nullable ScimAsyncEventService asyncEventService) {
+                                    ScimAsyncEventService asyncEventService) {
         this.asyncEventRepository = asyncEventRepository;
         this.objectMapper = objectMapper;
         this.asyncEventService = asyncEventService;
@@ -71,7 +63,7 @@ public class ScimAsyncEventController extends ScimBaseController {
         ScimAsyncEvent event = asyncEventRepository.findByTxnIdAndWorkspaceId(transactionId, wsId)
                 .orElseThrow(() -> new ScimException(404, null, "Async event not found: " + txnId));
 
-        if ("PENDING".equalsIgnoreCase(event.getStatus()) && asyncEventService != null) {
+        if ("PENDING".equalsIgnoreCase(event.getStatus())) {
             asyncEventService.awaitIfInFlight(transactionId, IN_FLIGHT_AWAIT_TIMEOUT);
             event = asyncEventRepository.findByTxnIdAndWorkspaceId(transactionId, wsId)
                     .orElse(event);

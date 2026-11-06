@@ -569,4 +569,30 @@ class ScimFilterParserTest {
         assertNotNull(crossGroup);
         crossGroup.toPredicate(groupRoot, query, cb);
     }
+
+    @Test
+    void testRequiresInMemoryEvaluationAndReferencesUserGroups() {
+        assertFalse(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("userName eq \"alice\" and active eq true", true), true));
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("emails.type eq \"work\"", true), true));
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("emails[type eq \"work\"]", true), true));
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("schemas eq \"urn:ietf:params:scim:schemas:core:2.0:User\"", true), true));
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("members eq \"" + UUID.randomUUID() + "\"", true), true));
+
+        assertFalse(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("displayName eq \"Devs\"", false), false));
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(
+                ScimFilterParser.parseAst("members.type ne \"User\"", false), false));
+
+        assertFalse(ScimFilterParser.referencesUserGroups(
+                ScimFilterParser.parseAst("userName eq \"alice\" and emails[type eq \"work\"]", true)));
+        assertTrue(ScimFilterParser.referencesUserGroups(
+                ScimFilterParser.parseAst("groups.display eq \"Admins\"", true)));
+        assertTrue(ScimFilterParser.referencesUserGroups(
+                ScimFilterParser.parseAst("groups[display eq \"Admins\"]", true)));
+    }
 }

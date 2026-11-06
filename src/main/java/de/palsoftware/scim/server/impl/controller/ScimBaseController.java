@@ -1,10 +1,13 @@
 package de.palsoftware.scim.server.impl.controller;
 
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import de.palsoftware.scim.server.impl.scim.projection.ScimAttributeProjector;
 import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import java.util.*;
@@ -16,6 +19,7 @@ abstract class ScimBaseController {
     }
 
     protected static final String KEY_SCHEMAS = "schemas";
+    protected static final MediaType SCIM_JSON = MediaType.parseMediaType("application/scim+json");
 
     protected static UUID resolveWorkspaceId(String workspaceId) {
         try {
@@ -294,5 +298,40 @@ abstract class ScimBaseController {
                 .header(ScimPreferHeaderUtil.PREFERENCE_APPLIED_HEADER, preferenceApplied)
                 .header("Location", location)
                 .build();
+    }
+
+    protected ResponseEntity<Map<String, Object>> buildPaginatedListResponse(
+            UUID wsId,
+            int startIndex,
+            String cursor,
+            Integer effectiveCount,
+            long totalResults,
+            List<Map<String, Object>> resources) {
+        boolean zeroCountRequested = effectiveCount != null && effectiveCount == 0;
+        List<Map<String, Object>> effectiveResources = zeroCountRequested
+                ? Collections.emptyList()
+                : (resources != null ? resources : Collections.emptyList());
+        int itemsPerPage = zeroCountRequested ? 0 : effectiveResources.size();
+
+        if (cursor != null) {
+            int currentOffset = Math.max(0, startIndex - 1);
+            String nextCursor = null;
+            if (!zeroCountRequested && itemsPerPage > 0 && ((long) currentOffset + itemsPerPage) < totalResults) {
+                nextCursor = ScimCursorCodec.encodeCursor(wsId, currentOffset + itemsPerPage);
+            }
+            String previousCursor = null;
+            if (!zeroCountRequested && currentOffset > 0 && totalResults > 0) {
+                int step = (effectiveCount != null && effectiveCount > 0) ? effectiveCount : itemsPerPage;
+                int prevOffset = Math.max(0, currentOffset - step);
+                previousCursor = ScimCursorCodec.encodeCursor(wsId, prevOffset);
+            }
+            return ResponseEntity.ok()
+                    .contentType(SCIM_JSON)
+                    .body(ScimListResponse.ofCursor(effectiveResources, totalResults, nextCursor, previousCursor).toMap());
+        }
+
+        return ResponseEntity.ok()
+                .contentType(SCIM_JSON)
+                .body(ScimListResponse.ofIndex(effectiveResources, totalResults, startIndex).toMap());
     }
 }

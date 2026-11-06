@@ -46,6 +46,10 @@ logging:
     "[de.palsoftware.scim]": DEBUG
     "[org.springframework.security]": WARN
 
+scim:
+  cursor:
+    secret: ${SCIM_CURSOR_SECRET:${SPRING_DATASOURCE_PASSWORD:}}
+
 management:
   server:
     port: ${MANAGEMENT_SERVER_PORT:9090}

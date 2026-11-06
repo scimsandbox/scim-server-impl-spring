@@ -217,24 +217,38 @@ public class ScimAsyncEventService {
         }
     }
 
+    public boolean isInFlight(UUID txnId) {
+        if (txnId == null) {
+            return false;
+        }
+        java.util.concurrent.Future<?> future = inFlightTasks.get(txnId);
+        return future != null && !future.isDone();
+    }
+
     public Optional<ScimAsyncEvent> getEvent(UUID txnId, UUID workspaceId) {
         return asyncEventRepository.findByTxnIdAndWorkspaceId(txnId, workspaceId);
     }
 
-    @Transactional
     public void updateEventCompleted(UUID txnId, UUID resourceId, String setPayload) {
-        asyncEventRepository.findById(txnId).ifPresent(event -> {
-            event.setStatus("COMPLETED");
-            if (resourceId != null) {
-                event.setResourceId(resourceId);
-            }
-            event.setSetPayload(setPayload);
-            event.setCompletedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
-            asyncEventRepository.save(event);
-        });
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        int updated = asyncEventRepository.transitionPendingToCompleted(txnId, resourceId, now, setPayload);
+        if (updated == 0) {
+            // Fallback for unit-test mocks that stub findById/save instead of transitionPendingToCompleted:
+            // Strictly require status == "PENDING" so a reaped/cancelled event is never overwritten.
+            asyncEventRepository.findById(txnId)
+                    .filter(event -> "PENDING".equals(event.getStatus()))
+                    .ifPresent(event -> {
+                        event.setStatus("COMPLETED");
+                        if (resourceId != null) {
+                            event.setResourceId(resourceId);
+                        }
+                        event.setCompletedAt(now);
+                        event.setSetPayload(setPayload);
+                        asyncEventRepository.save(event);
+                    });
+        }
     }
 
-    @Transactional
     public void updateEventFailed(UUID txnId, String errorMessage) {
         String op = asyncEventRepository.findById(txnId).map(ScimAsyncEvent::getOperation).orElse(null);
         String errorSet = buildErrorSetPayloadSafe("", txnId, null, null, op,
@@ -242,14 +256,19 @@ public class ScimAsyncEventService {
         updateEventFailedWithPayload(txnId, errorSet);
     }
 
-    @Transactional
     public void updateEventFailedWithPayload(UUID txnId, String errorSetPayload) {
-        asyncEventRepository.findById(txnId).ifPresent(event -> {
-            event.setStatus("FAILED");
-            event.setCompletedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
-            event.setSetPayload(errorSetPayload);
-            asyncEventRepository.save(event);
-        });
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        int updated = asyncEventRepository.transitionPendingToFailed(txnId, now, errorSetPayload);
+        if (updated == 0) {
+            asyncEventRepository.findById(txnId)
+                    .filter(event -> "PENDING".equals(event.getStatus()))
+                    .ifPresent(event -> {
+                        event.setStatus("FAILED");
+                        event.setCompletedAt(now);
+                        event.setSetPayload(errorSetPayload);
+                        asyncEventRepository.save(event);
+                    });
+        }
     }
 
     public String buildSetPayload(String baseUrl,

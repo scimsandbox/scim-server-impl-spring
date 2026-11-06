@@ -5,18 +5,26 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
+import de.palsoftware.scim.server.impl.controller.ScimBulkController;
 import de.palsoftware.scim.server.impl.model.ScimRequestLog;
 import de.palsoftware.scim.server.impl.repository.ScimRequestLogRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
+import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -37,13 +45,14 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     private static final Pattern WORKSPACE_PATH = Pattern.compile("/ws/([0-9a-fA-F-]+)/scim/v2/.*");
     private static final int MAX_BODY_CHARS = 20000;
 
-    // Regex fallbacks for malformed or truncated JSON payloads containing passwords
+    // Linear-time possessive regex fallbacks for malformed or truncated JSON payloads containing passwords
     private static final Pattern MALFORMED_PASSWORD_KV = Pattern.compile(
-            "(?is)(\"(?:[^\"\\\\]*:)?password\"\\s*:\\s*)(?:\"(?:\\\\.|[^\"\\\\])*\"|\"(?:\\\\.|[^\"\\\\])*$)");
-    private static final Pattern MALFORMED_PATCH_PATH_FIRST = Pattern.compile(
-            "(?is)(\"path\"\\s*:\\s*\"(?:[^\"\\\\]*:)?password\"[^{}]*?,\\s*\"value\"\\s*:\\s*)(?:\"(?:\\\\.|[^\"\\\\])*\"|\"(?:\\\\.|[^\"\\\\])*$)");
-    private static final Pattern MALFORMED_PATCH_VALUE_FIRST = Pattern.compile(
-            "(?is)(\"value\"\\s*:\\s*)\"(?:\\\\.|[^\"\\\\])*\"([^{}]*?,\\s*\"path\"\\s*:\\s*\"(?:[^\"\\\\]*:)?password(?:\"|$))");
+            "(?is)(\"(?:[^\"\\\\]*:)?password\"\\s*+:\\s*+)(?:\"(?:\\\\.|[^\"\\\\])*+\"|\"(?:\\\\.|[^\"\\\\])*+$)");
+    private static final Pattern FLAT_OBJECT_SEGMENT = Pattern.compile("\\{[^{}]*+(?:\\}|$)");
+    private static final Pattern SEGMENT_HAS_PASSWORD_PATH = Pattern.compile(
+            "(?is)\"path\"\\s*+:\\s*+\"(?:[^\"\\\\]*:)?password(?:[.\\[][^\"\\\\]*+)?(?:\"|$)");
+    private static final Pattern SEGMENT_VALUE_FIELD = Pattern.compile(
+            "(?is)(\"value\"\\s*+:\\s*+)(?:\"(?:\\\\.|[^\"\\\\])*+\"|\"(?:\\\\.|[^\"\\\\])*+$)");
 
     private final ScimRequestLogRepository logRepository;
     private final WorkspaceRepository workspaceRepository;
@@ -67,13 +76,147 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         ContentCachingResponseWrapper responseWrapper = new ContentCachingResponseWrapper(response);
 
         try {
-            filterChain.doFilter(requestWrapper, responseWrapper);
+            if (isBulkPostRequest(request)) {
+                if (request.getContentLengthLong() > ScimBulkController.MAX_PAYLOAD_SIZE) {
+                    writeScimErrorResponse(responseWrapper, 413, null,
+                            "Bulk request payload size exceeds maxPayloadSize of " + ScimBulkController.MAX_PAYLOAD_SIZE + " bytes");
+                    return;
+                }
+                HttpServletRequest boundedRequest = new BoundedBulkRequestWrapper(
+                        requestWrapper, ScimBulkController.MAX_PAYLOAD_SIZE);
+                try {
+                    filterChain.doFilter(boundedRequest, responseWrapper);
+                } catch (Exception ex) {
+                    ScimException payloadEx = findScimExceptionByStatus(ex, 413);
+                    if (payloadEx != null && !responseWrapper.isCommitted()) {
+                        responseWrapper.resetBuffer();
+                        writeScimErrorResponse(responseWrapper, 413, payloadEx.getScimType(), payloadEx.getMessage());
+                        return;
+                    }
+                    throw ex;
+                }
+            } else {
+                filterChain.doFilter(requestWrapper, responseWrapper);
+            }
         } finally {
             try {
                 saveLog(requestWrapper, responseWrapper);
             } finally {
                 responseWrapper.copyBodyToResponse();
             }
+        }
+    }
+
+    private static boolean isBulkPostRequest(HttpServletRequest request) {
+        if (request == null || !"POST".equalsIgnoreCase(request.getMethod())) {
+            return false;
+        }
+        String uri = request.getRequestURI();
+        return uri != null && (uri.endsWith("/Bulk") || uri.endsWith("/Bulk/"));
+    }
+
+    private static ScimException findScimExceptionByStatus(Throwable ex, int status) {
+        Throwable cur = ex;
+        while (cur != null) {
+            if (cur instanceof ScimException scimEx && scimEx.getHttpStatus() == status) {
+                return scimEx;
+            }
+            cur = cur.getCause() != cur ? cur.getCause() : null;
+        }
+        return null;
+    }
+
+    private static void writeScimErrorResponse(HttpServletResponse response, int status, String scimType, String detail)
+            throws IOException {
+        response.setStatus(status);
+        response.setCharacterEncoding("UTF-8");
+        response.setContentType("application/scim+json;charset=UTF-8");
+        Map<String, Object> error = new LinkedHashMap<>();
+        error.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:Error"));
+        error.put("status", String.valueOf(status));
+        if (scimType != null) {
+            error.put("scimType", scimType);
+        }
+        error.put("detail", detail);
+        response.getWriter().write(OBJECT_MAPPER.writeValueAsString(error));
+        response.getWriter().flush();
+    }
+
+    private static final class BoundedBulkRequestWrapper extends HttpServletRequestWrapper {
+        private final int maxBytes;
+        private ServletInputStream boundedInputStream;
+        private BufferedReader boundedReader;
+
+        BoundedBulkRequestWrapper(HttpServletRequest request, int maxBytes) {
+            super(request);
+            this.maxBytes = maxBytes;
+        }
+
+        @Override
+        public ServletInputStream getInputStream() throws IOException {
+            if (boundedInputStream == null) {
+                ServletInputStream delegate = super.getInputStream();
+                boundedInputStream = new ServletInputStream() {
+                    private long bytesRead = 0;
+
+                    private void addBytes(int count) {
+                        if (count > 0) {
+                            bytesRead += count;
+                            if (bytesRead > maxBytes) {
+                                throw new ScimException(413, null,
+                                        "Bulk request payload size exceeds maxPayloadSize of " + maxBytes + " bytes");
+                            }
+                        }
+                    }
+
+                    @Override
+                    public int read() throws IOException {
+                        int b = delegate.read();
+                        if (b != -1) {
+                            addBytes(1);
+                        }
+                        return b;
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) throws IOException {
+                        int n = delegate.read(b, off, len);
+                        addBytes(n);
+                        return n;
+                    }
+
+                    @Override
+                    public boolean isFinished() {
+                        return delegate.isFinished();
+                    }
+
+                    @Override
+                    public boolean isReady() {
+                        return delegate.isReady();
+                    }
+
+                    @Override
+                    public void setReadListener(ReadListener readListener) {
+                        delegate.setReadListener(readListener);
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        delegate.close();
+                    }
+                };
+            }
+            return boundedInputStream;
+        }
+
+        @Override
+        public BufferedReader getReader() throws IOException {
+            if (boundedReader == null) {
+                String enc = getCharacterEncoding();
+                Charset cs = StringUtils.hasText(enc) ? Charset.forName(enc) : StandardCharsets.UTF_8;
+                boundedReader = new BufferedReader(new InputStreamReader(getInputStream(), cs));
+            }
+            return boundedReader;
         }
     }
 
@@ -94,7 +237,7 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     }
 
     static String redactPasswords(String body) {
-        if (body == null || body.isEmpty()) {
+        if (body == null || body.isEmpty() || !containsPasswordIgnoreCase(body)) {
             return body;
         }
         try {
@@ -109,6 +252,20 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
             // Fall through to regex redaction for malformed or truncated JSON
         }
         return redactWithRegexFallback(body);
+    }
+
+    private static boolean containsPasswordIgnoreCase(String rawBody) {
+        if (rawBody == null) {
+            return false;
+        }
+        int limit = rawBody.length() - 8;
+        for (int i = 0; i <= limit; i++) {
+            char c = rawBody.charAt(i);
+            if ((c == 'p' || c == 'P') && rawBody.regionMatches(true, i, "password", 0, 8)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean redactJsonNode(JsonNode node) {
@@ -171,11 +328,22 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
                 || lower.contains(":password[");
     }
 
-    private static String redactWithRegexFallback(String body) {
-        String redacted = MALFORMED_PASSWORD_KV.matcher(body).replaceAll("$1\"[REDACTED]\"");
-        redacted = MALFORMED_PATCH_PATH_FIRST.matcher(redacted).replaceAll("$1\"[REDACTED]\"");
-        redacted = MALFORMED_PATCH_VALUE_FIRST.matcher(redacted).replaceAll("$1\"[REDACTED]\"$2");
-        return redacted;
+    static String redactWithRegexFallback(String rawBody) {
+        if (rawBody == null || rawBody.isEmpty() || !containsPasswordIgnoreCase(rawBody)) {
+            return rawBody;
+        }
+        String step1 = MALFORMED_PASSWORD_KV.matcher(rawBody).replaceAll("$1\"[REDACTED]\"");
+        Matcher segMatcher = FLAT_OBJECT_SEGMENT.matcher(step1);
+        StringBuilder sb = new StringBuilder(step1.length());
+        while (segMatcher.find()) {
+            String seg = segMatcher.group();
+            if (containsPasswordIgnoreCase(seg) && SEGMENT_HAS_PASSWORD_PATH.matcher(seg).find()) {
+                seg = SEGMENT_VALUE_FIELD.matcher(seg).replaceAll("$1\"[REDACTED]\"");
+            }
+            segMatcher.appendReplacement(sb, Matcher.quoteReplacement(seg));
+        }
+        segMatcher.appendTail(sb);
+        return sb.toString();
     }
 
     private UUID extractWorkspaceId(String path) {

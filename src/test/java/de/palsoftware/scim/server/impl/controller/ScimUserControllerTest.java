@@ -24,6 +24,7 @@ import static org.mockito.Mockito.when;
 class ScimUserControllerTest {
 
     private ScimUserService userService;
+    private ScimAsyncEventService asyncEventService;
     private ScimUserController controller;
     private ScimUser mockUser;
     private final UUID workspaceId = UUID.randomUUID();
@@ -33,7 +34,8 @@ class ScimUserControllerTest {
     @BeforeEach
     void setUp() {
         userService = Mockito.mock(ScimUserService.class);
-        controller = new ScimUserController(userService);
+        asyncEventService = Mockito.mock(ScimAsyncEventService.class);
+        controller = new ScimUserController(userService, asyncEventService);
 
         mockUser = new ScimUser();
         mockUser.setId(userId);
@@ -91,7 +93,7 @@ class ScimUserControllerTest {
         when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
         when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
 
-        ResponseEntity<Map<String, Object>> response = controller.listUsers(workspaceId.toString(), null, "userName", "ascending", -1, 300, null, null, null, request);
+        ResponseEntity<Map<String, Object>> response = controller.listUsers(workspaceId.toString(), null, "userName", "ascending", -1, 300, null, null, null, null, request);
 
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
@@ -145,7 +147,7 @@ class ScimUserControllerTest {
     void testDeleteUser() {
         Mockito.doNothing().when(userService).deleteUser(workspaceId, userId);
 
-        ResponseEntity<Void> response = controller.deleteUser(workspaceId.toString(), userId.toString(), null);
+        ResponseEntity<Void> response = controller.deleteUser(workspaceId.toString(), userId.toString(), null, request);
 
         assertEquals(204, response.getStatusCode().value());
     }
@@ -584,5 +586,29 @@ class ScimUserControllerTest {
         assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
         assertEquals(txnId.toString(), response.getHeaders().getFirst(ScimPreferHeaderUtil.SET_TXN_HEADER));
         assertNull(response.getBody());
+    }
+
+    @Test
+    void testListUsers_CountZeroWithCursor_OmitsNextAndPreviousCursors() {
+        String token = ScimCursorCodec.encodeCursor(workspaceId, 2, 3600);
+        Map<String, Object> result = new HashMap<>();
+        result.put("Resources", Collections.emptyList());
+        result.put("totalResults", 5L);
+
+        when(userService.listUsers(eq(workspaceId), isNull(), eq("userName"), eq("ascending"), eq(3), eq(0)))
+                .thenReturn(result);
+        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.listUsers(
+                workspaceId.toString(), null, "userName", "ascending", null, 0, token, null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertEquals(0, body.get("itemsPerPage"));
+        assertEquals(Collections.emptyList(), body.get("Resources"));
+        assertNull(body.get("nextCursor"));
+        assertNull(body.get("previousCursor"));
     }
 }

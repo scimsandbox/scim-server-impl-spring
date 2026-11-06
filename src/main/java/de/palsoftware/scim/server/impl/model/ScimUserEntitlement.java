@@ -46,6 +46,15 @@ public class ScimUserEntitlement {
         this.primaryFlag = primaryFlag;
     }
 
+    public ScimUserEntitlement copy() {
+        ScimUserEntitlement copy = new ScimUserEntitlement();
+        copy.setValue(this.value);
+        copy.setType(this.type);
+        copy.setDisplay(this.display);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

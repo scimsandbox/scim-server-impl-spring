@@ -818,4 +818,27 @@ class ScimBulkControllerTest {
         Mockito.verify(userService, Mockito.never()).createUser(
                 eq(workspaceId), argThat(d -> d != null && "carol".equals(d.get("userName"))));
     }
+
+    @Test
+    void processBulk_chunkedBodyExceedingMaxPayloadSize_throws413() {
+        // Simulate Transfer-Encoding: chunked where Content-Length is -1 (unknown)
+        assertEquals(-1L, request.getContentLengthLong());
+
+        String oversizedString = "x".repeat(ScimBulkController.MAX_PAYLOAD_SIZE + 64);
+        Map<String, Object> op = Map.of(
+                "method", "POST",
+                "path", "/Users",
+                "bulkId", "u1",
+                "data", Map.of("userName", oversizedString)
+        );
+        Map<String, Object> body = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
+                "Operations", List.of(op)
+        );
+
+        ScimException ex = assertThrows(ScimException.class,
+                () -> controller.processBulk(workspaceId.toString(), body, null, request));
+        assertEquals(413, ex.getHttpStatus());
+        assertNull(ex.getScimType());
+    }
 }

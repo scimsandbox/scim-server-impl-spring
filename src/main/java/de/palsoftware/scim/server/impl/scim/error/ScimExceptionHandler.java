@@ -36,6 +36,13 @@ public class ScimExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Map<String, Object>> handleBadJson(HttpMessageNotReadableException ex) {
+        Throwable cause = ex.getCause();
+        while (cause != null) {
+            if (cause instanceof ScimException scimEx) {
+                return handleScimException(scimEx);
+            }
+            cause = cause.getCause() != cause ? cause.getCause() : null;
+        }
         return buildErrorResponse(400, "invalidSyntax", "Invalid or malformed JSON in request body");
     }
 

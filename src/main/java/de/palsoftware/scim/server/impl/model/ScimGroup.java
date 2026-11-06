@@ -43,6 +43,7 @@ public class ScimGroup {
     private Long version;
 
     @OneToMany(mappedBy = "group", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @org.hibernate.annotations.BatchSize(size = 200)
     private List<ScimGroupMembership> members = new ArrayList<>();
 
     @PrePersist

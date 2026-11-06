@@ -5,13 +5,17 @@ import de.palsoftware.scim.server.impl.model.ScimUser;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletRequestWrapper;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.util.ContentCachingRequestWrapper;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -29,7 +33,7 @@ public class ScimBulkController extends ScimBaseController {
     private static final String BULK_REQUEST_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:BulkRequest";
     private static final String ENTERPRISE_USER_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
     private static final int MAX_OPERATIONS = 1000;
-    private static final int MAX_PAYLOAD_SIZE = 1048576; // 1 MB per ServiceProviderConfig
+    public static final int MAX_PAYLOAD_SIZE = 1048576; // 1 MB per ServiceProviderConfig
     private static final String KEY_FAIL_ON_ERRORS = "failOnErrors";
     private static final String KEY_OPERATIONS = "Operations";
     private static final String KEY_STATUS = "status";
@@ -554,14 +558,25 @@ public class ScimBulkController extends ScimBaseController {
 
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> validateBulkRequest(HttpServletRequest request, Map<String, Object> body) {
-        long contentLength = request.getContentLengthLong();
+        long contentLength = request != null ? request.getContentLengthLong() : -1L;
         if (contentLength > MAX_PAYLOAD_SIZE) {
             throw new ScimException(413, null,
-                    "Bulk request exceeds maxPayloadSize (" + MAX_PAYLOAD_SIZE + " bytes)");
+                    "Bulk request payload size exceeds maxPayloadSize of " + MAX_PAYLOAD_SIZE + " bytes");
+        }
+
+        int cachedBytes = extractCachedContentLength(request);
+        if (cachedBytes > MAX_PAYLOAD_SIZE) {
+            throw new ScimException(413, null,
+                    "Bulk request payload size exceeds maxPayloadSize of " + MAX_PAYLOAD_SIZE + " bytes");
         }
 
         if (body == null) {
             throw new ScimException(400, "invalidSyntax", "Bulk request body is required");
+        }
+
+        if (contentLength < 0 && cachedBytes <= 0 && estimateJsonBytes(body, 0) > MAX_PAYLOAD_SIZE) {
+            throw new ScimException(413, null,
+                    "Bulk request payload size exceeds maxPayloadSize of " + MAX_PAYLOAD_SIZE + " bytes");
         }
 
         Object rawSchemas = body.get(KEY_SCHEMAS);
@@ -586,6 +601,68 @@ public class ScimBulkController extends ScimBaseController {
             typedOps.add((Map<String, Object>) opMap);
         }
         return typedOps;
+    }
+
+    private static int extractCachedContentLength(HttpServletRequest request) {
+        ServletRequest current = request;
+        while (current != null) {
+            if (current instanceof ContentCachingRequestWrapper cachingWrapper) {
+                return cachingWrapper.getContentAsByteArray().length;
+            }
+            if (current instanceof ServletRequestWrapper wrapper) {
+                current = wrapper.getRequest();
+            } else {
+                break;
+            }
+        }
+        return -1;
+    }
+
+    private static long estimateJsonBytes(Object value, long currentTotal) {
+        if (currentTotal > MAX_PAYLOAD_SIZE) {
+            return currentTotal;
+        }
+        if (value == null) {
+            return currentTotal + 4;
+        }
+        if (value instanceof String s) {
+            return currentTotal + 2 + s.getBytes(StandardCharsets.UTF_8).length;
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return currentTotal + value.toString().length();
+        }
+        if (value instanceof Map<?, ?> map) {
+            long total = currentTotal + 2;
+            boolean first = true;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!first) {
+                    total += 1;
+                }
+                first = false;
+                total = estimateJsonBytes(String.valueOf(entry.getKey()), total) + 1;
+                total = estimateJsonBytes(entry.getValue(), total);
+                if (total > MAX_PAYLOAD_SIZE) {
+                    return total;
+                }
+            }
+            return total;
+        }
+        if (value instanceof Iterable<?> iterable) {
+            long total = currentTotal + 2;
+            boolean first = true;
+            for (Object elem : iterable) {
+                if (!first) {
+                    total += 1;
+                }
+                first = false;
+                total = estimateJsonBytes(elem, total);
+                if (total > MAX_PAYLOAD_SIZE) {
+                    return total;
+                }
+            }
+            return total;
+        }
+        return currentTotal + value.toString().getBytes(StandardCharsets.UTF_8).length;
     }
 
     private static int parseFailOnErrors(Object failOnErrorsObj) {

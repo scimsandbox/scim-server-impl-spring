@@ -46,6 +46,15 @@ public class ScimUserPhoneNumber {
         this.primaryFlag = primaryFlag;
     }
 
+    public ScimUserPhoneNumber copy() {
+        ScimUserPhoneNumber copy = new ScimUserPhoneNumber();
+        copy.setValue(this.value);
+        copy.setType(this.type);
+        copy.setDisplay(this.display);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

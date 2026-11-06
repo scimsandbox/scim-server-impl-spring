@@ -170,6 +170,269 @@ public class ScimFilterParser {
         };
     }
 
+    public static boolean referencesUserGroups(FilterNode node) {
+        return astReferencesGroups(node);
+    }
+
+    public static boolean requiresInMemoryEvaluation(FilterNode node, boolean isUser) {
+        if (node == null) {
+            return false;
+        }
+        return switch (node) {
+            case FilterNode.AndNode n -> requiresInMemoryEvaluation(n.left(), isUser)
+                    || requiresInMemoryEvaluation(n.right(), isUser);
+            case FilterNode.OrNode n -> requiresInMemoryEvaluation(n.left(), isUser)
+                    || requiresInMemoryEvaluation(n.right(), isUser);
+            case FilterNode.NotNode n -> requiresInMemoryEvaluation(n.inner(), isUser);
+            case FilterNode.ValuePathNode n -> true;
+            case FilterNode.PresenceNode n -> isAttrRequiringInMemory(n.attrPath(), "pr", isUser);
+            case FilterNode.ComparisonNode n -> isAttrRequiringInMemory(n.attrPath(), n.operator(), isUser);
+        };
+    }
+
+    private static boolean isAttrRequiringInMemory(String rawAttrPath, String op, boolean isUser) {
+        if (isOtherResourceAttribute(rawAttrPath, isUser)) {
+            return true;
+        }
+        String stripped = stripCoreUrnPrefix(rawAttrPath, isUser).toLowerCase(Locale.ROOT);
+        if ("schemas".equals(stripped) || "meta.location".equals(stripped) || "meta.version".equals(stripped)) {
+            return true;
+        }
+        if (isUser) {
+            String rootAttr = stripped.contains(".") ? stripped.substring(0, stripped.indexOf('.')) : stripped;
+            return JSON_COLLECTIONS.contains(rootAttr) || "groups".equals(rootAttr) || "members".equals(rootAttr);
+        } else {
+            return ("members.$ref".equals(stripped) || "members.type".equals(stripped))
+                    && "ne".equalsIgnoreCase(op);
+        }
+    }
+
+    public static Specification<ScimUser> buildUserPreFilter(FilterNode ast, UUID workspaceId) {
+        return (root, query, cb) -> {
+            Predicate wsPred = cb.equal(root.get(ATTR_WORKSPACE).get(ATTR_ID), workspaceId);
+            Predicate astPred = buildPreFilterPredicate(ast, root, query, cb, true, workspaceId);
+            return astPred != null ? cb.and(wsPred, astPred) : wsPred;
+        };
+    }
+
+    public static Specification<ScimGroup> buildGroupPreFilter(FilterNode ast, UUID workspaceId) {
+        return (root, query, cb) -> {
+            Predicate wsPred = cb.equal(root.get(ATTR_WORKSPACE).get(ATTR_ID), workspaceId);
+            Predicate astPred = buildPreFilterPredicate(ast, root, query, cb, false, workspaceId);
+            return astPred != null ? cb.and(wsPred, astPred) : wsPred;
+        };
+    }
+
+    private static Predicate buildPreFilterPredicate(
+            FilterNode node, Root<?> root, CriteriaQuery<?> query, CriteriaBuilder cb, boolean isUser, UUID workspaceId) {
+        if (node == null) {
+            return null;
+        }
+        return switch (node) {
+            case FilterNode.AndNode n -> {
+                Predicate lp = buildPreFilterPredicate(n.left(), root, query, cb, isUser, workspaceId);
+                Predicate rp = buildPreFilterPredicate(n.right(), root, query, cb, isUser, workspaceId);
+                if (lp != null && rp != null) yield cb.and(lp, rp);
+                yield lp != null ? lp : rp;
+            }
+            case FilterNode.OrNode n -> {
+                Predicate lp = buildPreFilterPredicate(n.left(), root, query, cb, isUser, workspaceId);
+                Predicate rp = buildPreFilterPredicate(n.right(), root, query, cb, isUser, workspaceId);
+                if (lp != null && rp != null) yield cb.or(lp, rp);
+                yield null;
+            }
+            case FilterNode.NotNode n -> {
+                if (requiresInMemoryEvaluation(n.inner(), isUser)) {
+                    yield null;
+                }
+                if (n.inner() instanceof FilterNode.PresenceNode pn) {
+                    String s = stripCoreUrnPrefix(pn.attrPath(), isUser).toLowerCase(Locale.ROOT);
+                    if (!"name".equals(s) && !"meta".equals(s) && !ENTERPRISE_URN.equals(s)
+                            && !(ENTERPRISE_URN_PREFIX + "manager").equals(s)
+                            && !(ENTERPRISE_URN_PREFIX + "manager.$ref").equals(s)
+                            && !"members".equals(s) && !s.startsWith("members.")) {
+                        Path<?> path = resolveAttributePath(root, stripCoreUrnPrefix(pn.attrPath(), isUser), isUser);
+                        yield cb.isNull(path);
+                    }
+                }
+                yield null;
+            }
+            case FilterNode.PresenceNode n -> buildPresencePreFilter(n.attrPath(), root, cb, isUser);
+            case FilterNode.ComparisonNode n -> buildComparisonPreFilter(n, root, cb, isUser);
+            case FilterNode.ValuePathNode n -> buildValuePathPreFilter(n, root, cb, isUser);
+        };
+    }
+
+    private static Predicate buildPresencePreFilter(String rawAttrPath, Root<?> root, CriteriaBuilder cb, boolean isUser) {
+        if (isOtherResourceAttribute(rawAttrPath, isUser)) {
+            return falsePredicate(cb);
+        }
+        String strippedOrig = stripCoreUrnPrefix(rawAttrPath, isUser);
+        String stripped = strippedOrig.toLowerCase(Locale.ROOT);
+        if ("meta".equals(stripped) || "meta.resourcetype".equals(stripped)
+                || "meta.version".equals(stripped) || "meta.location".equals(stripped)
+                || "schemas".equals(stripped)) {
+            return null;
+        }
+        if (isUser) {
+            String rootAttr = stripped.contains(".") ? stripped.substring(0, stripped.indexOf('.')) : stripped;
+            if (JSON_COLLECTIONS.contains(rootAttr)) {
+                String col = getCollectionFieldName(rootAttr);
+                Expression<String> jsonStr = castToString(root.get(col));
+                return cb.and(cb.and(cb.isNotNull(root.get(col)), cb.notEqual(jsonStr, "[]")), cb.notEqual(jsonStr, "null"));
+            }
+            if ("groups".equals(rootAttr)) {
+                return null;
+            }
+            if ("name".equals(stripped)) {
+                return orAll(cb,
+                        cb.isNotNull(root.get("nameFormatted")),
+                        cb.isNotNull(root.get("nameFamilyName")),
+                        cb.isNotNull(root.get("nameGivenName")),
+                        cb.isNotNull(root.get("nameMiddleName")),
+                        cb.isNotNull(root.get("nameHonorificPrefix")),
+                        cb.isNotNull(root.get("nameHonorificSuffix")));
+            }
+            if (ENTERPRISE_URN.equals(stripped)) {
+                return orAll(cb,
+                        cb.isNotNull(root.get("enterpriseEmployeeNumber")),
+                        cb.isNotNull(root.get("enterpriseCostCenter")),
+                        cb.isNotNull(root.get("enterpriseOrganization")),
+                        cb.isNotNull(root.get("enterpriseDivision")),
+                        cb.isNotNull(root.get("enterpriseDepartment")),
+                        cb.isNotNull(root.get("enterpriseManagerValue")));
+            }
+            if ((ENTERPRISE_URN_PREFIX + "manager").equals(stripped)
+                    || (ENTERPRISE_URN_PREFIX + "manager.$ref").equals(stripped)) {
+                return orAll(cb,
+                        cb.isNotNull(root.get("enterpriseManagerValue")),
+                        cb.isNotNull(root.get("enterpriseManagerRef")));
+            }
+            return cb.isNotNull(resolveAttributePath(root, strippedOrig, true));
+        } else {
+            if ("members".equals(stripped) || stripped.startsWith("members.")) {
+                return null;
+            }
+            return cb.isNotNull(resolveAttributePath(root, strippedOrig, false));
+        }
+    }
+
+    private static Predicate buildComparisonPreFilter(
+            FilterNode.ComparisonNode n, Root<?> root, CriteriaBuilder cb, boolean isUser) {
+        String rawAttrPath = n.attrPath();
+        String op = n.operator().toLowerCase(Locale.ROOT);
+        String val = n.value();
+        if (isOtherResourceAttribute(rawAttrPath, isUser)) {
+            return falsePredicate(cb);
+        }
+        String strippedOrig = stripCoreUrnPrefix(rawAttrPath, isUser);
+        String stripped = strippedOrig.toLowerCase(Locale.ROOT);
+        if ("meta.resourcetype".equals(stripped) || "meta.version".equals(stripped)
+                || "meta.location".equals(stripped) || "schemas".equals(stripped)) {
+            return null;
+        }
+        if (isUser) {
+            String rootAttr = stripped.contains(".") ? stripped.substring(0, stripped.indexOf('.')) : stripped;
+            if (JSON_COLLECTIONS.contains(rootAttr)) {
+                if ("x509certificates".equals(rootAttr)) {
+                    return null;
+                }
+                String sub = stripped.contains(".") ? stripped.substring(stripped.indexOf('.') + 1) : "value";
+                if (("eq".equals(op) || "co".equals(op) || "sw".equals(op) || "ew".equals(op))
+                        && !"primary".equals(sub)
+                        && !"$ref".equals(sub)
+                        && isSafeJsonSubstringLiteral(val)) {
+                    String col = getCollectionFieldName(rootAttr);
+                    Expression<String> jsonStr = castToString(root.get(col));
+                    return cb.like(cb.lower(jsonStr), "%" + escapeLikeValue(val.toLowerCase(Locale.ROOT)) + "%", '\\');
+                }
+                return null;
+            }
+            if ("groups".equals(rootAttr)) {
+                return null;
+            }
+            Path<?> path = resolveAttributePath(root, strippedOrig, true);
+            Predicate cmp = buildComparisonPredicate(cb, path, op, val, strippedOrig);
+            return "ne".equals(op) ? cb.or(cb.isNull(path), cmp) : cmp;
+        } else {
+            if ("members".equals(stripped) || stripped.startsWith("members.")) {
+                return null;
+            }
+            Path<?> path = resolveAttributePath(root, strippedOrig, false);
+            Predicate cmp = buildComparisonPredicate(cb, path, op, val, strippedOrig);
+            return "ne".equals(op) ? cb.or(cb.isNull(path), cmp) : cmp;
+        }
+    }
+
+    private static Predicate buildValuePathPreFilter(
+            FilterNode.ValuePathNode n, Root<?> root, CriteriaBuilder cb, boolean isUser) {
+        if (isOtherResourceAttribute(n.parentAttr(), isUser)) {
+            return falsePredicate(cb);
+        }
+        String stripped = stripCoreUrnPrefix(n.parentAttr(), isUser).toLowerCase(Locale.ROOT);
+        if (isUser && JSON_COLLECTIONS.contains(stripped)) {
+            String col = getCollectionFieldName(stripped);
+            Expression<String> jsonStr = castToString(root.get(col));
+            Predicate nonEmpty = cb.and(
+                    cb.and(cb.isNotNull(root.get(col)), cb.notEqual(jsonStr, "[]")),
+                    cb.notEqual(jsonStr, "null"));
+            if (!"x509certificates".equals(stripped)) {
+                Predicate innerPred = buildJsonInnerPreFilter(n.inner(), cb, jsonStr);
+                if (innerPred != null) {
+                    return cb.and(nonEmpty, innerPred);
+                }
+            }
+            return nonEmpty;
+        }
+        return null;
+    }
+
+    private static Predicate buildJsonInnerPreFilter(FilterNode inner, CriteriaBuilder cb, Expression<String> jsonStr) {
+        if (inner == null) {
+            return null;
+        }
+        return switch (inner) {
+            case FilterNode.AndNode n -> {
+                Predicate lp = buildJsonInnerPreFilter(n.left(), cb, jsonStr);
+                Predicate rp = buildJsonInnerPreFilter(n.right(), cb, jsonStr);
+                if (lp != null && rp != null) yield cb.and(lp, rp);
+                yield lp != null ? lp : rp;
+            }
+            case FilterNode.OrNode n -> {
+                Predicate lp = buildJsonInnerPreFilter(n.left(), cb, jsonStr);
+                Predicate rp = buildJsonInnerPreFilter(n.right(), cb, jsonStr);
+                if (lp != null && rp != null) yield cb.or(lp, rp);
+                yield null;
+            }
+            case FilterNode.ComparisonNode n -> {
+                String op = n.operator().toLowerCase(Locale.ROOT);
+                String sub = n.attrPath().toLowerCase(Locale.ROOT);
+                String val = n.value();
+                if (("eq".equals(op) || "co".equals(op) || "sw".equals(op) || "ew".equals(op))
+                        && !"primary".equals(sub)
+                        && !"$ref".equals(sub)
+                        && isSafeJsonSubstringLiteral(val)) {
+                    yield cb.like(cb.lower(jsonStr), "%" + escapeLikeValue(val.toLowerCase(Locale.ROOT)) + "%", '\\');
+                }
+                yield null;
+            }
+            default -> null;
+        };
+    }
+
+    private static boolean isSafeJsonSubstringLiteral(String val) {
+        if (val == null || val.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < val.length(); i++) {
+            char c = val.charAt(i);
+            if (c == '"' || c == '\\' || c < 0x20 || c > 0x7E) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static FilterNode parseAstOr(List<String> tokens, int[] pos) {
         FilterNode left = parseAstAnd(tokens, pos);
         while (pos[0] < tokens.size() && "or".equalsIgnoreCase(tokens.get(pos[0]))) {
@@ -827,8 +1090,11 @@ public class ScimFilterParser {
 
         if ("pr".equals(operator)) {
             return (root, query, cb) -> {
-                String expectedKey = "\"" + normalizedSubAttr + "\"%:%";
-                return cb.like(castToString(root.get(getCollectionFieldName(collectionName))), "%" + expectedKey + "%", '\\');
+                Expression<String> expr = castToString(root.get(getCollectionFieldName(collectionName)));
+                return cb.or(
+                        cb.like(expr, "%\"" + normalizedSubAttr + "\":%", '\\'),
+                        cb.like(expr, "%\"" + normalizedSubAttr + "\": %", '\\')
+                );
             };
         }
 
@@ -848,18 +1114,10 @@ public class ScimFilterParser {
             String escapedValue = escapeLikeValue(finalValue);
 
             boolean isBoolean = !quoted && ("true".equalsIgnoreCase(finalValue) || BOOLEAN_FALSE.equalsIgnoreCase(finalValue));
-            String jsonAttrPrefix = "\"" + normalizedSubAttr + "\"%:%";
-            String jsonSearchFragment;
-            if (isBoolean) {
-                jsonSearchFragment = jsonAttrPrefix + finalValue.toLowerCase(Locale.ROOT);
-            } else {
-                jsonSearchFragment = jsonAttrPrefix + "\"" + escapedValue + "\"";
-            }
-
             boolean caseExact = isJsonSubAttributeCaseExact(collectionName, subAttr);
             boolean caseInsensitive = !caseExact;
 
-            return buildJsonOperatorPredicate(cb, jsonString, operator, caseInsensitive, jsonAttrPrefix, jsonSearchFragment, escapedValue);
+            return buildJsonOperatorPredicate(cb, jsonString, operator, caseInsensitive, normalizedSubAttr, isBoolean, finalValue, escapedValue);
         };
     }
 
@@ -901,45 +1159,42 @@ public class ScimFilterParser {
         return false;
     }
 
+    private static Predicate jsonKeyValueLike(CriteriaBuilder cb, Expression<String> expr, String key, String valuePattern) {
+        return cb.or(
+                cb.like(expr, "%\"" + key + "\":\"" + valuePattern + "%", '\\'),
+                cb.like(expr, "%\"" + key + "\": \"" + valuePattern + "%", '\\')
+        );
+    }
+
     private static Predicate buildJsonOperatorPredicate(CriteriaBuilder cb, Expression<String> jsonString,
                                                             String operator, boolean caseInsensitive,
-                                                            String jsonAttrPrefix, String jsonSearchFragment,
-                                                            String escapedValue) {
-        switch (operator) {
-            case "eq":
-                if (caseInsensitive) {
-                    return cb.like(cb.lower(jsonString), "%" + jsonSearchFragment.toLowerCase(Locale.ROOT) + "%", '\\');
-                }
-                return cb.like(jsonString, "%" + jsonSearchFragment + "%", '\\');
-            case "ne":
-                if (caseInsensitive) {
-                    return cb.notLike(cb.lower(jsonString), "%" + jsonSearchFragment.toLowerCase(Locale.ROOT) + "%", '\\');
-                }
-                return cb.notLike(jsonString, "%" + jsonSearchFragment + "%", '\\');
-            case "co": {
-                String coPattern = jsonAttrPrefix + "\"" + "%" + escapedValue + "%";
-                if (caseInsensitive) {
-                    return cb.like(cb.lower(jsonString), "%" + coPattern.toLowerCase(Locale.ROOT) + "%", '\\');
-                }
-                return cb.like(jsonString, "%" + coPattern + "%", '\\');
-            }
-            case "sw": {
-                String swPattern = jsonAttrPrefix + "\"" + escapedValue + "%";
-                if (caseInsensitive) {
-                    return cb.like(cb.lower(jsonString), "%" + swPattern.toLowerCase(Locale.ROOT) + "%", '\\');
-                }
-                return cb.like(jsonString, "%" + swPattern + "%", '\\');
-            }
-            case "ew": {
-                String ewPattern = jsonAttrPrefix + "\"" + "%" + escapedValue + "\"";
-                if (caseInsensitive) {
-                    return cb.like(cb.lower(jsonString), "%" + ewPattern.toLowerCase(Locale.ROOT) + "%", '\\');
-                }
-                return cb.like(jsonString, "%" + ewPattern + "%", '\\');
-            }
-            default:
-                throw new ScimException(400, "invalidFilter", "Operator " + operator + " not supported for JSON collections");
+                                                            String key, boolean isBoolean,
+                                                            String rawFinalValue, String escapedValue) {
+        Expression<String> targetExpr = caseInsensitive ? cb.lower(jsonString) : jsonString;
+        String targetKey = caseInsensitive ? key.toLowerCase(Locale.ROOT) : key;
+        String targetEscaped = caseInsensitive ? escapedValue.toLowerCase(Locale.ROOT) : escapedValue;
+
+        if (isBoolean) {
+            String boolVal = rawFinalValue.toLowerCase(Locale.ROOT);
+            Predicate boolMatch = cb.or(
+                    cb.like(targetExpr, "%\"" + targetKey + "\":" + boolVal + "%", '\\'),
+                    cb.like(targetExpr, "%\"" + targetKey + "\": " + boolVal + "%", '\\')
+            );
+            return switch (operator) {
+                case "eq" -> boolMatch;
+                case "ne" -> cb.not(boolMatch);
+                default -> throw new ScimException(400, "invalidFilter", "Operator " + operator + " not supported for JSON collections");
+            };
         }
+
+        return switch (operator) {
+            case "eq" -> jsonKeyValueLike(cb, targetExpr, targetKey, targetEscaped + "\"");
+            case "ne" -> cb.not(jsonKeyValueLike(cb, targetExpr, targetKey, targetEscaped + "\""));
+            case "co" -> jsonKeyValueLike(cb, targetExpr, targetKey, "%" + targetEscaped + "%\"");
+            case "sw" -> jsonKeyValueLike(cb, targetExpr, targetKey, targetEscaped + "%\"");
+            case "ew" -> jsonKeyValueLike(cb, targetExpr, targetKey, "%" + targetEscaped + "\"");
+            default -> throw new ScimException(400, "invalidFilter", "Operator " + operator + " not supported for JSON collections");
+        };
     }
 
     private static String getCollectionFieldName(String collectionName) {

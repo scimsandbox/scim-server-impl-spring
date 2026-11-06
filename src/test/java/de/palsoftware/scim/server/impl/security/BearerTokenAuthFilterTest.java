@@ -177,6 +177,32 @@ class BearerTokenAuthFilterTest {
     }
 
     @Test
+    void caseInsensitiveBearerScheme_PassesThrough() throws Exception {
+        UUID workspaceId = UUID.randomUUID();
+        Workspace ws = new Workspace();
+        ws.setId(workspaceId);
+
+        WorkspaceToken wsToken = new WorkspaceToken();
+        wsToken.setWorkspace(ws);
+        wsToken.setExpiresAt(Instant.now().plus(30, ChronoUnit.DAYS));
+
+        when(tokenRepository.findByTokenHashAndNotRevoked(anyString())).thenReturn(Optional.of(wsToken));
+
+        for (String prefix : new String[]{"bearer ", "BEARER ", "bEaReR "}) {
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setRequestURI("/ws/" + workspaceId + "/scim/v2/Users");
+            request.addHeader("Authorization", prefix + "some-valid-token");
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request, response, filterChain);
+
+            assertEquals(200, response.getStatus(), "Failed for scheme prefix: " + prefix);
+            assertEquals(ScimRequestMetricAttributes.AUTH_OK,
+                    request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
+        }
+    }
+
+    @Test
     void tokenWithNullExpiresAt_PassesThrough() throws Exception {
         UUID workspaceId = UUID.randomUUID();
         Workspace ws = new Workspace();

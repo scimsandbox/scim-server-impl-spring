@@ -74,59 +74,81 @@ public class ScimUserService {
 
     public Map<String, Object> listUsers(UUID workspaceId, String filter, String sortBy,
             String sortOrder, int startIndex, int count) {
-        if (ScimFilterParser.containsValuePath(filter)) {
-            ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(filter, true);
-            String sortAttr = ScimFilterParser.resolveUserSortAttribute(sortBy);
-            boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
+        boolean hasFilter = filter != null && !filter.isBlank();
+        ScimFilterParser.FilterNode ast = hasFilter ? ScimFilterParser.parseAst(filter, true) : null;
+        boolean requiresInMemoryEval = ast != null && ScimFilterParser.requiresInMemoryEvaluation(ast, true);
 
-            Specification<ScimUser> wsSpec = ScimFilterParser.parseUserFilter(null, workspaceId);
-            List<ScimUser> candidates = userRepository.findAll(wsSpec);
+        String sortAttr = ScimFilterParser.resolveUserSortAttribute(sortBy);
+        boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
+        boolean isEmailSort = "emails".equals(sortAttr);
+
+        Sort sort = null;
+        if (!isEmailSort) {
+            Sort.Order primaryOrder = isDescending
+                    ? Sort.Order.desc(sortAttr).nullsFirst()
+                    : Sort.Order.asc(sortAttr).nullsLast();
+            if (!isSortAttributeCaseExact(sortAttr)) {
+                primaryOrder = primaryOrder.ignoreCase();
+            }
+            Sort.Order tieBreaker = isDescending ? Sort.Order.desc("id") : Sort.Order.asc("id");
+            sort = "id".equals(sortAttr) ? Sort.by(primaryOrder) : Sort.by(primaryOrder, tieBreaker);
+        }
+
+        if (requiresInMemoryEval) {
+            Specification<ScimUser> preFilterSpec = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
+            List<ScimUser> candidates;
+            if (isEmailSort) {
+                candidates = userRepository.findAll(preFilterSpec);
+            } else {
+                candidates = userRepository.findAll(preFilterSpec, sort);
+                if (candidates == null) {
+                    candidates = userRepository.findAll(preFilterSpec);
+                }
+            }
             if (candidates == null) {
                 candidates = Collections.emptyList();
             }
+
             Map<UUID, List<Map<String, Object>>> groupsMap = Collections.emptyMap();
-            if (!candidates.isEmpty() && ScimFilterParser.astReferencesGroups(ast)) {
+            if (!candidates.isEmpty() && ScimFilterParser.referencesUserGroups(ast)) {
                 List<UUID> ids = candidates.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
                 groupsMap = getUserGroupsBatch(ids, "");
             }
 
             List<ScimUser> matched = new ArrayList<>();
             for (ScimUser u : candidates) {
-                initializeLazyCollections(u);
                 List<Map<String, Object>> uGroups = groupsMap.getOrDefault(u.getId(), Collections.emptyList());
-                if (ScimFilterEvaluator.matchesUser(u, uGroups, ast)) {
+                if (ScimFilterEvaluator.matchesUser(u, ast, uGroups, "")) {
                     matched.add(u);
                 }
             }
 
             long totalResults = matched.size();
-            if (count == 0) {
+            if (count <= 0) {
                 return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
             }
 
-            matched.sort(buildUserInMemoryComparator(sortAttr, isDescending));
+            if (isEmailSort) {
+                matched.sort(buildUserInMemoryComparator(sortAttr, isDescending));
+            }
             int offset = Math.max(0, startIndex - 1);
             List<ScimUser> page = offset >= matched.size()
                     ? Collections.emptyList()
                     : matched.subList(offset, Math.min(offset + count, matched.size()));
+            page.forEach(this::initializeLazyCollections);
             return buildListResponse(page, totalResults, startIndex, page.size());
         }
 
         Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(filter, workspaceId);
 
-        // Get total count
-        long totalResults = userRepository.count(spec);
-
-        if (count == 0) {
-            return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
-        }
-
-        // Sorting
-        String sortAttr = ScimFilterParser.resolveUserSortAttribute(sortBy);
-        boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
-
-        if ("emails".equals(sortAttr)) {
-            List<ScimUser> allUsers = new ArrayList<>(userRepository.findAll(spec));
+        if (isEmailSort) {
+            if (count <= 0) {
+                long totalResults = userRepository.count(spec);
+                return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
+            }
+            List<ScimUser> fetched = userRepository.findAll(spec);
+            List<ScimUser> allUsers = fetched != null ? new ArrayList<>(fetched) : new ArrayList<>();
+            long totalResults = allUsers.size();
             Comparator<ScimUser> userComparator = buildUserInMemoryComparator(sortAttr, isDescending);
             allUsers.sort(userComparator);
 
@@ -142,14 +164,12 @@ public class ScimUserService {
             return buildListResponse(page, totalResults, startIndex, page.size());
         }
 
-        Sort.Order primaryOrder = isDescending
-                ? Sort.Order.desc(sortAttr).nullsFirst()
-                : Sort.Order.asc(sortAttr).nullsLast();
-        if (!isSortAttributeCaseExact(sortAttr)) {
-            primaryOrder = primaryOrder.ignoreCase();
+        // Get total count
+        long totalResults = userRepository.count(spec);
+
+        if (count <= 0) {
+            return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
         }
-        Sort.Order tieBreaker = isDescending ? Sort.Order.desc("id") : Sort.Order.asc("id");
-        Sort sort = "id".equals(sortAttr) ? Sort.by(primaryOrder) : Sort.by(primaryOrder, tieBreaker);
 
         int offset = Math.max(0, startIndex - 1);
         Pageable pageable = new OffsetBasedPageRequest(offset, count, sort);
@@ -192,12 +212,12 @@ public class ScimUserService {
         }
 
         // PUT = full replacement (validate on a draft copy so invalid payloads never mutate existing state)
-        ScimUser draft = copyUser(existing);
+        ScimUser draft = existing.copyMutableState();
         ScimUserMapper.clearMutableAttributes(draft);
         ScimUserMapper.applyFromScimInput(draft, input);
         resolveEnterpriseManagerDisplay(workspaceId, draft);
 
-        copyMutableState(draft, existing);
+        existing.applyMutableStateFrom(draft);
         ScimUser savedUser = userRepository.save(existing);
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
@@ -211,7 +231,7 @@ public class ScimUserService {
 
         validateIfMatch(ifMatch, user.getVersion());
 
-        ScimUser draft = copyUser(user);
+        ScimUser draft = user.copyMutableState();
         ScimPatchEngine.applyPatchOperations(draft, operations);
         draft.setUserName(ScimCanonicalizer.normalizeNfc(draft.getUserName()));
 
@@ -231,11 +251,11 @@ public class ScimUserService {
             resolveEnterpriseManagerDisplay(workspaceId, draft);
         }
 
-        if (!hasUserChanged(user, draft)) {
+        if (user.hasSameMutableState(draft)) {
             return user;
         }
 
-        copyMutableState(draft, user);
+        user.applyMutableStateFrom(draft);
         ScimUser savedUser = userRepository.save(user);
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
@@ -419,190 +439,5 @@ public class ScimUserService {
     private boolean isWildcardETag(String etag) {
         String trimmed = etag.trim();
         return "*".equals(trimmed) || "\"*\"".equals(trimmed);
-    }
-
-    private static ScimUser copyUser(ScimUser src) {
-        ScimUser copy = new ScimUser();
-        copy.setId(src.getId());
-        copy.setWorkspace(src.getWorkspace());
-        copy.setCreatedAt(src.getCreatedAt());
-        copy.setLastModified(src.getLastModified());
-        copy.setVersion(src.getVersion());
-        copyMutableState(src, copy);
-        return copy;
-    }
-
-    private static void copyMutableState(ScimUser src, ScimUser dst) {
-        dst.setUserName(src.getUserName());
-        dst.setExternalId(src.getExternalId());
-        dst.setNameFormatted(src.getNameFormatted());
-        dst.setNameFamilyName(src.getNameFamilyName());
-        dst.setNameGivenName(src.getNameGivenName());
-        dst.setNameMiddleName(src.getNameMiddleName());
-        dst.setNameHonorificPrefix(src.getNameHonorificPrefix());
-        dst.setNameHonorificSuffix(src.getNameHonorificSuffix());
-        dst.setDisplayName(src.getDisplayName());
-        dst.setNickName(src.getNickName());
-        dst.setProfileUrl(src.getProfileUrl());
-        dst.setTitle(src.getTitle());
-        dst.setUserType(src.getUserType());
-        dst.setPreferredLanguage(src.getPreferredLanguage());
-        dst.setLocale(src.getLocale());
-        dst.setTimezone(src.getTimezone());
-        dst.setActive(src.isActive());
-        dst.setPassword(src.getPassword());
-        dst.setEnterpriseEmployeeNumber(src.getEnterpriseEmployeeNumber());
-        dst.setEnterpriseCostCenter(src.getEnterpriseCostCenter());
-        dst.setEnterpriseOrganization(src.getEnterpriseOrganization());
-        dst.setEnterpriseDivision(src.getEnterpriseDivision());
-        dst.setEnterpriseDepartment(src.getEnterpriseDepartment());
-        dst.setEnterpriseManagerValue(src.getEnterpriseManagerValue());
-        dst.setEnterpriseManagerRef(src.getEnterpriseManagerRef());
-        dst.setEnterpriseManagerDisplay(src.getEnterpriseManagerDisplay());
-
-        List<ScimUserEmail> emails = new ArrayList<>();
-        if (src.getEmails() != null) {
-            for (ScimUserEmail e : src.getEmails()) {
-                ScimUserEmail c = new ScimUserEmail();
-                c.setValue(e.getValue());
-                c.setType(e.getType());
-                c.setDisplay(e.getDisplay());
-                c.setPrimaryFlag(e.isPrimaryFlag());
-                emails.add(c);
-            }
-        }
-        dst.setEmails(emails);
-
-        List<ScimUserPhoneNumber> phones = new ArrayList<>();
-        if (src.getPhoneNumbers() != null) {
-            for (ScimUserPhoneNumber p : src.getPhoneNumbers()) {
-                ScimUserPhoneNumber c = new ScimUserPhoneNumber();
-                c.setValue(p.getValue());
-                c.setType(p.getType());
-                c.setDisplay(p.getDisplay());
-                c.setPrimaryFlag(p.isPrimaryFlag());
-                phones.add(c);
-            }
-        }
-        dst.setPhoneNumbers(phones);
-
-        List<ScimUserAddress> addrs = new ArrayList<>();
-        if (src.getAddresses() != null) {
-            for (ScimUserAddress a : src.getAddresses()) {
-                ScimUserAddress c = new ScimUserAddress();
-                c.setFormatted(a.getFormatted());
-                c.setStreetAddress(a.getStreetAddress());
-                c.setLocality(a.getLocality());
-                c.setRegion(a.getRegion());
-                c.setPostalCode(a.getPostalCode());
-                c.setCountry(a.getCountry());
-                c.setType(a.getType());
-                c.setPrimaryFlag(a.isPrimaryFlag());
-                addrs.add(c);
-            }
-        }
-        dst.setAddresses(addrs);
-
-        List<ScimUserEntitlement> ents = new ArrayList<>();
-        if (src.getEntitlements() != null) {
-            for (ScimUserEntitlement e : src.getEntitlements()) {
-                ScimUserEntitlement c = new ScimUserEntitlement();
-                c.setValue(e.getValue());
-                c.setType(e.getType());
-                c.setDisplay(e.getDisplay());
-                c.setPrimaryFlag(e.isPrimaryFlag());
-                ents.add(c);
-            }
-        }
-        dst.setEntitlements(ents);
-
-        List<ScimUserRole> roles = new ArrayList<>();
-        if (src.getRoles() != null) {
-            for (ScimUserRole r : src.getRoles()) {
-                ScimUserRole c = new ScimUserRole();
-                c.setValue(r.getValue());
-                c.setType(r.getType());
-                c.setDisplay(r.getDisplay());
-                c.setPrimaryFlag(r.isPrimaryFlag());
-                roles.add(c);
-            }
-        }
-        dst.setRoles(roles);
-
-        List<ScimUserIm> ims = new ArrayList<>();
-        if (src.getIms() != null) {
-            for (ScimUserIm im : src.getIms()) {
-                ScimUserIm c = new ScimUserIm();
-                c.setValue(im.getValue());
-                c.setType(im.getType());
-                c.setDisplay(im.getDisplay());
-                c.setPrimaryFlag(im.isPrimaryFlag());
-                ims.add(c);
-            }
-        }
-        dst.setIms(ims);
-
-        List<ScimUserPhoto> photos = new ArrayList<>();
-        if (src.getPhotos() != null) {
-            for (ScimUserPhoto ph : src.getPhotos()) {
-                ScimUserPhoto c = new ScimUserPhoto();
-                c.setValue(ph.getValue());
-                c.setType(ph.getType());
-                c.setDisplay(ph.getDisplay());
-                c.setPrimaryFlag(ph.isPrimaryFlag());
-                photos.add(c);
-            }
-        }
-        dst.setPhotos(photos);
-
-        List<ScimUserX509Certificate> certs = new ArrayList<>();
-        if (src.getX509Certificates() != null) {
-            for (ScimUserX509Certificate cert : src.getX509Certificates()) {
-                ScimUserX509Certificate c = new ScimUserX509Certificate();
-                c.setValue(cert.getValue());
-                c.setType(cert.getType());
-                c.setDisplay(cert.getDisplay());
-                c.setPrimaryFlag(cert.isPrimaryFlag());
-                certs.add(c);
-            }
-        }
-        dst.setX509Certificates(certs);
-    }
-
-    private static boolean hasUserChanged(ScimUser a, ScimUser b) {
-        return !Objects.equals(a.getUserName(), b.getUserName())
-                || !Objects.equals(a.getExternalId(), b.getExternalId())
-                || !Objects.equals(a.getNameFormatted(), b.getNameFormatted())
-                || !Objects.equals(a.getNameFamilyName(), b.getNameFamilyName())
-                || !Objects.equals(a.getNameGivenName(), b.getNameGivenName())
-                || !Objects.equals(a.getNameMiddleName(), b.getNameMiddleName())
-                || !Objects.equals(a.getNameHonorificPrefix(), b.getNameHonorificPrefix())
-                || !Objects.equals(a.getNameHonorificSuffix(), b.getNameHonorificSuffix())
-                || !Objects.equals(a.getDisplayName(), b.getDisplayName())
-                || !Objects.equals(a.getNickName(), b.getNickName())
-                || !Objects.equals(a.getProfileUrl(), b.getProfileUrl())
-                || !Objects.equals(a.getTitle(), b.getTitle())
-                || !Objects.equals(a.getUserType(), b.getUserType())
-                || !Objects.equals(a.getPreferredLanguage(), b.getPreferredLanguage())
-                || !Objects.equals(a.getLocale(), b.getLocale())
-                || !Objects.equals(a.getTimezone(), b.getTimezone())
-                || a.isActive() != b.isActive()
-                || !Objects.equals(a.getPassword(), b.getPassword())
-                || !Objects.equals(a.getEnterpriseEmployeeNumber(), b.getEnterpriseEmployeeNumber())
-                || !Objects.equals(a.getEnterpriseCostCenter(), b.getEnterpriseCostCenter())
-                || !Objects.equals(a.getEnterpriseOrganization(), b.getEnterpriseOrganization())
-                || !Objects.equals(a.getEnterpriseDivision(), b.getEnterpriseDivision())
-                || !Objects.equals(a.getEnterpriseDepartment(), b.getEnterpriseDepartment())
-                || !Objects.equals(a.getEnterpriseManagerValue(), b.getEnterpriseManagerValue())
-                || !Objects.equals(a.getEnterpriseManagerRef(), b.getEnterpriseManagerRef())
-                || !Objects.equals(a.getEnterpriseManagerDisplay(), b.getEnterpriseManagerDisplay())
-                || !Objects.equals(a.getEmails(), b.getEmails())
-                || !Objects.equals(a.getPhoneNumbers(), b.getPhoneNumbers())
-                || !Objects.equals(a.getAddresses(), b.getAddresses())
-                || !Objects.equals(a.getEntitlements(), b.getEntitlements())
-                || !Objects.equals(a.getRoles(), b.getRoles())
-                || !Objects.equals(a.getIms(), b.getIms())
-                || !Objects.equals(a.getPhotos(), b.getPhotos())
-                || !Objects.equals(a.getX509Certificates(), b.getX509Certificates());
     }
 }

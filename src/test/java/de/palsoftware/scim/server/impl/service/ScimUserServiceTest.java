@@ -254,7 +254,6 @@ class ScimUserServiceTest {
         u3.setUserName("user3");
         u3.setEmails(Collections.emptyList());
 
-        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(3L);
         when(userRepository.findAll(any(Specification.class))).thenReturn(List.of(u1, u2, u3));
 
         Map<String, Object> response = service.listUsers(workspaceId, null, "emails", "ascending", 1, 10);
@@ -289,7 +288,6 @@ class ScimUserServiceTest {
         u3.setUserName("user3");
         u3.setEmails(Collections.emptyList());
 
-        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(3L);
         when(userRepository.findAll(any(Specification.class))).thenReturn(List.of(u1, u2, u3));
 
         Map<String, Object> response = service.listUsers(workspaceId, null, "emails.value", "descending", 1, 10);
@@ -322,7 +320,6 @@ class ScimUserServiceTest {
         u3.setUserName("user3");
         u3.setEmails(Collections.emptyList());
 
-        when(userRepository.count(org.mockito.ArgumentMatchers.<Specification<ScimUser>>any())).thenReturn(3L);
         when(userRepository.findAll(any(Specification.class))).thenReturn(List.of(u1, u2, u3));
 
         // startIndex 2, count 1 -> should return 2nd item (u1)
@@ -556,5 +553,66 @@ class ScimUserServiceTest {
         assertThat(error).isNotNull();
         assertThat(error.getHttpStatus()).isEqualTo(400);
         assertThat(error.getScimType()).isEqualTo("mutability");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listUsers_multiValuedFilterUsesInMemoryEvaluationAndSkipsGroupBatchWhenNotReferenced() {
+        ScimUser matchingUser = new ScimUser();
+        matchingUser.setId(UUID.randomUUID());
+        matchingUser.setWorkspace(workspace);
+        matchingUser.setUserName("alice");
+        matchingUser.setUserType("Employee");
+        de.palsoftware.scim.server.impl.model.ScimUserEmail workEmail =
+                new de.palsoftware.scim.server.impl.model.ScimUserEmail();
+        workEmail.setValue("alice@example.com");
+        workEmail.setType("work");
+        matchingUser.setEmails(new java.util.ArrayList<>(List.of(workEmail)));
+
+        ScimUser nonMatchingUser = new ScimUser();
+        nonMatchingUser.setId(UUID.randomUUID());
+        nonMatchingUser.setWorkspace(workspace);
+        nonMatchingUser.setUserName("bob");
+        nonMatchingUser.setUserType("Employee");
+        de.palsoftware.scim.server.impl.model.ScimUserEmail homeEmailWithWorkInValue =
+                new de.palsoftware.scim.server.impl.model.ScimUserEmail();
+        homeEmailWithWorkInValue.setValue("work@example.com");
+        homeEmailWithWorkInValue.setType("home");
+        nonMatchingUser.setEmails(new java.util.ArrayList<>(List.of(homeEmailWithWorkInValue)));
+
+        when(userRepository.findAll(any(org.springframework.data.jpa.domain.Specification.class),
+                any(org.springframework.data.domain.Sort.class)))
+                .thenReturn(List.of(matchingUser, nonMatchingUser));
+
+        Map<String, Object> page = service.listUsers(
+                workspaceId, "userType eq \"Employee\" and emails.type eq \"work\"",
+                "userName", "ascending", 1, 10);
+
+        assertThat((List<ScimUser>) page.get("Resources")).containsExactly(matchingUser);
+        assertThat(page.get("totalResults")).isEqualTo(1L);
+        org.mockito.Mockito.verify(membershipRepository, org.mockito.Mockito.never())
+                .findByMemberValueIn(any());
+    }
+
+    @Test
+    void scimUserMutableState_deepCopiesAndDetectsMutations() {
+        ScimUser original = new ScimUser();
+        original.setUserName("alice");
+        original.setDisplayName("Alice");
+        de.palsoftware.scim.server.impl.model.ScimUserEmail email =
+                new de.palsoftware.scim.server.impl.model.ScimUserEmail();
+        email.setValue("alice@example.com");
+        email.setType("work");
+        original.setEmails(new java.util.ArrayList<>(List.of(email)));
+
+        ScimUser snapshot = new ScimUser();
+        snapshot.applyMutableStateFrom(original);
+
+        assertThat(original.hasSameMutableState(snapshot)).isTrue();
+
+        // Mutating an element inside original's collection must not affect snapshot
+        original.getEmails().get(0).setType("home");
+        assertThat(original.hasSameMutableState(snapshot)).isFalse();
+        assertThat(snapshot.getEmails().get(0).getType()).isEqualTo("work");
     }
 }

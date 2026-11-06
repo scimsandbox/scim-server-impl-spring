@@ -8,6 +8,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Entity
 @Table(name = "scim_users", uniqueConstraints = {
@@ -469,5 +471,147 @@ public class ScimUser {
 
     public void setX509Certificates(List<ScimUserX509Certificate> x509Certificates) {
         this.x509Certificates = x509Certificates;
+    }
+
+    private record MutableState(
+            String userName,
+            String externalId,
+            String nameFormatted,
+            String nameFamilyName,
+            String nameGivenName,
+            String nameMiddleName,
+            String nameHonorificPrefix,
+            String nameHonorificSuffix,
+            String displayName,
+            String nickName,
+            String profileUrl,
+            String title,
+            String userType,
+            String preferredLanguage,
+            String locale,
+            String timezone,
+            boolean active,
+            String password,
+            String enterpriseEmployeeNumber,
+            String enterpriseCostCenter,
+            String enterpriseOrganization,
+            String enterpriseDivision,
+            String enterpriseDepartment,
+            String enterpriseManagerValue,
+            String enterpriseManagerRef,
+            String enterpriseManagerDisplay,
+            List<ScimUserEmail> emails,
+            List<ScimUserPhoneNumber> phoneNumbers,
+            List<ScimUserAddress> addresses,
+            List<ScimUserEntitlement> entitlements,
+            List<ScimUserRole> roles,
+            List<ScimUserIm> ims,
+            List<ScimUserPhoto> photos,
+            List<ScimUserX509Certificate> x509Certificates
+    ) {}
+
+    private static <T> List<T> copyCollection(List<T> source, Function<T, T> copier) {
+        if (source == null) {
+            return new ArrayList<>();
+        }
+        return source.stream().map(copier).collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    private MutableState toMutableState() {
+        return new MutableState(
+                this.userName,
+                this.externalId,
+                this.nameFormatted,
+                this.nameFamilyName,
+                this.nameGivenName,
+                this.nameMiddleName,
+                this.nameHonorificPrefix,
+                this.nameHonorificSuffix,
+                this.displayName,
+                this.nickName,
+                this.profileUrl,
+                this.title,
+                this.userType,
+                this.preferredLanguage,
+                this.locale,
+                this.timezone,
+                this.active,
+                this.password,
+                this.enterpriseEmployeeNumber,
+                this.enterpriseCostCenter,
+                this.enterpriseOrganization,
+                this.enterpriseDivision,
+                this.enterpriseDepartment,
+                this.enterpriseManagerValue,
+                this.enterpriseManagerRef,
+                this.enterpriseManagerDisplay,
+                copyCollection(this.emails, ScimUserEmail::copy),
+                copyCollection(this.phoneNumbers, ScimUserPhoneNumber::copy),
+                copyCollection(this.addresses, ScimUserAddress::copy),
+                copyCollection(this.entitlements, ScimUserEntitlement::copy),
+                copyCollection(this.roles, ScimUserRole::copy),
+                copyCollection(this.ims, ScimUserIm::copy),
+                copyCollection(this.photos, ScimUserPhoto::copy),
+                copyCollection(this.x509Certificates, ScimUserX509Certificate::copy)
+        );
+    }
+
+    private void applyMutableState(MutableState state) {
+        this.userName = state.userName();
+        this.externalId = state.externalId();
+        this.nameFormatted = state.nameFormatted();
+        this.nameFamilyName = state.nameFamilyName();
+        this.nameGivenName = state.nameGivenName();
+        this.nameMiddleName = state.nameMiddleName();
+        this.nameHonorificPrefix = state.nameHonorificPrefix();
+        this.nameHonorificSuffix = state.nameHonorificSuffix();
+        this.displayName = state.displayName();
+        this.nickName = state.nickName();
+        this.profileUrl = state.profileUrl();
+        this.title = state.title();
+        this.userType = state.userType();
+        this.preferredLanguage = state.preferredLanguage();
+        this.locale = state.locale();
+        this.timezone = state.timezone();
+        this.active = state.active();
+        this.password = state.password();
+        this.enterpriseEmployeeNumber = state.enterpriseEmployeeNumber();
+        this.enterpriseCostCenter = state.enterpriseCostCenter();
+        this.enterpriseOrganization = state.enterpriseOrganization();
+        this.enterpriseDivision = state.enterpriseDivision();
+        this.enterpriseDepartment = state.enterpriseDepartment();
+        this.enterpriseManagerValue = state.enterpriseManagerValue();
+        this.enterpriseManagerRef = state.enterpriseManagerRef();
+        this.enterpriseManagerDisplay = state.enterpriseManagerDisplay();
+        this.emails = state.emails();
+        this.phoneNumbers = state.phoneNumbers();
+        this.addresses = state.addresses();
+        this.entitlements = state.entitlements();
+        this.roles = state.roles();
+        this.ims = state.ims();
+        this.photos = state.photos();
+        this.x509Certificates = state.x509Certificates();
+    }
+
+    public void applyMutableStateFrom(ScimUser other) {
+        if (other == null) {
+            return;
+        }
+        applyMutableState(other.toMutableState());
+    }
+
+    public ScimUser copyMutableState() {
+        ScimUser copy = new ScimUser();
+        copy.setId(this.id);
+        copy.setWorkspace(this.workspace);
+        copy.setCreatedAt(this.createdAt);
+        copy.setLastModified(this.lastModified);
+        copy.setVersion(this.version);
+        copy.applyMutableState(this.toMutableState());
+        return copy;
+    }
+
+    public boolean hasSameMutableState(ScimUser other) {
+        return other != null && this.toMutableState().equals(other.toMutableState());
     }
 }

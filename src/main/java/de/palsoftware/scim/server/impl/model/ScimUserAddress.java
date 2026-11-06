@@ -86,6 +86,19 @@ public class ScimUserAddress {
         this.primaryFlag = primaryFlag;
     }
 
+    public ScimUserAddress copy() {
+        ScimUserAddress copy = new ScimUserAddress();
+        copy.setFormatted(this.formatted);
+        copy.setStreetAddress(this.streetAddress);
+        copy.setLocality(this.locality);
+        copy.setRegion(this.region);
+        copy.setPostalCode(this.postalCode);
+        copy.setCountry(this.country);
+        copy.setType(this.type);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

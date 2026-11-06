@@ -31,6 +31,7 @@ class ScimAsyncEventControllerTest {
 
     private ScimAsyncEventRepository repository;
     private ObjectMapper objectMapper;
+    private ScimAsyncEventService asyncEventService;
     private ScimAsyncEventController controller;
     private final UUID workspaceId = UUID.randomUUID();
     private final UUID txnId = UUID.randomUUID();
@@ -41,7 +42,8 @@ class ScimAsyncEventControllerTest {
     void setUp() {
         repository = Mockito.mock(ScimAsyncEventRepository.class);
         objectMapper = new ObjectMapper();
-        controller = new ScimAsyncEventController(repository, objectMapper);
+        asyncEventService = Mockito.mock(ScimAsyncEventService.class);
+        controller = new ScimAsyncEventController(repository, objectMapper, asyncEventService);
 
         mockWorkspace = new Workspace();
         mockWorkspace.setId(workspaceId);

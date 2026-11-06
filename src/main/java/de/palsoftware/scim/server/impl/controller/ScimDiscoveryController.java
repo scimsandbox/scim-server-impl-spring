@@ -7,14 +7,11 @@ import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.filter.ScimFilterParser;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimGroupMapper;
 import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
-import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
 import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
 import de.palsoftware.scim.server.impl.scim.schema.ScimSchemaDefinitions;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
 import de.palsoftware.scim.server.impl.service.ScimUserService;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -32,19 +29,12 @@ import java.util.regex.Pattern;
 @RequestMapping({"/ws/{workspaceId}/scim/v2", "/ws/{workspaceId}/scim/v2/{compat}"})
 public class ScimDiscoveryController extends ScimBaseController {
 
-    private static final MediaType SCIM_JSON = MediaType.parseMediaType("application/scim+json");
-
     private final ScimUserService userService;
     private final ScimGroupService groupService;
 
-    @Autowired
     public ScimDiscoveryController(ScimUserService userService, ScimGroupService groupService) {
         this.userService = userService;
         this.groupService = groupService;
-    }
-
-    public ScimDiscoveryController() {
-        this(null, null);
     }
 
     // ─── ServiceProviderConfig ──────────────────────────────────────────
@@ -57,10 +47,6 @@ public class ScimDiscoveryController extends ScimBaseController {
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
                 .body(ScimSchemaDefinitions.serviceProviderConfig());
-    }
-
-    public ResponseEntity<Map<String, Object>> getServiceProviderConfig(String compat) {
-        return getServiceProviderConfig(compat, null);
     }
 
     @RequestMapping(value = "/ServiceProviderConfig", method = {RequestMethod.POST, RequestMethod.PUT,
@@ -87,10 +73,6 @@ public class ScimDiscoveryController extends ScimBaseController {
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
                 .body(response);
-    }
-
-    public ResponseEntity<Map<String, Object>> getSchemas(String compat) {
-        return getSchemas(compat, null);
     }
 
     @GetMapping("/Schemas/{schemaId}")
@@ -135,12 +117,6 @@ public class ScimDiscoveryController extends ScimBaseController {
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
                 .body(response);
-    }
-
-    public ResponseEntity<Map<String, Object>> getResourceTypes(HttpServletRequest request,
-            String workspaceId,
-            String compat) {
-        return getResourceTypes(request, workspaceId, compat, null);
     }
 
     private static void rejectDiscoveryFilter(String filter) {
@@ -192,21 +168,6 @@ public class ScimDiscoveryController extends ScimBaseController {
         }
 
         return executeRootSearch(workspaceId, filter, sortBy, sortOrder, startIndex, count, cursor,
-                attributes, excludedAttributes, compat, request);
-    }
-
-    public ResponseEntity<Map<String, Object>> rootSearchGet(
-            String workspaceId,
-            String filter,
-            int startIndex,
-            int count,
-            String sortBy,
-            String sortOrder,
-            String attributes,
-            String excludedAttributes,
-            String compat,
-            HttpServletRequest request) {
-        return rootSearchGet(workspaceId, filter, (Integer) startIndex, count, null, sortBy, sortOrder,
                 attributes, excludedAttributes, compat, request);
     }
 
@@ -376,10 +337,6 @@ public class ScimDiscoveryController extends ScimBaseController {
             throw new ScimException(404, null, "Resource or endpoint not found: " + compat);
         }
 
-        if (userService == null || groupService == null) {
-            throw new ScimException(500, null, "Services not initialized");
-        }
-
         UUID wsId = resolveWorkspaceId(workspaceId);
         String baseUrl = buildBaseUrl(request, workspaceId);
         String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
@@ -390,15 +347,12 @@ public class ScimDiscoveryController extends ScimBaseController {
         }
 
         boolean isCursorPagination = cursor != null;
-        int offset;
         int effectiveStartIndex;
         if (isCursorPagination) {
-            offset = ScimCursorCodec.decodeCursor(cursor, wsId);
-            effectiveStartIndex = offset + 1;
+            effectiveStartIndex = ScimCursorCodec.decodeCursor(cursor, wsId) + 1;
         } else {
             effectiveStartIndex = (startIndex != null) ? startIndex : 1;
             if (effectiveStartIndex < 1) effectiveStartIndex = 1;
-            offset = effectiveStartIndex - 1;
         }
 
         if (count < 0) count = 0;
@@ -529,26 +483,7 @@ public class ScimDiscoveryController extends ScimBaseController {
             }
         }
 
-        int itemsPerPage = allResources.size();
-        Map<String, Object> responseBody;
-        if (isCursorPagination) {
-            String previousCursor = null;
-            if (offset > 0) {
-                int prevOffset = Math.max(0, offset - count);
-                previousCursor = ScimCursorCodec.encodeCursor(wsId, prevOffset);
-            }
-            String nextCursor = null;
-            if ((long) offset + itemsPerPage < totalResults) {
-                nextCursor = ScimCursorCodec.encodeCursor(wsId, offset + itemsPerPage);
-            }
-            responseBody = ScimListResponse.ofCursor(allResources, totalResults, nextCursor, previousCursor).toMap();
-        } else {
-            responseBody = ScimListResponse.ofIndex(allResources, totalResults, effectiveStartIndex).toMap();
-        }
-
-        return ResponseEntity.ok()
-                .contentType(SCIM_JSON)
-                .body(responseBody);
+        return buildPaginatedListResponse(wsId, effectiveStartIndex, cursor, count, totalResults, allResources);
     }
 
     private List<Map<String, Object>> mapUsers(
