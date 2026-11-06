@@ -52,9 +52,7 @@ public class ScimGroupController extends ScimBaseController {
 
         ScimGroup group = groupService.createGroup(wsId, body);
         Map<String, Object> scimResponse = ScimGroupMapper.toScimResponse(group, baseUrl);
-        if (request != null) {
-            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
-        }
+        applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
 
         String resourceUrl = buildResourceUrl(baseUrl, group.getId());
         return ResponseEntity.status(201)
@@ -176,9 +174,7 @@ public class ScimGroupController extends ScimBaseController {
 
         ScimGroup group = groupService.replaceGroup(wsId, gid, body, ifMatch);
         Map<String, Object> scimResponse = ScimGroupMapper.toScimResponse(group, baseUrl);
-        if (request != null) {
-            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
-        }
+        applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
@@ -216,9 +212,7 @@ public class ScimGroupController extends ScimBaseController {
 
         ScimGroup group = groupService.patchGroup(wsId, gid, operations, ifMatch);
         Map<String, Object> scimResponse = ScimGroupMapper.toScimResponse(group, baseUrl);
-        if (request != null) {
-            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
-        }
+        applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
@@ -281,14 +275,14 @@ public class ScimGroupController extends ScimBaseController {
 
         UUID wsId = resolveWorkspaceId(workspaceId);
         UUID gid = parseUUID(groupId, RESOURCE_GROUP);
-        String baseUrl = request != null ? buildBaseUrl(request, workspaceId, compat) : "";
-        String ifMatch = request != null ? request.getHeader("If-Match") : null;
+        String baseUrl = buildBaseUrl(request, workspaceId, compat);
+        String ifMatch = request.getHeader("If-Match");
         if (ifMatch != null && ifMatch.isBlank()) {
             ifMatch = null;
         }
         final String effectiveIfMatch = ifMatch;
 
-        if (request != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+        if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "DELETE", "Group", gid, baseUrl, () -> {
                 if (effectiveIfMatch != null) {
                     groupService.deleteGroup(wsId, gid, effectiveIfMatch);

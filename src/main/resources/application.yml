@@ -48,7 +48,7 @@ logging:
 
 scim:
   cursor:
-    secret: ${SCIM_CURSOR_SECRET:${SPRING_DATASOURCE_PASSWORD:}}
+    secret: ${SCIM_CURSOR_SECRET:${SPRING_DATASOURCE_PASSWORD:${spring.datasource.password:${ACTUATOR_API_KEY:}}}}
 
 management:
   server:

@@ -57,7 +57,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
 
     private ScimAsyncEventStalePendingReaperService createService(boolean enabled, Duration timeout) {
         return new ScimAsyncEventStalePendingReaperService(
-                asyncEventRepository, asyncEventService, transactionOperations, enabled, timeout);
+                asyncEventRepository, asyncEventService, transactionOperations, Clock.systemUTC(), enabled, timeout);
     }
 
     private ScimAsyncEvent createPendingEvent(UUID txnId, String operation, String resourceType, UUID resourceId) {
@@ -199,7 +199,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
                 asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null);
 
         ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
-                asyncEventRepository, realAsyncService, transactionOperations, true, Duration.ofMinutes(5));
+                asyncEventRepository, realAsyncService, transactionOperations, Clock.systemUTC(), true, Duration.ofMinutes(5));
 
         UUID txn = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
@@ -347,7 +347,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
                 asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null);
 
         ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
-                asyncEventRepository, realAsyncService, transactionOperations, true, Duration.ofMinutes(5));
+                asyncEventRepository, realAsyncService, transactionOperations, Clock.systemUTC(), true, Duration.ofMinutes(5));
 
         List<String> httpMethods = List.of("POST", "PUT", "PATCH", "DELETE");
 
@@ -410,7 +410,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
                 asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null);
 
         ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
-                asyncEventRepository, realAsyncService, transactionOperations, true, Duration.ofMinutes(5));
+                asyncEventRepository, realAsyncService, transactionOperations, Clock.systemUTC(), true, Duration.ofMinutes(5));
 
         UUID txnId = UUID.randomUUID();
         ScimAsyncEvent event = createPendingEvent(txnId, "POST", "User", null);
@@ -452,6 +452,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
         int reaped = service.sweepStalePendingEvents();
 
         assertThat(reaped).isEqualTo(1);
+        verify(asyncEventService).heartbeatInFlightEvents();
         verify(asyncEventRepository, never()).transitionPendingToFailed(eq(inFlightTxn), any(), any());
         verify(asyncEventRepository).transitionPendingToFailed(eq(orphanedTxn), any(), eq(orphanedErrorSet));
     }

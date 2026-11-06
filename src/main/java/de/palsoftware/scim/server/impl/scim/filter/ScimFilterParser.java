@@ -257,13 +257,14 @@ public class ScimFilterParser {
                 }
                 yield null;
             }
-            case FilterNode.PresenceNode n -> buildPresencePreFilter(n.attrPath(), root, cb, isUser);
-            case FilterNode.ComparisonNode n -> buildComparisonPreFilter(n, root, cb, isUser);
-            case FilterNode.ValuePathNode n -> buildValuePathPreFilter(n, root, cb, isUser);
+            case FilterNode.PresenceNode n -> buildPresencePreFilter(n.attrPath(), root, query, cb, isUser, workspaceId);
+            case FilterNode.ComparisonNode n -> buildComparisonPreFilter(n, root, query, cb, isUser, workspaceId);
+            case FilterNode.ValuePathNode n -> buildValuePathPreFilter(n, root, query, cb, isUser, workspaceId);
         };
     }
 
-    private static Predicate buildPresencePreFilter(String rawAttrPath, Root<?> root, CriteriaBuilder cb, boolean isUser) {
+    private static Predicate buildPresencePreFilter(
+            String rawAttrPath, Root<?> root, CriteriaQuery<?> query, CriteriaBuilder cb, boolean isUser, UUID workspaceId) {
         if (isOtherResourceAttribute(rawAttrPath, isUser)) {
             return falsePredicate(cb);
         }
@@ -282,7 +283,8 @@ public class ScimFilterParser {
                 return cb.and(cb.and(cb.isNotNull(root.get(col)), cb.notEqual(jsonStr, "[]")), cb.notEqual(jsonStr, "null"));
             }
             if ("groups".equals(rootAttr)) {
-                return null;
+                String sub = stripped.contains(".") ? stripped.substring(stripped.indexOf('.') + 1) : null;
+                return buildUserGroupsExistsPredicate(root, query, cb, workspaceId, sub, "pr", null);
             }
             if ("name".equals(stripped)) {
                 return orAll(cb,
@@ -311,14 +313,15 @@ public class ScimFilterParser {
             return cb.isNotNull(resolveAttributePath(root, strippedOrig, true));
         } else {
             if ("members".equals(stripped) || stripped.startsWith("members.")) {
-                return null;
+                String sub = stripped.contains(".") ? stripped.substring(stripped.indexOf('.') + 1) : null;
+                return buildGroupMembersExistsPredicate(root, query, cb, sub, "pr", null);
             }
             return cb.isNotNull(resolveAttributePath(root, strippedOrig, false));
         }
     }
 
     private static Predicate buildComparisonPreFilter(
-            FilterNode.ComparisonNode n, Root<?> root, CriteriaBuilder cb, boolean isUser) {
+            FilterNode.ComparisonNode n, Root<?> root, CriteriaQuery<?> query, CriteriaBuilder cb, boolean isUser, UUID workspaceId) {
         String rawAttrPath = n.attrPath();
         String op = n.operator().toLowerCase(Locale.ROOT);
         String val = n.value();
@@ -349,6 +352,11 @@ public class ScimFilterParser {
                 return null;
             }
             if ("groups".equals(rootAttr)) {
+                String sub = stripped.contains(".") ? stripped.substring(stripped.indexOf('.') + 1) : null;
+                if (("eq".equals(op) || "co".equals(op) || "sw".equals(op) || "ew".equals(op))
+                        && (sub == null || "value".equals(sub) || "display".equals(sub))) {
+                    return buildUserGroupsExistsPredicate(root, query, cb, workspaceId, sub != null ? sub : "value", op, val);
+                }
                 return null;
             }
             Path<?> path = resolveAttributePath(root, strippedOrig, true);
@@ -356,6 +364,11 @@ public class ScimFilterParser {
             return "ne".equals(op) ? cb.or(cb.isNull(path), cmp) : cmp;
         } else {
             if ("members".equals(stripped) || stripped.startsWith("members.")) {
+                String sub = stripped.contains(".") ? stripped.substring(stripped.indexOf('.') + 1) : null;
+                if (("eq".equals(op) || "co".equals(op) || "sw".equals(op) || "ew".equals(op))
+                        && (sub == null || "value".equals(sub) || "display".equals(sub) || "type".equals(sub))) {
+                    return buildGroupMembersExistsPredicate(root, query, cb, sub != null ? sub : "value", op, val);
+                }
                 return null;
             }
             Path<?> path = resolveAttributePath(root, strippedOrig, false);
@@ -365,7 +378,7 @@ public class ScimFilterParser {
     }
 
     private static Predicate buildValuePathPreFilter(
-            FilterNode.ValuePathNode n, Root<?> root, CriteriaBuilder cb, boolean isUser) {
+            FilterNode.ValuePathNode n, Root<?> root, CriteriaQuery<?> query, CriteriaBuilder cb, boolean isUser, UUID workspaceId) {
         if (isOtherResourceAttribute(n.parentAttr(), isUser)) {
             return falsePredicate(cb);
         }
@@ -383,6 +396,12 @@ public class ScimFilterParser {
                 }
             }
             return nonEmpty;
+        }
+        if (isUser && "groups".equals(stripped)) {
+            return buildUserGroupsExistsPredicate(root, query, cb, workspaceId, null, "pr", null);
+        }
+        if (!isUser && ("members".equals(stripped) || stripped.startsWith("members."))) {
+            return buildGroupMembersExistsPredicate(root, query, cb, null, "pr", null);
         }
         return null;
     }
@@ -720,10 +739,6 @@ public class ScimFilterParser {
         String rawTokenAttr = token;
         pos[0]++;
 
-        if (pos[0] < tokens.size() && "[".equals(tokens.get(pos[0]))) {
-            return parseValuePathBranch(tokens, pos, rawTokenAttr, isUser, workspaceId);
-        }
-
         String combinedPath = parentPath != null ? parentPath + "." + rawTokenAttr : rawTokenAttr;
         String attrPath = stripCoreUrnPrefix(combinedPath, isUser);
 
@@ -734,26 +749,6 @@ public class ScimFilterParser {
         // Cross-resource attribute absence check (RFC 7644 §3.4.2.1 & §3.4.2.2)
         if (isOtherResourceAttribute(combinedPath, isUser)) {
             return consumeOperatorAndReturnUnassigned(tokens, pos, combinedPath);
-        }
-
-        // Handle JSON collections on User (e.g. emails.value eq "test" or shorthand emails eq "test")
-        if (isUser && attrPath.contains(".")) {
-            String[] parts = attrPath.split("\\.", 2);
-            if (JSON_COLLECTIONS.contains(parts[0].toLowerCase(Locale.ROOT))) {
-                return handleJsonCollectionFilter(tokens, pos, parts[0], parts[1], attrPath);
-            }
-            if ("groups".equalsIgnoreCase(parts[0])) {
-                return handleUserGroupsSubFilter(tokens, pos, parts[1], attrPath, workspaceId);
-            }
-        }
-        if (isUser && !"pr".equalsIgnoreCase(tokens.get(pos[0]))) {
-            String attrLower = attrPath.toLowerCase(Locale.ROOT);
-            if (JSON_COLLECTIONS.contains(attrLower) && !"addresses".equals(attrLower)) {
-                return handleJsonCollectionFilter(tokens, pos, attrPath, "value", attrPath + ".value");
-            }
-            if ("groups".equals(attrLower)) {
-                return handleUserGroupsSubFilter(tokens, pos, "value", attrPath + ".value", workspaceId);
-            }
         }
 
         // Handle Group members.<subAttr> or shorthand members <op> <val> (RFC 7644 §3.4.2.2)
@@ -798,19 +793,6 @@ public class ScimFilterParser {
                 return (root, query, cb) -> truePredicate(cb);
             }
             if (isUser) {
-                if (JSON_COLLECTIONS.contains(stripped)) {
-                    return (root, query, cb) -> {
-                        String col = getCollectionFieldName(stripped);
-                        Expression<String> jsonStr = castToString(root.get(col));
-                        Predicate nonNull = cb.isNotNull(root.get(col));
-                        Predicate notEmptyArr = cb.notEqual(jsonStr, "[]");
-                        Predicate notJsonNull = cb.notEqual(jsonStr, "null");
-                        return cb.and(cb.and(nonNull, notEmptyArr), notJsonNull);
-                    };
-                }
-                if ("groups".equals(stripped)) {
-                    return (root, query, cb) -> buildUserGroupsExistsPredicate(root, query, cb, workspaceId, null, null, null);
-                }
                 if ("name".equals(stripped)) {
                     return (root, query, cb) -> orAll(cb,
                             cb.isNotNull(root.get("nameFormatted")),
@@ -894,42 +876,6 @@ public class ScimFilterParser {
         };
     }
 
-    private static <T> Specification<T> parseValuePathBranch(List<String> tokens, int[] pos, String attrPath, boolean isUser, UUID workspaceId) {
-        pos[0]++; // consume [
-        String normalizedParent = stripCoreUrnPrefix(attrPath, isUser);
-        Specification<T> inner = parseOrExpression(tokens, pos, isUser, normalizedParent, workspaceId);
-        if (pos[0] >= tokens.size() || !"]".equals(tokens.get(pos[0]))) {
-            throw new ScimException(400, "invalidFilter", "Missing closing bracket for value path filter");
-        }
-        pos[0]++; // consume ]
-        return inner;
-    }
-
-    private static <T> Specification<T> handleUserGroupsSubFilter(List<String> tokens, int[] pos, String subAttr, String attrPath, UUID workspaceId) {
-        String subLower = subAttr.toLowerCase(Locale.ROOT);
-        if (!Set.of("value", "display", "$ref", "type").contains(subLower)) {
-            String operator = tokens.get(pos[0]).toLowerCase(Locale.ROOT);
-            pos[0]++;
-            if (!"pr".equals(operator) && pos[0] < tokens.size()) {
-                pos[0]++;
-            }
-            return (root, query, cb) -> {
-                throw new ScimException(400, "invalidFilter", "Unknown groups sub-attribute: " + subAttr);
-            };
-        }
-        String operator = tokens.get(pos[0]).toLowerCase(Locale.ROOT);
-        pos[0]++;
-        if ("pr".equals(operator)) {
-            return (root, query, cb) -> buildUserGroupsExistsPredicate(root, query, cb, workspaceId, subLower, "pr", null);
-        }
-        if (pos[0] >= tokens.size()) {
-            throw new ScimException(400, "invalidFilter", "Missing value for operator: " + operator);
-        }
-        String val = unquote(tokens.get(pos[0]));
-        pos[0]++;
-        return (root, query, cb) -> buildUserGroupsExistsPredicate(root, query, cb, workspaceId, subLower, operator, val);
-    }
-
     private static Predicate buildUserGroupsExistsPredicate(Root<?> root, CriteriaQuery<?> query, CriteriaBuilder cb,
                                                              UUID workspaceId, String subLower, String op, String val) {
         Subquery<UUID> sq = query != null ? query.subquery(UUID.class) : null;
@@ -947,14 +893,16 @@ public class ScimFilterParser {
                 if ("eq".equals(op) && !matchesDirect) return falsePredicate(cb);
                 if ("ne".equals(op) && matchesDirect) return falsePredicate(cb);
             } else if ("value".equals(subLower)) {
-                try {
-                    UUID gid = UUID.fromString(val);
-                    Predicate cmp = "ne".equals(op)
-                            ? cb.notEqual(mRoot.get("group").get(ATTR_ID), gid)
-                            : cb.equal(mRoot.get("group").get(ATTR_ID), gid);
-                    base = cb.and(base, cmp);
-                } catch (IllegalArgumentException e) {
-                    throw new ScimException(400, "invalidFilter", "Invalid UUID for groups.value: " + val, e);
+                if ("eq".equals(op) || "ne".equals(op)) {
+                    try {
+                        UUID gid = UUID.fromString(val);
+                        Predicate cmp = "ne".equals(op)
+                                ? cb.notEqual(mRoot.get("group").get(ATTR_ID), gid)
+                                : cb.equal(mRoot.get("group").get(ATTR_ID), gid);
+                        base = cb.and(base, cmp);
+                    } catch (IllegalArgumentException e) {
+                        if ("eq".equals(op)) return falsePredicate(cb);
+                    }
                 }
             } else if ("display".equals(subLower)) {
                 Predicate cmp = buildComparisonPredicate(cb, mRoot.get("group").get(ATTR_DISPLAY_NAME), op, val, ATTR_DISPLAY_NAME);
@@ -1018,14 +966,16 @@ public class ScimFilterParser {
             base = cb.and(base, cb.isNotNull(mRoot.get("display")));
         } else if (subLower != null && op != null && !"pr".equals(op)) {
             if ("value".equals(subLower)) {
-                try {
-                    UUID mid = UUID.fromString(val);
-                    Predicate cmp = "ne".equals(op)
-                            ? cb.notEqual(mRoot.get("memberValue"), mid)
-                            : cb.equal(mRoot.get("memberValue"), mid);
-                    base = cb.and(base, cmp);
-                } catch (IllegalArgumentException e) {
-                    if ("eq".equals(op)) return falsePredicate(cb);
+                if ("eq".equals(op) || "ne".equals(op)) {
+                    try {
+                        UUID mid = UUID.fromString(val);
+                        Predicate cmp = "ne".equals(op)
+                                ? cb.notEqual(mRoot.get("memberValue"), mid)
+                                : cb.equal(mRoot.get("memberValue"), mid);
+                        base = cb.and(base, cmp);
+                    } catch (IllegalArgumentException e) {
+                        if ("eq".equals(op)) return falsePredicate(cb);
+                    }
                 }
             } else if ("type".equals(subLower)) {
                 Predicate cmp = buildComparisonPredicate(cb, mRoot.get("memberType"), op, val, ATTR_USER_TYPE);
@@ -1066,135 +1016,6 @@ public class ScimFilterParser {
         }
         sq.where(base);
         return cb.exists(sq);
-    }
-
-    private static <T> Specification<T> handleJsonCollectionFilter(List<String> tokens, int[] pos, String collectionName, String subAttr, String attrPath) {
-        if (pos[0] >= tokens.size()) {
-            throw new ScimException(400, "invalidFilter", "Incomplete filter expression after: " + attrPath);
-        }
-
-        final String normalizedSubAttr = resolveJsonFieldKey(collectionName, subAttr);
-        if (normalizedSubAttr == null) {
-            String opTmp = tokens.get(pos[0]);
-            pos[0]++;
-            if (!"pr".equalsIgnoreCase(opTmp) && pos[0] < tokens.size()) {
-                pos[0]++;
-            }
-            return (root, query, cb) -> {
-                throw new ScimException(400, "invalidFilter", "Unknown sub-attribute '" + subAttr + "' on " + collectionName);
-            };
-        }
-
-        String operator = tokens.get(pos[0]).toLowerCase(Locale.ROOT);
-        pos[0]++;
-
-        if ("pr".equals(operator)) {
-            return (root, query, cb) -> {
-                Expression<String> expr = castToString(root.get(getCollectionFieldName(collectionName)));
-                return cb.or(
-                        cb.like(expr, "%\"" + normalizedSubAttr + "\":%", '\\'),
-                        cb.like(expr, "%\"" + normalizedSubAttr + "\": %", '\\')
-                );
-            };
-        }
-
-        if (pos[0] >= tokens.size()) {
-            throw new ScimException(400, "invalidFilter", "Missing value for operator: " + operator);
-        }
-
-        String rawValue = tokens.get(pos[0]);
-        pos[0]++;
-        boolean quoted = rawValue.startsWith("\"") && rawValue.endsWith("\"");
-        final String finalValue = unquote(rawValue);
-
-        return (root, query, cb) -> {
-            String dbField = getCollectionFieldName(collectionName);
-            Expression<String> jsonString = castToString(root.get(dbField));
-
-            String escapedValue = escapeLikeValue(finalValue);
-
-            boolean isBoolean = !quoted && ("true".equalsIgnoreCase(finalValue) || BOOLEAN_FALSE.equalsIgnoreCase(finalValue));
-            boolean caseExact = isJsonSubAttributeCaseExact(collectionName, subAttr);
-            boolean caseInsensitive = !caseExact;
-
-            return buildJsonOperatorPredicate(cb, jsonString, operator, caseInsensitive, normalizedSubAttr, isBoolean, finalValue, escapedValue);
-        };
-    }
-
-    private static String resolveJsonFieldKey(String collectionName, String subAttr) {
-        String col = collectionName.toLowerCase(Locale.ROOT);
-        String sub = subAttr.toLowerCase(Locale.ROOT);
-        if ("addresses".equals(col)) {
-            return switch (sub) {
-                case "formatted" -> "formatted";
-                case "streetaddress" -> "streetAddress";
-                case "locality" -> "locality";
-                case "region" -> "region";
-                case "postalcode" -> "postalCode";
-                case "country" -> "country";
-                case "type" -> "type";
-                case "primary" -> "primaryFlag";
-                default -> null;
-            };
-        }
-        return switch (sub) {
-            case "value" -> "value";
-            case "type" -> "type";
-            case "display" -> "display";
-            case "primary" -> "primaryFlag";
-            case "$ref" -> "value";
-            default -> null;
-        };
-    }
-
-    static boolean isJsonSubAttributeCaseExact(String collectionName, String subAttr) {
-        String col = collectionName.toLowerCase(Locale.ROOT);
-        String sub = subAttr.toLowerCase(Locale.ROOT);
-        if ("$ref".equals(sub)) {
-            return true;
-        }
-        if ("value".equals(sub) && ("photos".equals(col) || "x509certificates".equals(col))) {
-            return true;
-        }
-        return false;
-    }
-
-    private static Predicate jsonKeyValueLike(CriteriaBuilder cb, Expression<String> expr, String key, String valuePattern) {
-        return cb.or(
-                cb.like(expr, "%\"" + key + "\":\"" + valuePattern + "%", '\\'),
-                cb.like(expr, "%\"" + key + "\": \"" + valuePattern + "%", '\\')
-        );
-    }
-
-    private static Predicate buildJsonOperatorPredicate(CriteriaBuilder cb, Expression<String> jsonString,
-                                                            String operator, boolean caseInsensitive,
-                                                            String key, boolean isBoolean,
-                                                            String rawFinalValue, String escapedValue) {
-        Expression<String> targetExpr = caseInsensitive ? cb.lower(jsonString) : jsonString;
-        String targetKey = caseInsensitive ? key.toLowerCase(Locale.ROOT) : key;
-        String targetEscaped = caseInsensitive ? escapedValue.toLowerCase(Locale.ROOT) : escapedValue;
-
-        if (isBoolean) {
-            String boolVal = rawFinalValue.toLowerCase(Locale.ROOT);
-            Predicate boolMatch = cb.or(
-                    cb.like(targetExpr, "%\"" + targetKey + "\":" + boolVal + "%", '\\'),
-                    cb.like(targetExpr, "%\"" + targetKey + "\": " + boolVal + "%", '\\')
-            );
-            return switch (operator) {
-                case "eq" -> boolMatch;
-                case "ne" -> cb.not(boolMatch);
-                default -> throw new ScimException(400, "invalidFilter", "Operator " + operator + " not supported for JSON collections");
-            };
-        }
-
-        return switch (operator) {
-            case "eq" -> jsonKeyValueLike(cb, targetExpr, targetKey, targetEscaped + "\"");
-            case "ne" -> cb.not(jsonKeyValueLike(cb, targetExpr, targetKey, targetEscaped + "\""));
-            case "co" -> jsonKeyValueLike(cb, targetExpr, targetKey, "%" + targetEscaped + "%\"");
-            case "sw" -> jsonKeyValueLike(cb, targetExpr, targetKey, targetEscaped + "%\"");
-            case "ew" -> jsonKeyValueLike(cb, targetExpr, targetKey, "%" + targetEscaped + "\"");
-            default -> throw new ScimException(400, "invalidFilter", "Operator " + operator + " not supported for JSON collections");
-        };
     }
 
     private static String getCollectionFieldName(String collectionName) {

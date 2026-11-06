@@ -58,7 +58,9 @@ public final class ScimCursorCodec {
                 System.getenv("SCIM_CURSOR_SECRET"),
                 System.getProperty("scim.cursor.secret"),
                 System.getenv("SPRING_DATASOURCE_PASSWORD"),
-                System.getProperty("spring.datasource.password")
+                System.getProperty("spring.datasource.password"),
+                System.getenv("ACTUATOR_API_KEY"),
+                System.getProperty("app.security.actuator.api-key")
         };
         for (String candidate : candidates) {
             if (candidate != null && !candidate.isBlank()) {

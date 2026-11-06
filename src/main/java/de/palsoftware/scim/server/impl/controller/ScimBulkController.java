@@ -558,7 +558,7 @@ public class ScimBulkController extends ScimBaseController {
 
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> validateBulkRequest(HttpServletRequest request, Map<String, Object> body) {
-        long contentLength = request != null ? request.getContentLengthLong() : -1L;
+        long contentLength = request.getContentLengthLong();
         if (contentLength > MAX_PAYLOAD_SIZE) {
             throw new ScimException(413, null,
                     "Bulk request payload size exceeds maxPayloadSize of " + MAX_PAYLOAD_SIZE + " bytes");

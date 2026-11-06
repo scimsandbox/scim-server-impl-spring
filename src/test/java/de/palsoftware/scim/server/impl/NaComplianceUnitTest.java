@@ -1311,6 +1311,38 @@ class NaComplianceUnitTest {
                             ? Optional.of(ev)
                             : Optional.empty();
                 });
+        when(asyncEventRepository.transitionPendingToCompleted(any(UUID.class), any(), any(Instant.class), any(String.class)))
+                .thenAnswer(inv -> {
+                    UUID txnId = inv.getArgument(0);
+                    UUID resId = inv.getArgument(1);
+                    Instant completedAt = inv.getArgument(2);
+                    String payload = inv.getArgument(3);
+                    ScimAsyncEvent ev = asyncEvents.get(txnId);
+                    if (ev != null && "PENDING".equals(ev.getStatus())) {
+                        ev.setStatus("COMPLETED");
+                        if (resId != null) {
+                            ev.setResourceId(resId);
+                        }
+                        ev.setCompletedAt(completedAt);
+                        ev.setSetPayload(payload);
+                        return 1;
+                    }
+                    return 0;
+                });
+        when(asyncEventRepository.transitionPendingToFailed(any(UUID.class), any(Instant.class), any(String.class)))
+                .thenAnswer(inv -> {
+                    UUID txnId = inv.getArgument(0);
+                    Instant completedAt = inv.getArgument(1);
+                    String payload = inv.getArgument(2);
+                    ScimAsyncEvent ev = asyncEvents.get(txnId);
+                    if (ev != null && "PENDING".equals(ev.getStatus())) {
+                        ev.setStatus("FAILED");
+                        ev.setCompletedAt(completedAt);
+                        ev.setSetPayload(payload);
+                        return 1;
+                    }
+                    return 0;
+                });
     }
 
     private Workspace seedWorkspace(String name) {

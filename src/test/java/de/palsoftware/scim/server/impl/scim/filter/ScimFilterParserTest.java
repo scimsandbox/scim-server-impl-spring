@@ -126,9 +126,17 @@ class ScimFilterParserTest {
             "emails.primary eq true"
     })
     void testSupportedUserFilters(String filter) {
-        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(filter, workspaceId);
-        assertNotNull(spec);
-        spec.toPredicate(root, query, cb);
+        ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(filter, true);
+        assertNotNull(ast);
+        if (ScimFilterParser.requiresInMemoryEvaluation(ast, true)) {
+            Specification<ScimUser> preFilter = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
+            assertNotNull(preFilter);
+            preFilter.toPredicate(root, query, cb);
+        } else {
+            Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(filter, workspaceId);
+            assertNotNull(spec);
+            spec.toPredicate(root, query, cb);
+        }
     }
 
     @ParameterizedTest
@@ -293,8 +301,10 @@ class ScimFilterParserTest {
     @Test
     void testValuePathFilterCombinedWithOuterFilter() {
         // RFC 7644 §3.4.2.2 example: userType eq "Employee" and emails[type eq "work" and value co "@example.com"]
-        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(
-                "userType eq \"Employee\" and emails[type eq \"work\" and value co \"@example.com\"]", workspaceId);
+        String filter = "userType eq \"Employee\" and emails[type eq \"work\" and value co \"@example.com\"]";
+        ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(filter, true);
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(ast, true));
+        Specification<ScimUser> spec = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
         assertNotNull(spec);
         spec.toPredicate(root, query, cb);
     }
@@ -302,29 +312,32 @@ class ScimFilterParserTest {
     @Test
     void testValuePathFilterOrCombination() {
         // RFC 7644 §3.4.2.2 example: emails[type eq "work" and value co "@example.com"] or ims[type eq "xmpp" and value co "@foo.com"]
-        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(
-                "emails[type eq \"work\" and value co \"@example.com\"] or ims[type eq \"xmpp\" and value co \"@foo.com\"]", workspaceId);
+        String filter = "emails[type eq \"work\" and value co \"@example.com\"] or ims[type eq \"xmpp\" and value co \"@foo.com\"]";
+        ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(filter, true);
+        assertTrue(ScimFilterParser.requiresInMemoryEvaluation(ast, true));
+        Specification<ScimUser> spec = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
         assertNotNull(spec);
         spec.toPredicate(root, query, cb);
     }
 
     @Test
     void testJsonCollectionAllOperators() {
-        // Test all supported operators on JSON collections
+        // Test all supported operators on JSON collections via AST + pre-filter + evaluator
         String[] ops = {"eq", "ne", "co", "sw", "ew"};
         for (String op : ops) {
-            Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(
-                    "emails.value " + op + " \"test@example.com\"", workspaceId);
-            assertNotNull(spec, "JSON collection filter with operator '" + op + "' should parse");
+            String filter = "emails.value " + op + " \"test@example.com\"";
+            ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(filter, true);
+            assertNotNull(ast, "JSON collection filter with operator '" + op + "' should parse");
+            Specification<ScimUser> spec = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
+            assertNotNull(spec);
             spec.toPredicate(root, query, cb);
         }
     }
 
     @Test
     void testJsonCollectionUnsupportedOperator() {
-        // gt/ge/lt/le on JSON collections should throw
-        Specification<ScimUser> spec = ScimFilterParser.parseUserFilter("emails.value gt \"test\"", workspaceId);
-        assertThrows(ScimException.class, () -> spec.toPredicate(root, query, cb));
+        // gt/ge/lt/le on JSON collections should throw in parseAst
+        assertThrows(ScimException.class, () -> ScimFilterParser.parseAst("emails.value gt \"test\"", true));
     }
 
     @Test
@@ -554,7 +567,10 @@ class ScimFilterParserTest {
                 "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager pr",
                 "members pr"};
         for (String f : collectionPr) {
-            Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(f, workspaceId);
+            ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(f, true);
+            Specification<ScimUser> spec = ScimFilterParser.requiresInMemoryEvaluation(ast, true)
+                    ? ScimFilterParser.buildUserPreFilter(ast, workspaceId)
+                    : ScimFilterParser.parseUserFilter(f, workspaceId);
             assertNotNull(spec);
             spec.toPredicate(root, query, cb);
         }
@@ -568,6 +584,50 @@ class ScimFilterParserTest {
         Specification<ScimGroup> crossGroup = ScimFilterParser.parseGroupFilter("userName eq \"alice\"", workspaceId);
         assertNotNull(crossGroup);
         crossGroup.toPredicate(groupRoot, query, cb);
+    }
+
+    @Test
+    void testGroupsAndMembersPreFilterPushDown() {
+        Subquery<UUID> subquery = Mockito.mock(Subquery.class);
+        Root membershipRoot = Mockito.mock(Root.class);
+        Predicate existsPred = Mockito.mock(Predicate.class);
+        when(query.subquery(UUID.class)).thenReturn(subquery);
+        when(subquery.from(any(Class.class))).thenReturn(membershipRoot);
+        when(membershipRoot.get(anyString())).thenReturn(path);
+        when(cb.exists(subquery)).thenReturn(existsPred);
+
+        UUID groupId = UUID.randomUUID();
+        String[] userGroupFilters = {
+                "groups pr",
+                "groups.display eq \"Admins\"",
+                "groups.value eq \"" + groupId + "\"",
+                "groups eq \"" + groupId + "\"",
+                "groups[display co \"Admin\"]"
+        };
+        for (String f : userGroupFilters) {
+            ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(f, true);
+            Specification<ScimUser> preFilter = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
+            preFilter.toPredicate(root, query, cb);
+        }
+        verify(cb, times(userGroupFilters.length)).exists(subquery);
+
+        UUID memberId = UUID.randomUUID();
+        Root<ScimGroup> groupRoot = Mockito.mock(Root.class);
+        when(groupRoot.get(anyString())).thenReturn(path);
+        String[] groupMemberFilters = {
+                "members pr",
+                "members.display eq \"Alice\"",
+                "members.value eq \"" + memberId + "\"",
+                "members eq \"" + memberId + "\"",
+                "members.type eq \"User\"",
+                "members[value eq \"" + memberId + "\"]"
+        };
+        for (String f : groupMemberFilters) {
+            ScimFilterParser.FilterNode ast = ScimFilterParser.parseAst(f, false);
+            Specification<ScimGroup> preFilter = ScimFilterParser.buildGroupPreFilter(ast, workspaceId);
+            preFilter.toPredicate(groupRoot, query, cb);
+        }
+        verify(cb, times(userGroupFilters.length + groupMemberFilters.length)).exists(subquery);
     }
 
     @Test

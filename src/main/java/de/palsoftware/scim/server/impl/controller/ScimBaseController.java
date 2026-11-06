@@ -286,10 +286,6 @@ abstract class ScimBaseController {
         throw new ScimException(400, "invalidValue", "Parameter '" + key + "' must be a string");
     }
 
-    protected static <T> ResponseEntity<T> buildAsyncAcceptedResponse(String baseUrl, UUID txnId) {
-        return buildAsyncAcceptedResponse(baseUrl, txnId, null);
-    }
-
     protected static <T> ResponseEntity<T> buildAsyncAcceptedResponse(String baseUrl, UUID txnId, HttpServletRequest request) {
         String location = baseUrl + "/Events/" + txnId;
         String preferenceApplied = ScimPreferHeaderUtil.buildPreferenceAppliedHeader(request);

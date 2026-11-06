@@ -65,9 +65,7 @@ public class ScimUserController extends ScimBaseController {
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
-        if (request != null) {
-            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
-        }
+        applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
 
         String resourceUrl = buildResourceUrl(compatBaseUrl, user.getId());
         return ResponseEntity.status(201)
@@ -219,9 +217,7 @@ public class ScimUserController extends ScimBaseController {
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
-        if (request != null) {
-            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
-        }
+        applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
@@ -270,9 +266,7 @@ public class ScimUserController extends ScimBaseController {
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
-        if (request != null) {
-            applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
-        }
+        applyAttributeProjection(scimResponse, request.getParameter("attributes"), request.getParameter("excludedAttributes"));
 
         return ResponseEntity.ok()
                 .contentType(SCIM_JSON)
@@ -338,14 +332,14 @@ public class ScimUserController extends ScimBaseController {
 
         UUID wsId = resolveWorkspaceId(workspaceId);
         UUID uid = parseUUID(userId, "User");
-        String compatBaseUrl = request != null ? buildBaseUrl(request, workspaceId, compat) : "";
-        String ifMatch = request != null ? request.getHeader("If-Match") : null;
+        String compatBaseUrl = buildBaseUrl(request, workspaceId, compat);
+        String ifMatch = request.getHeader("If-Match");
         if (ifMatch != null && ifMatch.isBlank()) {
             ifMatch = null;
         }
         final String effectiveIfMatch = ifMatch;
 
-        if (request != null && ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
+        if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "DELETE", "User", uid, compatBaseUrl, () -> {
                 if (effectiveIfMatch != null) {
                     userService.deleteUser(wsId, uid, effectiveIfMatch);

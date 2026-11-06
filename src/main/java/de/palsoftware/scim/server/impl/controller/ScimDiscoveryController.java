@@ -105,7 +105,7 @@ public class ScimDiscoveryController extends ScimBaseController {
             @PathVariable String workspaceId,
             @PathVariable(name = "compat", required = false) String compat,
             @RequestParam(name = "filter", required = false) String filter) {
-        rejectDiscoveryFilter(filter != null ? filter : (request != null ? request.getParameter("filter") : null));
+        rejectDiscoveryFilter(filter);
         String baseUrl = buildBaseUrl(request, workspaceId, compat);
         List<Map<String, Object>> types = ScimSchemaDefinitions.resourceTypes(baseUrl);
         Map<String, Object> response = new LinkedHashMap<>();

@@ -55,6 +55,41 @@ class ScimAsyncEventServiceTest {
         );
     }
 
+    private void stubSavedEventTransitions(ScimAsyncEvent savedEvent) {
+        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(invocation -> {
+            ScimAsyncEvent event = invocation.getArgument(0);
+            savedEvent.setTxnId(event.getTxnId());
+            savedEvent.setStatus(event.getStatus());
+            savedEvent.setOperation(event.getOperation());
+            return event;
+        });
+        when(asyncEventRepository.findById(any(UUID.class))).thenReturn(Optional.of(savedEvent));
+        when(asyncEventRepository.transitionPendingToCompleted(any(UUID.class), any(), any(Instant.class), any(String.class)))
+                .thenAnswer(inv -> {
+                    if ("PENDING".equals(savedEvent.getStatus())) {
+                        savedEvent.setStatus("COMPLETED");
+                        UUID resId = inv.getArgument(1);
+                        if (resId != null) {
+                            savedEvent.setResourceId(resId);
+                        }
+                        savedEvent.setCompletedAt(inv.getArgument(2));
+                        savedEvent.setSetPayload(inv.getArgument(3));
+                        return 1;
+                    }
+                    return 0;
+                });
+        when(asyncEventRepository.transitionPendingToFailed(any(UUID.class), any(Instant.class), any(String.class)))
+                .thenAnswer(inv -> {
+                    if ("PENDING".equals(savedEvent.getStatus())) {
+                        savedEvent.setStatus("FAILED");
+                        savedEvent.setCompletedAt(inv.getArgument(1));
+                        savedEvent.setSetPayload(inv.getArgument(2));
+                        return 1;
+                    }
+                    return 0;
+                });
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void testSubmitAsync_Success() throws Exception {
@@ -65,15 +100,7 @@ class ScimAsyncEventServiceTest {
         savedEvent.setWorkspace(mockWorkspace);
         savedEvent.setCreatedAt(Instant.now());
 
-        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(invocation -> {
-            ScimAsyncEvent event = invocation.getArgument(0);
-            savedEvent.setTxnId(event.getTxnId());
-            savedEvent.setStatus(event.getStatus());
-            savedEvent.setOperation(event.getOperation());
-            return event;
-        });
-
-        when(asyncEventRepository.findById(any(UUID.class))).thenReturn(Optional.of(savedEvent));
+        stubSavedEventTransitions(savedEvent);
 
         UUID txnId = service.submitAsync(
                 workspaceId,
@@ -86,7 +113,7 @@ class ScimAsyncEventServiceTest {
 
         assertNotNull(txnId);
         verify(asyncEventRepository).saveAndFlush(any(ScimAsyncEvent.class));
-        verify(asyncEventRepository, atLeastOnce()).save(savedEvent);
+        verify(asyncEventRepository).transitionPendingToCompleted(eq(txnId), eq(newUserId), any(Instant.class), any(String.class));
 
         assertEquals("COMPLETED", savedEvent.getStatus());
         assertEquals("POST", savedEvent.getOperation());
@@ -128,14 +155,7 @@ class ScimAsyncEventServiceTest {
         savedEvent.setWorkspace(mockWorkspace);
         savedEvent.setCreatedAt(Instant.now());
 
-        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(invocation -> {
-            ScimAsyncEvent event = invocation.getArgument(0);
-            savedEvent.setTxnId(event.getTxnId());
-            savedEvent.setStatus(event.getStatus());
-            savedEvent.setOperation(event.getOperation());
-            return event;
-        });
-        when(asyncEventRepository.findById(any(UUID.class))).thenReturn(Optional.of(savedEvent));
+        stubSavedEventTransitions(savedEvent);
 
         UUID txnId = service.submitAsync(
                 workspaceId,
@@ -263,13 +283,7 @@ class ScimAsyncEventServiceTest {
         savedEvent.setWorkspace(mockWorkspace);
         savedEvent.setCreatedAt(Instant.now());
 
-        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(inv -> {
-            ScimAsyncEvent ev = inv.getArgument(0);
-            savedEvent.setTxnId(ev.getTxnId());
-            savedEvent.setStatus(ev.getStatus());
-            return ev;
-        });
-        when(asyncEventRepository.findById(any(UUID.class))).thenReturn(Optional.of(savedEvent));
+        stubSavedEventTransitions(savedEvent);
 
         org.springframework.core.task.TaskRejectedException thrown = assertThrows(
                 org.springframework.core.task.TaskRejectedException.class,
@@ -284,7 +298,7 @@ class ScimAsyncEventServiceTest {
         assertSame(rejection, thrown);
         assertEquals("FAILED", savedEvent.getStatus());
         assertNotNull(savedEvent.getSetPayload());
-        verify(asyncEventRepository).save(savedEvent);
+        verify(asyncEventRepository).transitionPendingToFailed(eq(savedEvent.getTxnId()), any(Instant.class), any(String.class));
     }
 
     @Test
@@ -293,13 +307,7 @@ class ScimAsyncEventServiceTest {
         savedEvent.setWorkspace(mockWorkspace);
         savedEvent.setCreatedAt(Instant.now());
 
-        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(inv -> {
-            ScimAsyncEvent ev = inv.getArgument(0);
-            savedEvent.setTxnId(ev.getTxnId());
-            savedEvent.setStatus(ev.getStatus());
-            return ev;
-        });
-        when(asyncEventRepository.findById(any(UUID.class))).thenReturn(Optional.of(savedEvent));
+        stubSavedEventTransitions(savedEvent);
 
         AssertionError boom = new AssertionError("worker assertion failure");
         AssertionError thrown = assertThrows(
@@ -318,7 +326,7 @@ class ScimAsyncEventServiceTest {
         assertEquals("FAILED", savedEvent.getStatus());
         assertNotNull(savedEvent.getSetPayload());
         // Marked FAILED exactly once (not duplicated by outer catch)
-        verify(asyncEventRepository, times(1)).save(savedEvent);
+        verify(asyncEventRepository, times(1)).transitionPendingToFailed(eq(savedEvent.getTxnId()), any(Instant.class), any(String.class));
     }
 
     @Test
@@ -516,5 +524,40 @@ class ScimAsyncEventServiceTest {
         assertEquals("COMPLETED", completedEvent.getStatus());
         assertEquals("{\"completed\":true}", completedEvent.getSetPayload());
         verify(asyncEventRepository, never()).save(any());
+    }
+
+    @Test
+    void testHeartbeatInFlightEvents_TouchesActiveInFlightTasksOnly() {
+        java.util.List<Runnable> queuedTasks = new java.util.ArrayList<>();
+        ScimAsyncEventService deferredService = new ScimAsyncEventService(
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                queuedTasks::add
+        );
+
+        // No active tasks initially -> no DB call
+        deferredService.heartbeatInFlightEvents();
+        verify(asyncEventRepository, never()).touchInFlightPendingEvents(any(), any());
+
+        UUID txnId = deferredService.submitAsync(
+                workspaceId,
+                "POST",
+                "User",
+                null,
+                "http://localhost:8080/ws/" + workspaceId + "/scim/v2",
+                () -> Map.of("userName", "long-running")
+        );
+
+        assertTrue(deferredService.isInFlight(txnId));
+        assertEquals(java.util.Set.of(txnId), deferredService.getActiveInFlightTxnIds());
+
+        deferredService.heartbeatInFlightEvents();
+        verify(asyncEventRepository).touchInFlightPendingEvents(eq(java.util.Set.of(txnId)), any(Instant.class));
+
+        // Complete the task -> no longer in flight
+        queuedTasks.forEach(Runnable::run);
+        assertFalse(deferredService.isInFlight(txnId));
+        assertTrue(deferredService.getActiveInFlightTxnIds().isEmpty());
     }
 }

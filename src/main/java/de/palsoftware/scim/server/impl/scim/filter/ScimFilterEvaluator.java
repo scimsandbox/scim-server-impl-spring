@@ -682,7 +682,7 @@ public final class ScimFilterEvaluator {
             String[] parts = stripped.split("\\.", 2);
             if (ScimFilterParser.JSON_COLLECTIONS.contains(parts[0]) || "groups".equals(parts[0])) {
                 List<Map<String, Object>> elems = extractUserCollectionElements(u, userGroups, parts[0], scimBaseUrl);
-                boolean caseExact = ScimFilterParser.isJsonSubAttributeCaseExact(parts[0], parts[1]);
+                boolean caseExact = isElementAttrCaseExact(parts[0], parts[1]);
                 boolean isCertValue = "x509certificates".equals(parts[0]) && "value".equals(parts[1]);
                 String effectiveTarget = isCertValue ? canonicalizeBase64Safe(target) : target;
                 if ("ne".equals(op)) {

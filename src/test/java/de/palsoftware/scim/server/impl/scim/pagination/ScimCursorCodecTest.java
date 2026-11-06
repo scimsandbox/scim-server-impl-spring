@@ -204,6 +204,17 @@ class ScimCursorCodecTest {
             String defaultToken1 = ScimCursorCodec.encodeCursor(workspaceId, 7, 3600);
             ScimCursorCodec.configureSecret(null);
             assertEquals(7, ScimCursorCodec.decodeCursor(defaultToken1, workspaceId));
+
+            // System property fallback for app.security.actuator.api-key
+            System.setProperty("app.security.actuator.api-key", "actuator-fallback-secret");
+            try {
+                ScimCursorCodec.configureSecret(null);
+                String actuatorSignedToken = ScimCursorCodec.encodeCursor(workspaceId, 42, 3600);
+                ScimCursorCodec.configureSecret("actuator-fallback-secret");
+                assertEquals(42, ScimCursorCodec.decodeCursor(actuatorSignedToken, workspaceId));
+            } finally {
+                System.clearProperty("app.security.actuator.api-key");
+            }
         } finally {
             ScimCursorCodec.configureSecret(null);
         }

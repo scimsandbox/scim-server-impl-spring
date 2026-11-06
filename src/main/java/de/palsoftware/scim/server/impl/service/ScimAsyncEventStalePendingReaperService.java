@@ -50,22 +50,6 @@ public class ScimAsyncEventStalePendingReaperService {
                 : staleTimeout;
     }
 
-    ScimAsyncEventStalePendingReaperService(
-            ScimAsyncEventRepository asyncEventRepository,
-            ScimAsyncEventService asyncEventService,
-            TransactionOperations transactionOperations,
-            boolean reaperEnabled,
-            Duration staleTimeout) {
-        this(asyncEventRepository, asyncEventService, transactionOperations, Clock.systemUTC(), reaperEnabled, staleTimeout);
-    }
-
-    public ScimAsyncEventStalePendingReaperService(
-            ScimAsyncEventRepository asyncEventRepository,
-            ScimAsyncEventService asyncEventService,
-            com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
-        this(asyncEventRepository, asyncEventService, TransactionOperations.withoutTransaction(), Clock.systemUTC(), true, DEFAULT_STALE_PENDING_TIMEOUT);
-    }
-
     @Scheduled(cron = "${app.cleanup.async-events.stale-pending.cron:${scim.async.cleanup.stale-pending.cron:${scim.async.stale-pending.cron:0 */1 * * * *}}}",
                zone = "${app.cleanup.async-events.zone:UTC}")
     public int sweepStalePendingEventsOnSchedule() {
@@ -83,6 +67,8 @@ public class ScimAsyncEventStalePendingReaperService {
         if (!reaperEnabled) {
             return 0;
         }
+
+        asyncEventService.heartbeatInFlightEvents();
 
         Duration effectiveTimeout = (timeout == null || timeout.isNegative() || timeout.isZero())
                 ? this.staleTimeout
@@ -103,7 +89,7 @@ public class ScimAsyncEventStalePendingReaperService {
 
         int reapedCount = 0;
         for (ScimAsyncEvent event : staleEvents) {
-            if (asyncEventService != null && asyncEventService.isInFlight(event.getTxnId())) {
+            if (asyncEventService.isInFlight(event.getTxnId())) {
                 continue;
             }
             try {
