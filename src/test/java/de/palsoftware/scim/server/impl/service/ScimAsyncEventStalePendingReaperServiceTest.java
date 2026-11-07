@@ -196,7 +196,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
     void sweepStalePendingEvents_realAsyncEventService_producesValidRfc9967ErrorSet() throws Exception {
         // Test with real ScimAsyncEventService to verify real RFC 9967 SET output
         ScimAsyncEventService realAsyncService = new ScimAsyncEventService(
-                asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null);
+                asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null, transactionOperations);
 
         ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
                 asyncEventRepository, realAsyncService, transactionOperations, Clock.systemUTC(), true, Duration.ofMinutes(5));
@@ -344,7 +344,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
     @Test
     void sweepStalePendingEvents_rfc9967Conformance_verifiesAllRequiredKeysAcrossAllMethods() throws Exception {
         ScimAsyncEventService realAsyncService = new ScimAsyncEventService(
-                asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null);
+                asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null, transactionOperations);
 
         ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
                 asyncEventRepository, realAsyncService, transactionOperations, Clock.systemUTC(), true, Duration.ofMinutes(5));
@@ -407,7 +407,7 @@ class ScimAsyncEventStalePendingReaperServiceTest {
     @Test
     void sweepStalePendingEvents_rfc9967Conformance_whenResourceIdNull_omitsSubId() throws Exception {
         ScimAsyncEventService realAsyncService = new ScimAsyncEventService(
-                asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null);
+                asyncEventRepository, null, objectMapper, (org.springframework.core.task.TaskExecutor) null, transactionOperations);
 
         ScimAsyncEventStalePendingReaperService service = new ScimAsyncEventStalePendingReaperService(
                 asyncEventRepository, realAsyncService, transactionOperations, Clock.systemUTC(), true, Duration.ofMinutes(5));

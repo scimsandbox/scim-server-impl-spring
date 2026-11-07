@@ -51,7 +51,8 @@ class ScimAsyncEventServiceTest {
                 asyncEventRepository,
                 workspaceRepository,
                 objectMapper,
-                new SyncTaskExecutor()
+                new SyncTaskExecutor(),
+                org.springframework.transaction.support.TransactionOperations.withoutTransaction()
         );
     }
 
@@ -248,19 +249,23 @@ class ScimAsyncEventServiceTest {
                 ScimAsyncEventRepository.class,
                 WorkspaceRepository.class,
                 ObjectMapper.class,
-                org.springframework.beans.factory.ObjectProvider.class
+                org.springframework.beans.factory.ObjectProvider.class,
+                org.springframework.transaction.PlatformTransactionManager.class
         );
         assertTrue(ctor.isAnnotationPresent(org.springframework.beans.factory.annotation.Autowired.class));
 
         org.springframework.beans.factory.ObjectProvider<org.springframework.core.task.TaskExecutor> provider =
                 Mockito.mock(org.springframework.beans.factory.ObjectProvider.class);
         when(provider.getIfAvailable(any())).thenReturn(new SyncTaskExecutor());
+        org.springframework.transaction.PlatformTransactionManager ptm =
+                Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class);
 
         ScimAsyncEventService autowiredService = new ScimAsyncEventService(
                 asyncEventRepository,
                 workspaceRepository,
                 objectMapper,
-                provider
+                provider,
+                ptm
         );
         assertNotNull(autowiredService);
         verify(provider).getIfAvailable(any());
@@ -276,7 +281,8 @@ class ScimAsyncEventServiceTest {
                 objectMapper,
                 task -> {
                     throw rejection;
-                }
+                },
+                org.springframework.transaction.support.TransactionOperations.withoutTransaction()
         );
 
         ScimAsyncEvent savedEvent = new ScimAsyncEvent();
@@ -527,6 +533,7 @@ class ScimAsyncEventServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     void testWorkerTransactionRollsBackWhenEventWasAlreadyReaped() {
         org.springframework.transaction.TransactionStatus txStatus =
                 Mockito.mock(org.springframework.transaction.TransactionStatus.class);
@@ -543,14 +550,20 @@ class ScimAsyncEventServiceTest {
                     }
                 };
 
-        service.setWorkerTransactionOperations(txOps);
+        ScimAsyncEventService txService = new ScimAsyncEventService(
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                new SyncTaskExecutor(),
+                txOps
+        );
 
         when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(inv -> inv.getArgument(0));
         // Simulate event already marked FAILED by reaper before worker finishes -> returns 0 rows updated
         when(asyncEventRepository.transitionPendingToCompleted(any(UUID.class), any(), any(Instant.class), any(String.class)))
                 .thenReturn(0);
 
-        UUID txnId = service.submitAsync(
+        UUID txnId = txService.submitAsync(
                 workspaceId,
                 "POST",
                 "User",
@@ -562,12 +575,22 @@ class ScimAsyncEventServiceTest {
         assertNotNull(txnId);
         verify(txStatus).setRollbackOnly();
 
-        // Also verify setTransactionManager configures workerTransactionOperations
+        // Also verify @Autowired 5-arg constructor with PlatformTransactionManager
+        org.springframework.beans.factory.ObjectProvider<org.springframework.core.task.TaskExecutor> provider =
+                Mockito.mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable(any())).thenReturn(new SyncTaskExecutor());
         org.springframework.transaction.PlatformTransactionManager ptm =
                 Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class);
         when(ptm.getTransaction(any())).thenReturn(txStatus);
-        service.setTransactionManager(ptm);
-        service.submitAsync(
+
+        ScimAsyncEventService ptmService = new ScimAsyncEventService(
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                provider,
+                ptm
+        );
+        ptmService.submitAsync(
                 workspaceId,
                 "POST",
                 "User",
@@ -576,6 +599,12 @@ class ScimAsyncEventServiceTest {
                 () -> Map.of("id", UUID.randomUUID().toString(), "userName", "reaped.user2")
         );
         verify(txStatus, times(2)).setRollbackOnly();
+
+        // Verify null PlatformTransactionManager or TransactionOperations is rejected
+        assertThrows(NullPointerException.class, () -> new ScimAsyncEventService(
+                asyncEventRepository, workspaceRepository, objectMapper, provider, (org.springframework.transaction.PlatformTransactionManager) null));
+        assertThrows(NullPointerException.class, () -> new ScimAsyncEventService(
+                asyncEventRepository, workspaceRepository, objectMapper, new SyncTaskExecutor(), (org.springframework.transaction.support.TransactionOperations) null));
     }
 
     @Test

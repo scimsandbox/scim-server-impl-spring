@@ -48,40 +48,41 @@ public class ScimAsyncEventService {
     private final ObjectMapper objectMapper;
     private final TaskExecutor taskExecutor;
     private final ConcurrentMap<UUID, CompletableFuture<Void>> inFlightTasks = new ConcurrentHashMap<>();
-    private TransactionOperations workerTransactionOperations;
+    private final TransactionOperations workerTransactionOperations;
 
     @org.springframework.beans.factory.annotation.Autowired
     public ScimAsyncEventService(ScimAsyncEventRepository asyncEventRepository,
                                  WorkspaceRepository workspaceRepository,
                                  ObjectMapper objectMapper,
-                                 @Qualifier("applicationTaskExecutor") ObjectProvider<TaskExecutor> taskExecutorProvider) {
-        this.asyncEventRepository = asyncEventRepository;
-        this.workspaceRepository = workspaceRepository;
-        this.objectMapper = objectMapper;
-        this.taskExecutor = taskExecutorProvider.getIfAvailable(() -> new SimpleAsyncTaskExecutor("scim-async-"));
+                                 @Qualifier("applicationTaskExecutor") ObjectProvider<TaskExecutor> taskExecutorProvider,
+                                 PlatformTransactionManager transactionManager) {
+        this(
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                taskExecutorProvider.getIfAvailable(() -> new SimpleAsyncTaskExecutor("scim-async-")),
+                createWorkerTransactionTemplate(transactionManager)
+        );
     }
 
     public ScimAsyncEventService(ScimAsyncEventRepository asyncEventRepository,
                                  WorkspaceRepository workspaceRepository,
                                  ObjectMapper objectMapper,
-                                 TaskExecutor taskExecutor) {
+                                 TaskExecutor taskExecutor,
+                                 TransactionOperations workerTransactionOperations) {
         this.asyncEventRepository = asyncEventRepository;
         this.workspaceRepository = workspaceRepository;
         this.objectMapper = objectMapper;
         this.taskExecutor = taskExecutor != null ? taskExecutor : new SimpleAsyncTaskExecutor("scim-async-");
+        this.workerTransactionOperations = Objects.requireNonNull(
+                workerTransactionOperations, "workerTransactionOperations must not be null");
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setTransactionManager(PlatformTransactionManager transactionManager) {
-        if (transactionManager != null) {
-            TransactionTemplate template = new TransactionTemplate(transactionManager);
-            template.setTimeout(WORKER_TRANSACTION_TIMEOUT_SECONDS);
-            this.workerTransactionOperations = template;
-        }
-    }
-
-    void setWorkerTransactionOperations(TransactionOperations workerTransactionOperations) {
-        this.workerTransactionOperations = workerTransactionOperations;
+    private static TransactionTemplate createWorkerTransactionTemplate(PlatformTransactionManager transactionManager) {
+        Objects.requireNonNull(transactionManager, "transactionManager must not be null");
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setTimeout(WORKER_TRANSACTION_TIMEOUT_SECONDS);
+        return template;
     }
 
     /**
@@ -147,18 +148,13 @@ public class ScimAsyncEventService {
             taskExecutor.execute(() -> {
                 workerStarted.set(true);
                 try {
-                    if (workerTransactionOperations != null) {
-                        workerTransactionOperations.executeWithoutResult(status -> {
-                            boolean completed = executeAndTransitionToCompleted(
-                                    txnId, canonicalOp, resourceType, resourceId, baseUrl, task, modifiedAttributes);
-                            if (!completed) {
-                                status.setRollbackOnly();
-                            }
-                        });
-                    } else {
-                        executeAndTransitionToCompleted(
+                    workerTransactionOperations.executeWithoutResult(status -> {
+                        boolean completed = executeAndTransitionToCompleted(
                                 txnId, canonicalOp, resourceType, resourceId, baseUrl, task, modifiedAttributes);
-                    }
+                        if (!completed) {
+                            status.setRollbackOnly();
+                        }
+                    });
                 } catch (Throwable t) {
                     log.error("Async operation failed for txnId: {}", txnId, t);
                     try {
