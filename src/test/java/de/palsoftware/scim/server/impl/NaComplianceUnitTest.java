@@ -211,7 +211,11 @@ class NaComplianceUnitTest {
         };
 
         ScimAsyncEventService asyncEventService = new ScimAsyncEventService(
-                asyncEventRepository, workspaceRepository, objectMapper, Runnable::run);
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                Runnable::run,
+                org.springframework.transaction.support.TransactionOperations.withoutTransaction());
 
         ScimUserController userController = new ScimUserController(userService, asyncEventService);
         ScimGroupController groupController = new ScimGroupController(groupService, asyncEventService);

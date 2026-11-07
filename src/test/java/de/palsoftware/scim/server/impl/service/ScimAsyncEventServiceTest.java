@@ -51,7 +51,8 @@ class ScimAsyncEventServiceTest {
                 asyncEventRepository,
                 workspaceRepository,
                 objectMapper,
-                new SyncTaskExecutor()
+                new SyncTaskExecutor(),
+                org.springframework.transaction.support.TransactionOperations.withoutTransaction()
         );
     }
 
@@ -248,19 +249,23 @@ class ScimAsyncEventServiceTest {
                 ScimAsyncEventRepository.class,
                 WorkspaceRepository.class,
                 ObjectMapper.class,
-                org.springframework.beans.factory.ObjectProvider.class
+                org.springframework.beans.factory.ObjectProvider.class,
+                org.springframework.transaction.PlatformTransactionManager.class
         );
         assertTrue(ctor.isAnnotationPresent(org.springframework.beans.factory.annotation.Autowired.class));
 
         org.springframework.beans.factory.ObjectProvider<org.springframework.core.task.TaskExecutor> provider =
                 Mockito.mock(org.springframework.beans.factory.ObjectProvider.class);
         when(provider.getIfAvailable(any())).thenReturn(new SyncTaskExecutor());
+        org.springframework.transaction.PlatformTransactionManager ptm =
+                Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class);
 
         ScimAsyncEventService autowiredService = new ScimAsyncEventService(
                 asyncEventRepository,
                 workspaceRepository,
                 objectMapper,
-                provider
+                provider,
+                ptm
         );
         assertNotNull(autowiredService);
         verify(provider).getIfAvailable(any());
@@ -276,7 +281,8 @@ class ScimAsyncEventServiceTest {
                 objectMapper,
                 task -> {
                     throw rejection;
-                }
+                },
+                org.springframework.transaction.support.TransactionOperations.withoutTransaction()
         );
 
         ScimAsyncEvent savedEvent = new ScimAsyncEvent();
@@ -527,37 +533,86 @@ class ScimAsyncEventServiceTest {
     }
 
     @Test
-    void testHeartbeatInFlightEvents_TouchesActiveInFlightTasksOnly() {
-        java.util.List<Runnable> queuedTasks = new java.util.ArrayList<>();
-        ScimAsyncEventService deferredService = new ScimAsyncEventService(
+    @SuppressWarnings("unchecked")
+    void testWorkerTransactionRollsBackWhenEventWasAlreadyReaped() {
+        org.springframework.transaction.TransactionStatus txStatus =
+                Mockito.mock(org.springframework.transaction.TransactionStatus.class);
+        org.springframework.transaction.support.TransactionOperations txOps =
+                new org.springframework.transaction.support.TransactionOperations() {
+                    @Override
+                    public <T> T execute(org.springframework.transaction.support.TransactionCallback<T> action) {
+                        return action.doInTransaction(txStatus);
+                    }
+
+                    @Override
+                    public void executeWithoutResult(java.util.function.Consumer<org.springframework.transaction.TransactionStatus> action) {
+                        action.accept(txStatus);
+                    }
+                };
+
+        ScimAsyncEventService txService = new ScimAsyncEventService(
                 asyncEventRepository,
                 workspaceRepository,
                 objectMapper,
-                queuedTasks::add
+                new SyncTaskExecutor(),
+                txOps
         );
 
-        // No active tasks initially -> no DB call
-        deferredService.heartbeatInFlightEvents();
-        verify(asyncEventRepository, never()).touchInFlightPendingEvents(any(), any());
+        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(inv -> inv.getArgument(0));
+        // Simulate event already marked FAILED by reaper before worker finishes -> returns 0 rows updated
+        when(asyncEventRepository.transitionPendingToCompleted(any(UUID.class), any(), any(Instant.class), any(String.class)))
+                .thenReturn(0);
 
-        UUID txnId = deferredService.submitAsync(
+        UUID txnId = txService.submitAsync(
                 workspaceId,
                 "POST",
                 "User",
                 null,
                 "http://localhost:8080/ws/" + workspaceId + "/scim/v2",
-                () -> Map.of("userName", "long-running")
+                () -> Map.of("id", UUID.randomUUID().toString(), "userName", "reaped.user")
         );
 
-        assertTrue(deferredService.isInFlight(txnId));
-        assertEquals(java.util.Set.of(txnId), deferredService.getActiveInFlightTxnIds());
+        assertNotNull(txnId);
+        verify(txStatus).setRollbackOnly();
 
-        deferredService.heartbeatInFlightEvents();
-        verify(asyncEventRepository).touchInFlightPendingEvents(eq(java.util.Set.of(txnId)), any(Instant.class));
+        // Also verify @Autowired 5-arg constructor with PlatformTransactionManager
+        org.springframework.beans.factory.ObjectProvider<org.springframework.core.task.TaskExecutor> provider =
+                Mockito.mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable(any())).thenReturn(new SyncTaskExecutor());
+        org.springframework.transaction.PlatformTransactionManager ptm =
+                Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class);
+        when(ptm.getTransaction(any())).thenReturn(txStatus);
 
-        // Complete the task -> no longer in flight
-        queuedTasks.forEach(Runnable::run);
-        assertFalse(deferredService.isInFlight(txnId));
-        assertTrue(deferredService.getActiveInFlightTxnIds().isEmpty());
+        ScimAsyncEventService ptmService = new ScimAsyncEventService(
+                asyncEventRepository,
+                workspaceRepository,
+                objectMapper,
+                provider,
+                ptm
+        );
+        ptmService.submitAsync(
+                workspaceId,
+                "POST",
+                "User",
+                null,
+                "http://localhost:8080/ws/" + workspaceId + "/scim/v2",
+                () -> Map.of("id", UUID.randomUUID().toString(), "userName", "reaped.user2")
+        );
+        verify(txStatus, times(2)).setRollbackOnly();
+
+        // Verify null PlatformTransactionManager or TransactionOperations is rejected
+        assertThrows(NullPointerException.class, () -> new ScimAsyncEventService(
+                asyncEventRepository, workspaceRepository, objectMapper, provider, (org.springframework.transaction.PlatformTransactionManager) null));
+        assertThrows(NullPointerException.class, () -> new ScimAsyncEventService(
+                asyncEventRepository, workspaceRepository, objectMapper, new SyncTaskExecutor(), (org.springframework.transaction.support.TransactionOperations) null));
+    }
+
+    @Test
+    void testScimAsyncEventCreatedAtColumnIsNotUpdatable() throws NoSuchFieldException {
+        jakarta.persistence.Column col = ScimAsyncEvent.class
+                .getDeclaredField("createdAt")
+                .getAnnotation(jakarta.persistence.Column.class);
+        assertNotNull(col);
+        assertFalse(col.updatable(), "created_at must remain updatable = false");
     }
 }

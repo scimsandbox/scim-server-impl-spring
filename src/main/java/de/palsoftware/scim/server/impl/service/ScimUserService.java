@@ -60,6 +60,7 @@ public class ScimUserService {
         resolveEnterpriseManagerDisplay(workspaceId, user);
 
         ScimUser savedUser = userRepository.save(user);
+        userRepository.flush();
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
         return savedUser;
@@ -219,6 +220,7 @@ public class ScimUserService {
 
         existing.applyMutableStateFrom(draft);
         ScimUser savedUser = userRepository.save(existing);
+        userRepository.flush();
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
         return savedUser;
@@ -257,6 +259,7 @@ public class ScimUserService {
 
         user.applyMutableStateFrom(draft);
         ScimUser savedUser = userRepository.save(user);
+        userRepository.flush();
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
         return savedUser;

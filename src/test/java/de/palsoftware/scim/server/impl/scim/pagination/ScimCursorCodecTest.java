@@ -199,20 +199,29 @@ class ScimCursorCodecTest {
             new ScimCursorCodec.ScimCursorSecretInitializer("  shared-cluster-secret-123  ");
             assertEquals(25, ScimCursorCodec.decodeCursor(tokenFromPod1, workspaceId));
 
-            // Fallback to deterministic default when blank secret is passed
-            ScimCursorCodec.configureSecret("");
-            String defaultToken1 = ScimCursorCodec.encodeCursor(workspaceId, 7, 3600);
-            ScimCursorCodec.configureSecret(null);
-            assertEquals(7, ScimCursorCodec.decodeCursor(defaultToken1, workspaceId));
-
-            // System property fallback for app.security.actuator.api-key
-            System.setProperty("app.security.actuator.api-key", "actuator-fallback-secret");
+            // System property scim.cursor.secret produces identical HMAC verification across pods
+            System.setProperty("scim.cursor.secret", "shared-cluster-secret-123");
             try {
                 ScimCursorCodec.configureSecret(null);
-                String actuatorSignedToken = ScimCursorCodec.encodeCursor(workspaceId, 42, 3600);
-                ScimCursorCodec.configureSecret("actuator-fallback-secret");
-                assertEquals(42, ScimCursorCodec.decodeCursor(actuatorSignedToken, workspaceId));
+                assertEquals(25, ScimCursorCodec.decodeCursor(tokenFromPod1, workspaceId));
             } finally {
+                System.clearProperty("scim.cursor.secret");
+            }
+
+            // Resetting configureSecret(null) without SCIM_CURSOR_SECRET falls back to EPHEMERAL_FALLBACK_KEY
+            new ScimCursorCodec.ScimCursorSecretInitializer("");
+            String ephemeralToken = ScimCursorCodec.encodeCursor(workspaceId, 7, 3600);
+            ScimCursorCodec.configureSecret(null);
+            assertEquals(7, ScimCursorCodec.decodeCursor(ephemeralToken, workspaceId));
+
+            // Setting or rotating spring.datasource.password or app.security.actuator.api-key does NOT affect cursor signing
+            System.setProperty("spring.datasource.password", "rotated-db-password-1");
+            System.setProperty("app.security.actuator.api-key", "rotated-actuator-key-1");
+            try {
+                ScimCursorCodec.configureSecret(null);
+                assertEquals(7, ScimCursorCodec.decodeCursor(ephemeralToken, workspaceId));
+            } finally {
+                System.clearProperty("spring.datasource.password");
                 System.clearProperty("app.security.actuator.api-key");
             }
         } finally {

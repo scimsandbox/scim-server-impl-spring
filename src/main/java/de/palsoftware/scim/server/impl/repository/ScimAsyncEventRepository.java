@@ -53,14 +53,6 @@ public interface ScimAsyncEventRepository extends JpaRepository<ScimAsyncEvent, 
 
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
-    @Query("UPDATE ScimAsyncEvent e SET e.createdAt = :heartbeatAt WHERE e.txnId IN :txnIds AND e.status = 'PENDING'")
-    int touchInFlightPendingEvents(
-            @Param("txnIds") java.util.Collection<UUID> txnIds,
-            @Param("heartbeatAt") Instant heartbeatAt
-    );
-
-    @Transactional
-    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("UPDATE ScimAsyncEvent e SET e.status = 'COMPLETED', e.resourceId = COALESCE(:resourceId, e.resourceId), e.completedAt = :completedAt, e.setPayload = :setPayload WHERE e.txnId = :txnId AND e.status = 'PENDING'")
     int transitionPendingToCompleted(
             @Param("txnId") UUID txnId,
