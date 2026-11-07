@@ -14,7 +14,10 @@ import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -37,6 +40,7 @@ public class ScimAsyncEventService {
 
     public static final String INTERNAL_MODIFIED_ATTRIBUTES_KEY = "__scim_modified_attributes__";
     public static final String ASYNC_RESP_EVENT_URI = "urn:ietf:params:scim:event:misc:asyncresp";
+    public static final int WORKER_TRANSACTION_TIMEOUT_SECONDS = 120;
     private static final String ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error";
 
     private final ScimAsyncEventRepository asyncEventRepository;
@@ -44,6 +48,7 @@ public class ScimAsyncEventService {
     private final ObjectMapper objectMapper;
     private final TaskExecutor taskExecutor;
     private final ConcurrentMap<UUID, CompletableFuture<Void>> inFlightTasks = new ConcurrentHashMap<>();
+    private TransactionOperations workerTransactionOperations;
 
     @org.springframework.beans.factory.annotation.Autowired
     public ScimAsyncEventService(ScimAsyncEventRepository asyncEventRepository,
@@ -64,6 +69,19 @@ public class ScimAsyncEventService {
         this.workspaceRepository = workspaceRepository;
         this.objectMapper = objectMapper;
         this.taskExecutor = taskExecutor != null ? taskExecutor : new SimpleAsyncTaskExecutor("scim-async-");
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setTransactionManager(PlatformTransactionManager transactionManager) {
+        if (transactionManager != null) {
+            TransactionTemplate template = new TransactionTemplate(transactionManager);
+            template.setTimeout(WORKER_TRANSACTION_TIMEOUT_SECONDS);
+            this.workerTransactionOperations = template;
+        }
+    }
+
+    void setWorkerTransactionOperations(TransactionOperations workerTransactionOperations) {
+        this.workerTransactionOperations = workerTransactionOperations;
     }
 
     /**
@@ -129,30 +147,18 @@ public class ScimAsyncEventService {
             taskExecutor.execute(() -> {
                 workerStarted.set(true);
                 try {
-                    Map<String, Object> rawResource = task.get();
-                    List<String> effectiveModifiedAttrs = modifiedAttributes;
-                    Map<String, Object> cleanResource = rawResource;
-
-                    if (rawResource != null && rawResource.containsKey(INTERNAL_MODIFIED_ATTRIBUTES_KEY)) {
-                        cleanResource = new LinkedHashMap<>(rawResource);
-                        Object attrObj = cleanResource.remove(INTERNAL_MODIFIED_ATTRIBUTES_KEY);
-                        if (effectiveModifiedAttrs == null && attrObj instanceof List<?> list) {
-                            effectiveModifiedAttrs = (List<String>) list;
-                        }
+                    if (workerTransactionOperations != null) {
+                        workerTransactionOperations.executeWithoutResult(status -> {
+                            boolean completed = executeAndTransitionToCompleted(
+                                    txnId, canonicalOp, resourceType, resourceId, baseUrl, task, modifiedAttributes);
+                            if (!completed) {
+                                status.setRollbackOnly();
+                            }
+                        });
+                    } else {
+                        executeAndTransitionToCompleted(
+                                txnId, canonicalOp, resourceType, resourceId, baseUrl, task, modifiedAttributes);
                     }
-
-                    UUID effectiveResourceId = resourceId;
-                    if (effectiveResourceId == null && cleanResource != null && cleanResource.get("id") != null) {
-                        try {
-                            effectiveResourceId = UUID.fromString(cleanResource.get("id").toString());
-                        } catch (IllegalArgumentException ignored) {
-                            // ignore unparseable id
-                        }
-                    }
-
-                    String setPayload = buildSetPayload(
-                            baseUrl, txnId, canonicalOp, resourceType, effectiveResourceId, cleanResource, effectiveModifiedAttrs);
-                    updateEventCompleted(txnId, effectiveResourceId, setPayload);
                 } catch (Throwable t) {
                     log.error("Async operation failed for txnId: {}", txnId, t);
                     try {
@@ -217,6 +223,53 @@ public class ScimAsyncEventService {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private boolean executeAndTransitionToCompleted(UUID txnId,
+                                                    String canonicalOp,
+                                                    String resourceType,
+                                                    UUID resourceId,
+                                                    String baseUrl,
+                                                    Supplier<Map<String, Object>> task,
+                                                    List<String> modifiedAttributes) {
+        Map<String, Object> rawResource = task.get();
+        List<String> effectiveModifiedAttrs = modifiedAttributes;
+        Map<String, Object> cleanResource = rawResource;
+
+        if (rawResource != null && rawResource.containsKey(INTERNAL_MODIFIED_ATTRIBUTES_KEY)) {
+            cleanResource = new LinkedHashMap<>(rawResource);
+            Object attrObj = cleanResource.remove(INTERNAL_MODIFIED_ATTRIBUTES_KEY);
+            if (effectiveModifiedAttrs == null && attrObj instanceof List<?> list) {
+                effectiveModifiedAttrs = (List<String>) list;
+            }
+        }
+
+        UUID effectiveResourceId = resourceId;
+        if (effectiveResourceId == null && cleanResource != null && cleanResource.get("id") != null) {
+            try {
+                effectiveResourceId = UUID.fromString(cleanResource.get("id").toString());
+            } catch (IllegalArgumentException ignored) {
+                // ignore unparseable id
+            }
+        }
+
+        String setPayload;
+        try {
+            setPayload = buildSetPayload(
+                    baseUrl, txnId, canonicalOp, resourceType, effectiveResourceId, cleanResource, effectiveModifiedAttrs);
+        } catch (RuntimeException re) {
+            throw re;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to build async SET payload", e);
+        }
+
+        int updated = updateEventCompleted(txnId, effectiveResourceId, setPayload);
+        if (updated == 0) {
+            log.warn("Async event {} was no longer PENDING when worker finished; rolling back resource changes", txnId);
+            return false;
+        }
+        return true;
+    }
+
     public boolean isInFlight(UUID txnId) {
         if (txnId == null) {
             return false;
@@ -225,38 +278,14 @@ public class ScimAsyncEventService {
         return future != null && !future.isDone();
     }
 
-    public java.util.Set<UUID> getActiveInFlightTxnIds() {
-        java.util.Set<UUID> active = new java.util.HashSet<>();
-        inFlightTasks.forEach((txnId, future) -> {
-            if (future != null && !future.isDone()) {
-                active.add(txnId);
-            }
-        });
-        return active;
-    }
-
-    @org.springframework.scheduling.annotation.Scheduled(
-            fixedDelayString = "${app.cleanup.async-events.heartbeat-interval:30000}")
-    public void heartbeatInFlightEvents() {
-        java.util.Set<UUID> activeIds = getActiveInFlightTxnIds();
-        if (activeIds.isEmpty()) {
-            return;
-        }
-        try {
-            asyncEventRepository.touchInFlightPendingEvents(
-                    activeIds, Instant.now().truncatedTo(ChronoUnit.MICROS));
-        } catch (Exception e) {
-            log.debug("Failed to heartbeat in-flight async events", e);
-        }
-    }
-
     public Optional<ScimAsyncEvent> getEvent(UUID txnId, UUID workspaceId) {
         return asyncEventRepository.findByTxnIdAndWorkspaceId(txnId, workspaceId);
     }
 
-    public void updateEventCompleted(UUID txnId, UUID resourceId, String setPayload) {
+    @Transactional
+    public int updateEventCompleted(UUID txnId, UUID resourceId, String setPayload) {
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
-        asyncEventRepository.transitionPendingToCompleted(txnId, resourceId, now, setPayload);
+        return asyncEventRepository.transitionPendingToCompleted(txnId, resourceId, now, setPayload);
     }
 
     public void updateEventFailed(UUID txnId, String errorMessage) {

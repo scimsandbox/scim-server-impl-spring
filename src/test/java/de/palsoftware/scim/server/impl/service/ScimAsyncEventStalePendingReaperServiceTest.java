@@ -452,7 +452,6 @@ class ScimAsyncEventStalePendingReaperServiceTest {
         int reaped = service.sweepStalePendingEvents();
 
         assertThat(reaped).isEqualTo(1);
-        verify(asyncEventService).heartbeatInFlightEvents();
         verify(asyncEventRepository, never()).transitionPendingToFailed(eq(inFlightTxn), any(), any());
         verify(asyncEventRepository).transitionPendingToFailed(eq(orphanedTxn), any(), eq(orphanedErrorSet));
     }

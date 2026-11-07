@@ -68,8 +68,6 @@ public class ScimAsyncEventStalePendingReaperService {
             return 0;
         }
 
-        asyncEventService.heartbeatInFlightEvents();
-
         Duration effectiveTimeout = (timeout == null || timeout.isNegative() || timeout.isZero())
                 ? this.staleTimeout
                 : timeout;

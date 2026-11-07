@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -12,6 +14,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
@@ -25,12 +28,14 @@ import java.util.UUID;
  */
 public final class ScimCursorCodec {
 
+    private static final Logger log = LoggerFactory.getLogger(ScimCursorCodec.class);
+
     public static final String CURSOR_PREFIX = "scim_cur_";
     public static final int DEFAULT_CURSOR_TIMEOUT_SECONDS = 3600;
 
     private static final int HMAC_TAG_BYTES = 16;
     private static final String HMAC_ALGO = "HmacSHA256";
-    private static final String DEFAULT_CLUSTER_HMAC_SECRET = "scim-cursor-default-cluster-hmac-key-v1";
+    private static final byte[] EPHEMERAL_FALLBACK_KEY = generateEphemeralKey();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static volatile byte[] hmacSecret = initHmacSecret();
 
@@ -42,6 +47,12 @@ public final class ScimCursorCodec {
 
     private ScimCursorCodec() {
         // Utility class
+    }
+
+    private static byte[] generateEphemeralKey() {
+        byte[] bytes = new byte[32];
+        new SecureRandom().nextBytes(bytes);
+        return bytes;
     }
 
     static byte[] deriveHmacKey(String secret) {
@@ -56,23 +67,19 @@ public final class ScimCursorCodec {
     private static byte[] initHmacSecret() {
         String[] candidates = {
                 System.getenv("SCIM_CURSOR_SECRET"),
-                System.getProperty("scim.cursor.secret"),
-                System.getenv("SPRING_DATASOURCE_PASSWORD"),
-                System.getProperty("spring.datasource.password"),
-                System.getenv("ACTUATOR_API_KEY"),
-                System.getProperty("app.security.actuator.api-key")
+                System.getProperty("scim.cursor.secret")
         };
         for (String candidate : candidates) {
             if (candidate != null && !candidate.isBlank()) {
-                return deriveHmacKey(candidate);
+                return deriveHmacKey(candidate.trim());
             }
         }
-        return deriveHmacKey(DEFAULT_CLUSTER_HMAC_SECRET);
+        return EPHEMERAL_FALLBACK_KEY;
     }
 
     public static void configureSecret(String secret) {
         if (secret != null && !secret.isBlank()) {
-            hmacSecret = deriveHmacKey(secret);
+            hmacSecret = deriveHmacKey(secret.trim());
         } else {
             hmacSecret = initHmacSecret();
         }
@@ -83,6 +90,13 @@ public final class ScimCursorCodec {
         public ScimCursorSecretInitializer(@Value("${scim.cursor.secret:}") String configuredSecret) {
             if (configuredSecret != null && !configuredSecret.isBlank()) {
                 ScimCursorCodec.configureSecret(configuredSecret);
+            } else {
+                String envSecret = System.getenv("SCIM_CURSOR_SECRET");
+                String propSecret = System.getProperty("scim.cursor.secret");
+                if ((envSecret == null || envSecret.isBlank()) && (propSecret == null || propSecret.isBlank())) {
+                    log.warn("SCIM_CURSOR_SECRET (scim.cursor.secret) is not configured; using an ephemeral random HMAC key for cursor pagination");
+                }
+                ScimCursorCodec.configureSecret(null);
             }
         }
     }

@@ -527,37 +527,63 @@ class ScimAsyncEventServiceTest {
     }
 
     @Test
-    void testHeartbeatInFlightEvents_TouchesActiveInFlightTasksOnly() {
-        java.util.List<Runnable> queuedTasks = new java.util.ArrayList<>();
-        ScimAsyncEventService deferredService = new ScimAsyncEventService(
-                asyncEventRepository,
-                workspaceRepository,
-                objectMapper,
-                queuedTasks::add
-        );
+    void testWorkerTransactionRollsBackWhenEventWasAlreadyReaped() {
+        org.springframework.transaction.TransactionStatus txStatus =
+                Mockito.mock(org.springframework.transaction.TransactionStatus.class);
+        org.springframework.transaction.support.TransactionOperations txOps =
+                new org.springframework.transaction.support.TransactionOperations() {
+                    @Override
+                    public <T> T execute(org.springframework.transaction.support.TransactionCallback<T> action) {
+                        return action.doInTransaction(txStatus);
+                    }
 
-        // No active tasks initially -> no DB call
-        deferredService.heartbeatInFlightEvents();
-        verify(asyncEventRepository, never()).touchInFlightPendingEvents(any(), any());
+                    @Override
+                    public void executeWithoutResult(java.util.function.Consumer<org.springframework.transaction.TransactionStatus> action) {
+                        action.accept(txStatus);
+                    }
+                };
 
-        UUID txnId = deferredService.submitAsync(
+        service.setWorkerTransactionOperations(txOps);
+
+        when(asyncEventRepository.saveAndFlush(any(ScimAsyncEvent.class))).thenAnswer(inv -> inv.getArgument(0));
+        // Simulate event already marked FAILED by reaper before worker finishes -> returns 0 rows updated
+        when(asyncEventRepository.transitionPendingToCompleted(any(UUID.class), any(), any(Instant.class), any(String.class)))
+                .thenReturn(0);
+
+        UUID txnId = service.submitAsync(
                 workspaceId,
                 "POST",
                 "User",
                 null,
                 "http://localhost:8080/ws/" + workspaceId + "/scim/v2",
-                () -> Map.of("userName", "long-running")
+                () -> Map.of("id", UUID.randomUUID().toString(), "userName", "reaped.user")
         );
 
-        assertTrue(deferredService.isInFlight(txnId));
-        assertEquals(java.util.Set.of(txnId), deferredService.getActiveInFlightTxnIds());
+        assertNotNull(txnId);
+        verify(txStatus).setRollbackOnly();
 
-        deferredService.heartbeatInFlightEvents();
-        verify(asyncEventRepository).touchInFlightPendingEvents(eq(java.util.Set.of(txnId)), any(Instant.class));
+        // Also verify setTransactionManager configures workerTransactionOperations
+        org.springframework.transaction.PlatformTransactionManager ptm =
+                Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class);
+        when(ptm.getTransaction(any())).thenReturn(txStatus);
+        service.setTransactionManager(ptm);
+        service.submitAsync(
+                workspaceId,
+                "POST",
+                "User",
+                null,
+                "http://localhost:8080/ws/" + workspaceId + "/scim/v2",
+                () -> Map.of("id", UUID.randomUUID().toString(), "userName", "reaped.user2")
+        );
+        verify(txStatus, times(2)).setRollbackOnly();
+    }
 
-        // Complete the task -> no longer in flight
-        queuedTasks.forEach(Runnable::run);
-        assertFalse(deferredService.isInFlight(txnId));
-        assertTrue(deferredService.getActiveInFlightTxnIds().isEmpty());
+    @Test
+    void testScimAsyncEventCreatedAtColumnIsNotUpdatable() throws NoSuchFieldException {
+        jakarta.persistence.Column col = ScimAsyncEvent.class
+                .getDeclaredField("createdAt")
+                .getAnnotation(jakarta.persistence.Column.class);
+        assertNotNull(col);
+        assertFalse(col.updatable(), "created_at must remain updatable = false");
     }
 }

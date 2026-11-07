@@ -91,6 +91,7 @@ public class ScimGroupService {
             }
             group = groupRepository.save(group);
         }
+        groupRepository.flush();
 
         workspaceActivityService.touchWorkspace(workspaceId);
         Hibernate.initialize(group.getMembers());
@@ -275,6 +276,7 @@ public class ScimGroupService {
         }
 
         ScimGroup savedGroup = groupRepository.save(existing);
+        groupRepository.flush();
         workspaceActivityService.touchWorkspace(workspaceId);
         Hibernate.initialize(savedGroup.getMembers());
         return savedGroup;
@@ -312,6 +314,7 @@ public class ScimGroupService {
 
         syncGroupState(draft, group);
         ScimGroup savedGroup = groupRepository.save(group);
+        groupRepository.flush();
         workspaceActivityService.touchWorkspace(workspaceId);
         Hibernate.initialize(savedGroup.getMembers());
         return savedGroup;
