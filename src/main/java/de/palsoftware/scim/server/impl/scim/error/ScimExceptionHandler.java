@@ -13,6 +13,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
@@ -35,6 +36,13 @@ public class ScimExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Map<String, Object>> handleBadJson(HttpMessageNotReadableException ex) {
+        Throwable cause = ex.getCause();
+        while (cause != null) {
+            if (cause instanceof ScimException scimEx) {
+                return handleScimException(scimEx);
+            }
+            cause = cause.getCause() != cause ? cause.getCause() : null;
+        }
         return buildErrorResponse(400, "invalidSyntax", "Invalid or malformed JSON in request body");
     }
 
@@ -74,7 +82,13 @@ public class ScimExceptionHandler {
             return buildErrorResponse(409, "uniqueness", "A resource with this identifier or unique attribute already exists");
         }
         log.error("Transaction exception in SCIM controller", ex);
-        return buildErrorResponse(500, null, "Transaction error: " + (cause != null ? cause.getMessage() : ex.getMessage()));
+        return buildErrorResponse(500, null, "Internal server error");
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<Map<String, Object>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        String param = ex.getName() != null ? ex.getName() : "parameter";
+        return buildErrorResponse(400, "invalidValue", "Invalid value for parameter '" + param + "'");
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class, MissingServletRequestParameterException.class, IllegalArgumentException.class})

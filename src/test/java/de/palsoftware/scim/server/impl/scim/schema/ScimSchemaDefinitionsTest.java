@@ -19,12 +19,24 @@ class ScimSchemaDefinitionsTest {
         assertTrue(config.containsKey("filter"));
         assertTrue(config.containsKey("pagination"));
         Map<?, ?> pagination = (Map<?, ?>) config.get("pagination");
-        assertFalse((Boolean) pagination.get("cursor"));
+        assertTrue((Boolean) pagination.get("cursor"));
         assertTrue((Boolean) pagination.get("index"));
+        assertEquals("index", pagination.get("defaultPaginationMethod"));
+        assertEquals(3600, pagination.get("cursorTimeout"));
         assertTrue(config.containsKey("changePassword"));
+        Map<?, ?> changePassword = (Map<?, ?>) config.get("changePassword");
+        assertEquals(true, changePassword.get("supported"));
         assertTrue(config.containsKey("sort"));
         assertTrue(config.containsKey("etag"));
+        assertTrue(config.containsKey("securityEvents"));
+        Map<?, ?> securityEvents = (Map<?, ?>) config.get("securityEvents");
+        assertEquals(true, securityEvents.get("supported"));
+        assertEquals("request", securityEvents.get("asyncRequest"));
         assertTrue(config.containsKey("authenticationSchemes"));
+        List<?> authSchemes = (List<?>) config.get("authenticationSchemes");
+        assertFalse(authSchemes.isEmpty());
+        Map<?, ?> bearerScheme = (Map<?, ?>) authSchemes.get(0);
+        assertEquals("https://datatracker.ietf.org/doc/html/rfc6750", bearerScheme.get("documentationUri"));
     }
 
     @Test
@@ -41,14 +53,29 @@ class ScimSchemaDefinitionsTest {
         List<Map<String, Object>> subAttrs = (List<Map<String, Object>>) paginationAttr.get("subAttributes");
         assertNotNull(subAttrs);
         boolean hasCursorTimeout = subAttrs.stream().anyMatch(sa -> "cursorTimeout".equals(sa.get("name")));
-        assertFalse(hasCursorTimeout, "cursorTimeout should not be present in schema subAttributes when cursor pagination is disabled");
+        assertTrue(hasCursorTimeout, "cursorTimeout should be present in schema subAttributes when cursor pagination is enabled");
 
         Map<String, Object> modeAttr = subAttrs.stream()
-                .filter(sa -> "defaultPaginationMode".equals(sa.get("name")))
+                .filter(sa -> "defaultPaginationMethod".equals(sa.get("name")))
                 .findFirst()
                 .orElse(null);
         assertNotNull(modeAttr);
-        assertEquals(List.of("index"), modeAttr.get("canonicalValues"));
+        assertEquals(List.of("cursor", "index"), modeAttr.get("canonicalValues"));
+
+        Map<String, Object> securityEventsAttr = attrs.stream()
+                .filter(a -> "securityEvents".equals(a.get("name")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(securityEventsAttr);
+        List<Map<String, Object>> secSubAttrs = (List<Map<String, Object>>) securityEventsAttr.get("subAttributes");
+        assertNotNull(secSubAttrs);
+        assertTrue(secSubAttrs.stream().anyMatch(sa -> "supported".equals(sa.get("name"))));
+        Map<String, Object> asyncReqAttr = secSubAttrs.stream()
+                .filter(sa -> "asyncRequest".equals(sa.get("name")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(asyncReqAttr);
+        assertEquals(List.of("request", "long", "none"), asyncReqAttr.get("canonicalValues"));
     }
 
     @Test
@@ -89,5 +116,33 @@ class ScimSchemaDefinitionsTest {
         assertEquals("Group", groupRt.get("name"));
 
         assertNull(ScimSchemaDefinitions.getResourceTypeById("unknown"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExternalIdUniquenessIsNoneAndImsHasOther() {
+        Map<String, Object> userSchema = ScimSchemaDefinitions.userSchema();
+        List<Map<String, Object>> userAttrs = (List<Map<String, Object>>) userSchema.get("attributes");
+        Map<String, Object> userExtId = userAttrs.stream()
+                .filter(a -> "externalId".equals(a.get("name")))
+                .findFirst().orElseThrow();
+        assertEquals("none", userExtId.get("uniqueness"));
+
+        Map<String, Object> imsAttr = userAttrs.stream()
+                .filter(a -> "ims".equals(a.get("name")))
+                .findFirst().orElseThrow();
+        List<Map<String, Object>> imsSub = (List<Map<String, Object>>) imsAttr.get("subAttributes");
+        Map<String, Object> imsType = imsSub.stream()
+                .filter(sa -> "type".equals(sa.get("name")))
+                .findFirst().orElseThrow();
+        List<String> canonical = (List<String>) imsType.get("canonicalValues");
+        assertTrue(canonical.contains("other"));
+
+        Map<String, Object> groupSchema = ScimSchemaDefinitions.groupSchema();
+        List<Map<String, Object>> groupAttrs = (List<Map<String, Object>>) groupSchema.get("attributes");
+        Map<String, Object> groupExtId = groupAttrs.stream()
+                .filter(a -> "externalId".equals(a.get("name")))
+                .findFirst().orElseThrow();
+        assertEquals("none", groupExtId.get("uniqueness"));
     }
 }

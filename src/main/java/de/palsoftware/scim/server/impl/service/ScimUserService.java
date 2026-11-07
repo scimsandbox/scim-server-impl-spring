@@ -1,19 +1,22 @@
 package de.palsoftware.scim.server.impl.service;
 
-import de.palsoftware.scim.server.impl.scim.error.ScimException;
-import de.palsoftware.scim.server.impl.scim.filter.ScimFilterParser;
-import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
-import de.palsoftware.scim.server.impl.scim.patch.ScimPatchEngine;
-import de.palsoftware.scim.server.impl.model.ScimGroupMembership;
-import de.palsoftware.scim.server.impl.model.ScimUser;
-import de.palsoftware.scim.server.impl.model.Workspace;
+import de.palsoftware.scim.server.impl.model.*;
 import de.palsoftware.scim.server.impl.repository.ScimGroupMembershipRepository;
 import de.palsoftware.scim.server.impl.repository.ScimUserRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
-import org.springframework.data.domain.*;
+import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.filter.ScimFilterEvaluator;
+import de.palsoftware.scim.server.impl.scim.filter.ScimFilterParser;
+import de.palsoftware.scim.server.impl.scim.mapper.ScimUserMapper;
+import de.palsoftware.scim.server.impl.scim.pagination.OffsetBasedPageRequest;
+import de.palsoftware.scim.server.impl.scim.patch.ScimPatchEngine;
+import de.palsoftware.scim.server.impl.scim.validation.ScimCanonicalizer;
+import org.hibernate.Hibernate;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
-import org.hibernate.Hibernate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
@@ -39,7 +42,7 @@ public class ScimUserService {
 
     @Transactional
     public ScimUser createUser(UUID workspaceId, Map<String, Object> input) {
-        String userName = (String) input.get("userName");
+        String userName = ScimCanonicalizer.requireNullableString(input.get("userName"), "userName");
         if (userName == null || userName.isBlank()) {
             throw new ScimException(400, "invalidValue", "userName is required");
         }
@@ -54,6 +57,7 @@ public class ScimUserService {
         ScimUser user = new ScimUser();
         user.setWorkspace(ws);
         ScimUserMapper.applyFromScimInput(user, input);
+        resolveEnterpriseManagerDisplay(workspaceId, user);
 
         ScimUser savedUser = userRepository.save(user);
         workspaceActivityService.touchWorkspace(workspaceId);
@@ -70,39 +74,108 @@ public class ScimUserService {
 
     public Map<String, Object> listUsers(UUID workspaceId, String filter, String sortBy,
             String sortOrder, int startIndex, int count) {
+        boolean hasFilter = filter != null && !filter.isBlank();
+        ScimFilterParser.FilterNode ast = hasFilter ? ScimFilterParser.parseAst(filter, true) : null;
+        boolean requiresInMemoryEval = ast != null && ScimFilterParser.requiresInMemoryEvaluation(ast, true);
+
+        String sortAttr = ScimFilterParser.resolveUserSortAttribute(sortBy);
+        boolean isDescending = "descending".equalsIgnoreCase(sortOrder);
+        boolean isEmailSort = "emails".equals(sortAttr);
+
+        Sort sort = null;
+        if (!isEmailSort) {
+            Sort.Order primaryOrder = isDescending
+                    ? Sort.Order.desc(sortAttr).nullsFirst()
+                    : Sort.Order.asc(sortAttr).nullsLast();
+            if (!isSortAttributeCaseExact(sortAttr)) {
+                primaryOrder = primaryOrder.ignoreCase();
+            }
+            Sort.Order tieBreaker = isDescending ? Sort.Order.desc("id") : Sort.Order.asc("id");
+            sort = "id".equals(sortAttr) ? Sort.by(primaryOrder) : Sort.by(primaryOrder, tieBreaker);
+        }
+
+        if (requiresInMemoryEval) {
+            Specification<ScimUser> preFilterSpec = ScimFilterParser.buildUserPreFilter(ast, workspaceId);
+            List<ScimUser> candidates;
+            if (isEmailSort) {
+                candidates = userRepository.findAll(preFilterSpec);
+            } else {
+                candidates = userRepository.findAll(preFilterSpec, sort);
+                if (candidates == null) {
+                    candidates = userRepository.findAll(preFilterSpec);
+                }
+            }
+            if (candidates == null) {
+                candidates = Collections.emptyList();
+            }
+
+            Map<UUID, List<Map<String, Object>>> groupsMap = Collections.emptyMap();
+            if (!candidates.isEmpty() && ScimFilterParser.referencesUserGroups(ast)) {
+                List<UUID> ids = candidates.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
+                groupsMap = getUserGroupsBatch(ids, "");
+            }
+
+            List<ScimUser> matched = new ArrayList<>();
+            for (ScimUser u : candidates) {
+                List<Map<String, Object>> uGroups = groupsMap.getOrDefault(u.getId(), Collections.emptyList());
+                if (ScimFilterEvaluator.matchesUser(u, ast, uGroups, "")) {
+                    matched.add(u);
+                }
+            }
+
+            long totalResults = matched.size();
+            if (count <= 0) {
+                return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
+            }
+
+            if (isEmailSort) {
+                matched.sort(buildUserInMemoryComparator(sortAttr, isDescending));
+            }
+            int offset = Math.max(0, startIndex - 1);
+            List<ScimUser> page = offset >= matched.size()
+                    ? Collections.emptyList()
+                    : matched.subList(offset, Math.min(offset + count, matched.size()));
+            page.forEach(this::initializeLazyCollections);
+            return buildListResponse(page, totalResults, startIndex, page.size());
+        }
+
         Specification<ScimUser> spec = ScimFilterParser.parseUserFilter(filter, workspaceId);
+
+        if (isEmailSort) {
+            if (count <= 0) {
+                long totalResults = userRepository.count(spec);
+                return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
+            }
+            List<ScimUser> fetched = userRepository.findAll(spec);
+            List<ScimUser> allUsers = fetched != null ? new ArrayList<>(fetched) : new ArrayList<>();
+            long totalResults = allUsers.size();
+            Comparator<ScimUser> userComparator = buildUserInMemoryComparator(sortAttr, isDescending);
+            allUsers.sort(userComparator);
+
+            int offset = Math.max(0, startIndex - 1);
+            List<ScimUser> page;
+            if (offset >= allUsers.size()) {
+                page = Collections.emptyList();
+            } else {
+                page = allUsers.subList(offset, Math.min(offset + count, allUsers.size()));
+            }
+            page.forEach(this::initializeLazyCollections);
+
+            return buildListResponse(page, totalResults, startIndex, page.size());
+        }
 
         // Get total count
         long totalResults = userRepository.count(spec);
 
-        if (count == 0) {
+        if (count <= 0) {
             return buildListResponse(Collections.emptyList(), totalResults, startIndex, 0);
         }
 
-        // Sorting
-        String sortAttr = ScimFilterParser.resolveUserSortAttribute(sortBy);
-        Sort.Direction direction = "descending".equalsIgnoreCase(sortOrder)
-                ? Sort.Direction.DESC
-                : Sort.Direction.ASC;
-        Sort sort = Sort.by(direction, sortAttr);
-
-        // Pagination (SCIM is 1-based, Spring Data Pageable is 0-based)
         int offset = Math.max(0, startIndex - 1);
-        int pageNumber = offset / count;
-        int skipWithinPage = offset % count;
-
-        Pageable pageable = PageRequest.of(pageNumber, count, sort);
+        Pageable pageable = new OffsetBasedPageRequest(offset, count, sort);
         Page<ScimUser> resultPage = userRepository.findAll(spec, pageable);
 
-        List<ScimUser> page;
-        if (skipWithinPage > 0 && !resultPage.getContent().isEmpty()) {
-            // SCIM startIndex may not align with page boundaries; fetch the needed slice
-            page = resultPage.getContent().subList(
-                    Math.min(skipWithinPage, resultPage.getContent().size()),
-                    resultPage.getContent().size());
-        } else {
-            page = resultPage.getContent();
-        }
+        List<ScimUser> page = resultPage.getContent();
         page.forEach(this::initializeLazyCollections);
 
         return buildListResponse(page, totalResults, startIndex, page.size());
@@ -124,24 +197,12 @@ public class ScimUserService {
     public ScimUser replaceUser(UUID workspaceId, UUID userId, Map<String, Object> input, String ifMatch) {
         ScimUser existing = getUser(workspaceId, userId);
 
-        // Validate If-Match ETag for optimistic concurrency control
-        if (ifMatch != null) {
-            String currentETag = "W/\"" + existing.getVersion() + "\"";
-            if (!ifMatch.equals(currentETag)) {
-                throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
-            }
-        }
+        validateIfMatch(ifMatch, existing.getVersion());
 
         // Validate userName
-        String newUserName = (String) input.get("userName");
+        String newUserName = ScimCanonicalizer.requireNullableString(input.get("userName"), "userName");
         if (newUserName == null || newUserName.isBlank()) {
             throw new ScimException(400, "invalidValue", "userName is required");
-        }
-
-        // Check if id in body conflicts
-        Object bodyId = input.get("id");
-        if (bodyId != null && !userId.toString().equals(bodyId.toString())) {
-            // Per RFC, either reject or ignore. We'll ignore the id mismatch for PUT.
         }
 
         // Check uniqueness if userName changed
@@ -150,10 +211,13 @@ public class ScimUserService {
             throw new ScimException(409, "uniqueness", "User with userName '" + newUserName + "' already exists");
         }
 
-        // PUT = full replacement
-        ScimUserMapper.clearMutableAttributes(existing);
-        ScimUserMapper.applyFromScimInput(existing, input);
+        // PUT = full replacement (validate on a draft copy so invalid payloads never mutate existing state)
+        ScimUser draft = existing.copyMutableState();
+        ScimUserMapper.clearMutableAttributes(draft);
+        ScimUserMapper.applyFromScimInput(draft, input);
+        resolveEnterpriseManagerDisplay(workspaceId, draft);
 
+        existing.applyMutableStateFrom(draft);
         ScimUser savedUser = userRepository.save(existing);
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
@@ -165,25 +229,33 @@ public class ScimUserService {
         ScimUser user = getUser(workspaceId, userId);
         String originalUserName = user.getUserName();
 
-        // Validate If-Match ETag for optimistic concurrency control
-        if (ifMatch != null) {
-            String currentETag = "W/\"" + user.getVersion() + "\"";
-            if (!ifMatch.equals(currentETag)) {
-                throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
-            }
-        }
+        validateIfMatch(ifMatch, user.getVersion());
 
-        ScimPatchEngine.applyPatchOperations(user, operations);
+        ScimUser draft = user.copyMutableState();
+        ScimPatchEngine.applyPatchOperations(draft, operations);
+        draft.setUserName(ScimCanonicalizer.normalizeNfc(draft.getUserName()));
 
-        if (user.getUserName() == null || user.getUserName().isBlank()) {
+        if (draft.getUserName() == null || draft.getUserName().isBlank()) {
             throw new ScimException(400, "invalidValue", "userName is required");
         }
 
-        if (!user.getUserName().equalsIgnoreCase(originalUserName)
-                && userRepository.existsByUserNameIgnoreCaseAndWorkspaceId(user.getUserName(), workspaceId)) {
-            throw new ScimException(409, "uniqueness", "User with userName '" + user.getUserName() + "' already exists");
+        if (!draft.getUserName().equalsIgnoreCase(originalUserName)
+                && userRepository.existsByUserNameIgnoreCaseAndWorkspaceId(draft.getUserName(), workspaceId)) {
+            throw new ScimException(409, "uniqueness", "User with userName '" + draft.getUserName() + "' already exists");
         }
 
+        if (draft.getEnterpriseManagerValue() == null || draft.getEnterpriseManagerValue().isBlank()) {
+            draft.setEnterpriseManagerDisplay(null);
+        } else if (!Objects.equals(user.getEnterpriseManagerValue(), draft.getEnterpriseManagerValue())
+                || draft.getEnterpriseManagerDisplay() == null) {
+            resolveEnterpriseManagerDisplay(workspaceId, draft);
+        }
+
+        if (user.hasSameMutableState(draft)) {
+            return user;
+        }
+
+        user.applyMutableStateFrom(draft);
         ScimUser savedUser = userRepository.save(user);
         workspaceActivityService.touchWorkspace(workspaceId);
         initializeLazyCollections(savedUser);
@@ -192,7 +264,13 @@ public class ScimUserService {
 
     @Transactional
     public void deleteUser(UUID workspaceId, UUID userId) {
+        deleteUser(workspaceId, userId, null);
+    }
+
+    @Transactional
+    public void deleteUser(UUID workspaceId, UUID userId, String ifMatch) {
         ScimUser user = getUser(workspaceId, userId);
+        validateIfMatch(ifMatch, user.getVersion());
         // Remove user from all groups
         membershipRepository.deleteByMemberValue(userId);
         userRepository.delete(user);
@@ -236,6 +314,89 @@ public class ScimUserService {
         return result;
     }
 
+    private void resolveEnterpriseManagerDisplay(UUID workspaceId, ScimUser target) {
+        String mgrVal = target.getEnterpriseManagerValue();
+        if (mgrVal == null || mgrVal.isBlank()) {
+            target.setEnterpriseManagerDisplay(null);
+            return;
+        }
+        try {
+            UUID mgrId = UUID.fromString(mgrVal.trim());
+            Optional<ScimUser> mgrOpt = userRepository.findByIdAndWorkspaceId(mgrId, workspaceId);
+            if (mgrOpt != null && mgrOpt.isPresent()) {
+                ScimUser mgr = mgrOpt.get();
+                target.setEnterpriseManagerDisplay(
+                        mgr.getDisplayName() != null ? mgr.getDisplayName() : mgr.getUserName());
+            } else {
+                target.setEnterpriseManagerDisplay(null);
+            }
+        } catch (IllegalArgumentException ignored) {
+            target.setEnterpriseManagerDisplay(null);
+        }
+    }
+
+    public Comparator<ScimUser> buildUserInMemoryComparator(String sortAttr, boolean isDescending) {
+        Comparator<ScimUser> primary;
+        if ("createdAt".equals(sortAttr) || "lastModified".equals(sortAttr)) {
+            Comparator<java.time.Instant> cmp = Comparator.naturalOrder();
+            primary = isDescending
+                    ? Comparator.comparing(u -> "createdAt".equals(sortAttr) ? u.getCreatedAt() : u.getLastModified(),
+                            Comparator.nullsFirst(cmp.reversed()))
+                    : Comparator.comparing(u -> "createdAt".equals(sortAttr) ? u.getCreatedAt() : u.getLastModified(),
+                            Comparator.nullsLast(cmp));
+        } else if ("active".equals(sortAttr)) {
+            Comparator<Boolean> cmp = Comparator.naturalOrder();
+            primary = isDescending
+                    ? Comparator.comparing(ScimUser::isActive, cmp.reversed())
+                    : Comparator.comparing(ScimUser::isActive, cmp);
+        } else {
+            Comparator<String> strCmp = isSortAttributeCaseExact(sortAttr)
+                    ? Comparator.naturalOrder()
+                    : String.CASE_INSENSITIVE_ORDER;
+            primary = isDescending
+                    ? Comparator.comparing(u -> extractUserSortString(u, sortAttr), Comparator.nullsFirst(strCmp.reversed()))
+                    : Comparator.comparing(u -> extractUserSortString(u, sortAttr), Comparator.nullsLast(strCmp));
+        }
+        Comparator<String> idCmp = isDescending ? Comparator.reverseOrder() : Comparator.naturalOrder();
+        return primary.thenComparing(u -> u.getId() != null ? u.getId().toString() : "", idCmp);
+    }
+
+    private String extractUserSortString(ScimUser u, String sortAttr) {
+        return switch (sortAttr) {
+            case "id" -> u.getId() != null ? u.getId().toString() : null;
+            case "userName" -> u.getUserName();
+            case "externalId" -> u.getExternalId();
+            case "displayName" -> u.getDisplayName();
+            case "nickName" -> u.getNickName();
+            case "profileUrl" -> u.getProfileUrl();
+            case "title" -> u.getTitle();
+            case "userType" -> u.getUserType();
+            case "preferredLanguage" -> u.getPreferredLanguage();
+            case "locale" -> u.getLocale();
+            case "timezone" -> u.getTimezone();
+            case "nameFormatted" -> u.getNameFormatted();
+            case "nameFamilyName" -> u.getNameFamilyName();
+            case "nameGivenName" -> u.getNameGivenName();
+            case "nameMiddleName" -> u.getNameMiddleName();
+            case "nameHonorificPrefix" -> u.getNameHonorificPrefix();
+            case "nameHonorificSuffix" -> u.getNameHonorificSuffix();
+            case "enterpriseEmployeeNumber" -> u.getEnterpriseEmployeeNumber();
+            case "enterpriseCostCenter" -> u.getEnterpriseCostCenter();
+            case "enterpriseOrganization" -> u.getEnterpriseOrganization();
+            case "enterpriseDivision" -> u.getEnterpriseDivision();
+            case "enterpriseDepartment" -> u.getEnterpriseDepartment();
+            case "emails" -> extractPrimaryOrFirstEmail(u);
+            default -> u.getUserName();
+        };
+    }
+
+    private static boolean isSortAttributeCaseExact(String sortAttr) {
+        return switch (sortAttr) {
+            case "id", "externalId", "profileUrl", "createdAt", "lastModified", "active" -> true;
+            default -> false;
+        };
+    }
+
     private void initializeLazyCollections(ScimUser user) {
         if (user != null) {
             Hibernate.initialize(user.getEmails());
@@ -247,5 +408,36 @@ public class ScimUserService {
             Hibernate.initialize(user.getPhotos());
             Hibernate.initialize(user.getX509Certificates());
         }
+    }
+
+    private String extractPrimaryOrFirstEmail(ScimUser u) {
+        if (u == null || u.getEmails() == null || u.getEmails().isEmpty()) {
+            return null;
+        }
+        for (ScimUserEmail e : u.getEmails()) {
+            if (e != null && e.isPrimaryFlag() && e.getValue() != null && !e.getValue().isBlank()) {
+                return e.getValue();
+            }
+        }
+        for (ScimUserEmail e : u.getEmails()) {
+            if (e != null && e.getValue() != null && !e.getValue().isBlank()) {
+                return e.getValue();
+            }
+        }
+        return null;
+    }
+
+    private void validateIfMatch(String ifMatch, Long version) {
+        if (ifMatch != null && !isWildcardETag(ifMatch)) {
+            String currentETag = "W/\"" + (version != null ? version : 0L) + "\"";
+            if (!ifMatch.trim().equals(currentETag)) {
+                throw new ScimException(412, null, "Failed to update. Resource changed on the server.");
+            }
+        }
+    }
+
+    private boolean isWildcardETag(String etag) {
+        String trimmed = etag.trim();
+        return "*".equals(trimmed) || "\"*\"".equals(trimmed);
     }
 }

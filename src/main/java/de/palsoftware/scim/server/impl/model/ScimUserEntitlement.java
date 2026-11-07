@@ -1,5 +1,7 @@
 package de.palsoftware.scim.server.impl.model;
 
+import java.util.Objects;
+
 public class ScimUserEntitlement {
 
     private String value;
@@ -42,5 +44,30 @@ public class ScimUserEntitlement {
 
     public void setPrimaryFlag(boolean primaryFlag) {
         this.primaryFlag = primaryFlag;
+    }
+
+    public ScimUserEntitlement copy() {
+        ScimUserEntitlement copy = new ScimUserEntitlement();
+        copy.setValue(this.value);
+        copy.setType(this.type);
+        copy.setDisplay(this.display);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        ScimUserEntitlement that = (ScimUserEntitlement) o;
+        return primaryFlag == that.primaryFlag &&
+                Objects.equals(value, that.value) &&
+                Objects.equals(type, that.type) &&
+                Objects.equals(display, that.display);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(value, type, display, primaryFlag);
     }
 }

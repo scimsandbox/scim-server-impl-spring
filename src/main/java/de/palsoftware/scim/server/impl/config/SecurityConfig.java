@@ -1,6 +1,7 @@
 package de.palsoftware.scim.server.impl.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import de.palsoftware.scim.server.impl.security.BearerTokenAuthFilter;
 import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
@@ -21,17 +22,20 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
 public class SecurityConfig {
 
     private final WorkspaceTokenRepository tokenRepository;
+    private final WorkspaceRepository workspaceRepository;
     private final ObjectMapper objectMapper;
     private final RequestResponseLoggingFilter loggingFilter;
     private final ThrottlingFilter throttlingFilter;
     private final ScimOperationMetricsFilter scimOperationMetricsFilter;
 
     public SecurityConfig(WorkspaceTokenRepository tokenRepository,
+                          WorkspaceRepository workspaceRepository,
                           ObjectMapper objectMapper,
                           RequestResponseLoggingFilter loggingFilter,
                           ThrottlingFilter throttlingFilter,
                           ScimOperationMetricsFilter scimOperationMetricsFilter) {
         this.tokenRepository = tokenRepository;
+        this.workspaceRepository = workspaceRepository;
         this.objectMapper = objectMapper;
         this.loggingFilter = loggingFilter;
         this.throttlingFilter = throttlingFilter;
@@ -76,6 +80,6 @@ public class SecurityConfig {
 
     @Bean
     public BearerTokenAuthFilter bearerTokenAuthFilter() {
-        return new BearerTokenAuthFilter(tokenRepository, objectMapper);
+        return new BearerTokenAuthFilter(tokenRepository, workspaceRepository, objectMapper);
     }
 }

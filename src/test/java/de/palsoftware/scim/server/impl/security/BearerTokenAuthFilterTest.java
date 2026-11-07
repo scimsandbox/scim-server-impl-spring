@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.metrics.ScimRequestMetricAttributes;
 import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.model.WorkspaceToken;
+import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import jakarta.servlet.FilterChain;
 import org.junit.jupiter.api.BeforeEach;
@@ -116,10 +117,12 @@ class BearerTokenAuthFilterTest {
 
         assertEquals(401, response.getStatus());
         assertEquals("application/scim+json;charset=UTF-8", response.getContentType());
+        assertEquals("UTF-8", response.getCharacterEncoding());
         assertEquals(ScimRequestMetricAttributes.AUTH_FAILED,
                 request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
         String body = response.getContentAsString();
         assertTrue(body.contains("urn:ietf:params:scim:api:messages:2.0:Error"));
+        assertTrue(body.contains("\"status\":\"401\""));
     }
 
     @Test
@@ -174,6 +177,32 @@ class BearerTokenAuthFilterTest {
     }
 
     @Test
+    void caseInsensitiveBearerScheme_PassesThrough() throws Exception {
+        UUID workspaceId = UUID.randomUUID();
+        Workspace ws = new Workspace();
+        ws.setId(workspaceId);
+
+        WorkspaceToken wsToken = new WorkspaceToken();
+        wsToken.setWorkspace(ws);
+        wsToken.setExpiresAt(Instant.now().plus(30, ChronoUnit.DAYS));
+
+        when(tokenRepository.findByTokenHashAndNotRevoked(anyString())).thenReturn(Optional.of(wsToken));
+
+        for (String prefix : new String[]{"bearer ", "BEARER ", "bEaReR "}) {
+            MockHttpServletRequest request = new MockHttpServletRequest();
+            request.setRequestURI("/ws/" + workspaceId + "/scim/v2/Users");
+            request.addHeader("Authorization", prefix + "some-valid-token");
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request, response, filterChain);
+
+            assertEquals(200, response.getStatus(), "Failed for scheme prefix: " + prefix);
+            assertEquals(ScimRequestMetricAttributes.AUTH_OK,
+                    request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
+        }
+    }
+
+    @Test
     void tokenWithNullExpiresAt_PassesThrough() throws Exception {
         UUID workspaceId = UUID.randomUUID();
         Workspace ws = new Workspace();
@@ -223,5 +252,81 @@ class BearerTokenAuthFilterTest {
                 request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
         String body = response.getContentAsString();
         assertTrue(body.contains("Token does not belong to this workspace"));
+    }
+
+    @Test
+    void anonymousGetServiceProviderConfig_PassesThrough() throws Exception {
+        UUID workspaceId = UUID.randomUUID();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET",
+                "/ws/" + workspaceId + "/scim/v2/ServiceProviderConfig");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, filterChain);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(workspaceId.toString(), request.getAttribute("WORKSPACE_ID"));
+        assertEquals(ScimRequestMetricAttributes.AUTH_OK,
+                request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
+        Mockito.verify(filterChain).doFilter(request, response);
+    }
+
+    @Test
+    void invalidTokenOnServiceProviderConfig_StillReturns401() throws Exception {
+        when(tokenRepository.findByTokenHashAndNotRevoked(anyString())).thenReturn(Optional.empty());
+
+        UUID workspaceId = UUID.randomUUID();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET",
+                "/ws/" + workspaceId + "/scim/v2/ServiceProviderConfig");
+        request.addHeader("Authorization", "Bearer invalid-token");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, filterChain);
+
+        assertEquals(401, response.getStatus());
+        assertEquals("Bearer", response.getHeader("WWW-Authenticate"));
+    }
+
+    @Test
+    void anonymousGetServiceProviderConfig_NonExistentWorkspace_Returns404() throws Exception {
+        WorkspaceRepository workspaceRepository = Mockito.mock(WorkspaceRepository.class);
+        UUID unknownWorkspaceId = UUID.randomUUID();
+        when(workspaceRepository.existsById(unknownWorkspaceId)).thenReturn(false);
+
+        BearerTokenAuthFilter wsFilter = new BearerTokenAuthFilter(
+                tokenRepository, workspaceRepository, new ObjectMapper());
+        MockHttpServletRequest request = new MockHttpServletRequest("GET",
+                "/ws/" + unknownWorkspaceId + "/scim/v2/ServiceProviderConfig");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        wsFilter.doFilter(request, response, filterChain);
+
+        assertEquals(404, response.getStatus());
+        assertNull(response.getHeader("WWW-Authenticate"));
+        assertNull(request.getAttribute("WORKSPACE_ID"));
+        assertEquals(ScimRequestMetricAttributes.AUTH_FAILED,
+                request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
+        assertTrue(response.getContentAsString().contains("Workspace not found"));
+        Mockito.verifyNoInteractions(filterChain);
+    }
+
+    @Test
+    void anonymousGetServiceProviderConfig_ExistingWorkspace_PassesThrough() throws Exception {
+        WorkspaceRepository workspaceRepository = Mockito.mock(WorkspaceRepository.class);
+        UUID workspaceId = UUID.randomUUID();
+        when(workspaceRepository.existsById(workspaceId)).thenReturn(true);
+
+        BearerTokenAuthFilter wsFilter = new BearerTokenAuthFilter(
+                tokenRepository, workspaceRepository, new ObjectMapper());
+        MockHttpServletRequest request = new MockHttpServletRequest("GET",
+                "/ws/" + workspaceId + "/scim/v2/ServiceProviderConfig");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        wsFilter.doFilter(request, response, filterChain);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(workspaceId.toString(), request.getAttribute("WORKSPACE_ID"));
+        assertEquals(ScimRequestMetricAttributes.AUTH_OK,
+                request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
+        Mockito.verify(filterChain).doFilter(request, response);
     }
 }

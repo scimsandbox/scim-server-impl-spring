@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.metrics.ScimRequestMetricAttributes;
 import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.model.WorkspaceToken;
+import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
+import de.palsoftware.scim.server.impl.scim.compat.CompatMode;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -22,11 +24,19 @@ import java.util.*;
 public class BearerTokenAuthFilter extends OncePerRequestFilter {
 
     private final WorkspaceTokenRepository tokenRepository;
+    private final WorkspaceRepository workspaceRepository;
     private final ObjectMapper objectMapper;
 
     public BearerTokenAuthFilter(WorkspaceTokenRepository tokenRepository,
                                   ObjectMapper objectMapper) {
+        this(tokenRepository, null, objectMapper);
+    }
+
+    public BearerTokenAuthFilter(WorkspaceTokenRepository tokenRepository,
+                                  WorkspaceRepository workspaceRepository,
+                                  ObjectMapper objectMapper) {
         this.tokenRepository = tokenRepository;
+        this.workspaceRepository = workspaceRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -61,7 +71,18 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
 
         // Extract Bearer token
         String authHeader = request.getHeader("Authorization");
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        if (authHeader == null && "GET".equalsIgnoreCase(request.getMethod()) && isServiceProviderConfigEndpoint(path)) {
+            if (workspaceRepository != null && !workspaceRepository.existsById(workspaceId)) {
+                request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
+                sendScimError(response, 404, null, "Workspace not found");
+                return;
+            }
+            request.setAttribute("WORKSPACE_ID", workspaceId.toString());
+            request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_OK);
+            filterChain.doFilter(request, response);
+            return;
+        }
+        if (authHeader == null || !authHeader.regionMatches(true, 0, "Bearer ", 0, 7)) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
             sendScimError(response, 401, null, "Missing or invalid Authorization header");
             return;
@@ -107,9 +128,31 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
+    private static boolean isServiceProviderConfigEndpoint(String path) {
+        String normalized = (path.length() > 1 && path.endsWith("/"))
+                ? path.substring(0, path.length() - 1)
+                : path;
+        String[] segments = normalized.split("/");
+        // /ws/{workspaceId}/scim/v2/ServiceProviderConfig -> ["", "ws", "{uuid}", "scim", "v2", "ServiceProviderConfig"]
+        if (segments.length == 6) {
+            return "scim".equals(segments[3])
+                    && "v2".equals(segments[4])
+                    && "ServiceProviderConfig".equals(segments[5]);
+        }
+        // /ws/{workspaceId}/scim/v2/{compat}/ServiceProviderConfig
+        if (segments.length == 7) {
+            return "scim".equals(segments[3])
+                    && "v2".equals(segments[4])
+                    && CompatMode.fromString(segments[5]) != CompatMode.NONE
+                    && "ServiceProviderConfig".equals(segments[6]);
+        }
+        return false;
+    }
+
     private void sendScimError(HttpServletResponse response, int status, String scimType, String detail)
             throws IOException {
         response.setStatus(status);
+        response.setCharacterEncoding("UTF-8");
         response.setContentType("application/scim+json;charset=UTF-8");
 
         // RFC 7644 §3.12: 401 responses MUST include WWW-Authenticate header
@@ -124,5 +167,6 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         error.put("detail", detail);
 
         response.getWriter().write(objectMapper.writeValueAsString(error));
+        response.getWriter().flush();
     }
 }

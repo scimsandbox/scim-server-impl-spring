@@ -46,6 +46,10 @@ logging:
     "[de.palsoftware.scim]": DEBUG
     "[org.springframework.security]": WARN
 
+scim:
+  cursor:
+    secret: ${SCIM_CURSOR_SECRET:${SPRING_DATASOURCE_PASSWORD:${spring.datasource.password:${ACTUATOR_API_KEY:}}}}
+
 management:
   server:
     port: ${MANAGEMENT_SERVER_PORT:9090}
@@ -83,6 +87,15 @@ app:
       cron: "0 0 * * * *"
       zone: UTC
       max-count: 10000
+    async-events:
+      enabled: true
+      cron: "0 0 * * * *"
+      zone: UTC
+      max-count: 5000
+      stale-pending:
+        enabled: true
+        cron: "0 */1 * * * *"
+        timeout: 5m
   workspace:
     activity:
       flush-cron: "0 0 * * * *"

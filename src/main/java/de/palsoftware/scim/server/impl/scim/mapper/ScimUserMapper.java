@@ -1,6 +1,8 @@
 package de.palsoftware.scim.server.impl.scim.mapper;
 
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.validation.ScimCanonicalizer;
+import de.palsoftware.scim.server.impl.scim.validation.ScimCertificateValidator;
 import de.palsoftware.scim.server.impl.model.ScimUser;
 import de.palsoftware.scim.server.impl.model.ScimUserAddress;
 import de.palsoftware.scim.server.impl.model.ScimUserEmail;
@@ -10,6 +12,7 @@ import de.palsoftware.scim.server.impl.model.ScimUserPhoneNumber;
 import de.palsoftware.scim.server.impl.model.ScimUserPhoto;
 import de.palsoftware.scim.server.impl.model.ScimUserRole;
 import de.palsoftware.scim.server.impl.model.ScimUserX509Certificate;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.util.*;
 
@@ -18,6 +21,8 @@ import java.util.*;
  * All SCIM responses are built as Map<String,Object> for maximum flexibility.
  */
 public class ScimUserMapper {
+
+    private static final BCryptPasswordEncoder PASSWORD_ENCODER = new BCryptPasswordEncoder();
 
     private ScimUserMapper() {
     }
@@ -31,9 +36,26 @@ public class ScimUserMapper {
 
     private static final Set<String> EMAIL_TYPES = Set.of("work", "home", VALUE_OTHER);
     private static final Set<String> PHONE_TYPES = Set.of("work", "home", "mobile", "fax", "pager", VALUE_OTHER);
-    private static final Set<String> IM_TYPES = Set.of("aim", "gtalk", "icq", "xmpp", "skype", "qq", "msn", "yahoo");
+    private static final Set<String> IM_TYPES = Set.of("aim", "gtalk", "icq", "xmpp", "skype", "qq", "msn", "yahoo", VALUE_OTHER);
     private static final Set<String> PHOTO_TYPES = Set.of("photo", "thumbnail");
     private static final Set<String> ADDRESS_TYPES = Set.of("work", "home", VALUE_OTHER);
+    private static final Set<String> ISO_ALPHA2_COUNTRIES = Set.of(Locale.getISOCountries());
+    private static final Map<String, String> ISO_ALPHA3_TO_ALPHA2;
+
+    static {
+        Map<String, String> map = new HashMap<>();
+        for (String alpha2 : ISO_ALPHA2_COUNTRIES) {
+            try {
+                String alpha3 = Locale.of("", alpha2).getISO3Country();
+                if (alpha3 != null && !alpha3.isEmpty()) {
+                    map.put(alpha3.toUpperCase(Locale.ROOT), alpha2);
+                }
+            } catch (MissingResourceException ignored) {
+                // Skip countries without an ISO alpha-3 equivalent
+            }
+        }
+        ISO_ALPHA3_TO_ALPHA2 = Collections.unmodifiableMap(map);
+    }
 
     // Common SCIM attribute keys
     private static final String KEY_SCHEMAS = "schemas";
@@ -75,7 +97,7 @@ public class ScimUserMapper {
         addMultiValuedAttributes(user, result);
         addComputedGroups(result, groups);
         if (hasEnterprise) {
-            addEnterpriseExtension(user, result);
+            addEnterpriseExtension(user, baseUrl, result);
         }
         addMeta(user, baseUrl, result);
 
@@ -126,7 +148,7 @@ public class ScimUserMapper {
         }
     }
 
-    private static void addEnterpriseExtension(ScimUser user, Map<String, Object> result) {
+    private static void addEnterpriseExtension(ScimUser user, String baseUrl, Map<String, Object> result) {
         Map<String, Object> enterprise = new LinkedHashMap<>(8);
         putIfNotNull(enterprise, "employeeNumber", user.getEnterpriseEmployeeNumber());
         putIfNotNull(enterprise, "costCenter", user.getEnterpriseCostCenter());
@@ -134,7 +156,7 @@ public class ScimUserMapper {
         putIfNotNull(enterprise, "division", user.getEnterpriseDivision());
         putIfNotNull(enterprise, "department", user.getEnterpriseDepartment());
 
-        Map<String, Object> manager = buildManagerMap(user);
+        Map<String, Object> manager = buildManagerMap(user, baseUrl);
         if (!manager.isEmpty()) {
             enterprise.put(KEY_MANAGER, manager);
         }
@@ -146,9 +168,12 @@ public class ScimUserMapper {
         Map<String, Object> meta = new LinkedHashMap<>(6);
         meta.put("resourceType", "User");
         meta.put("created", user.getCreatedAt().toString());
-        meta.put("lastModified", user.getLastModified().toString());
+        String lastModified = (user.getVersion() == null || user.getVersion() == 0)
+                ? user.getCreatedAt().toString()
+                : user.getLastModified().toString();
+        meta.put("lastModified", lastModified);
         meta.put("location", baseUrl + "/Users/" + user.getId());
-        meta.put("version", "W/\"" + user.getVersion() + "\"");
+        meta.put("version", "W/\"" + (user.getVersion() != null ? user.getVersion() : 0) + "\"");
         result.put("meta", meta);
     }
 
@@ -157,15 +182,17 @@ public class ScimUserMapper {
      */
     public static void applyFromScimInput(ScimUser user, Map<String, Object> input) {
         applySimpleAttributes(user, input);
-        applyNameAttribute(user, input.get("name"));
-        replaceCollection(user.getEmails(), input, KEY_EMAILS, item -> buildEmail(item));
-        replaceCollection(user.getPhoneNumbers(), input, KEY_PHONE_NUMBERS, item -> buildPhone(item));
-        replaceCollection(user.getAddresses(), input, KEY_ADDRESSES, item -> buildAddress(item));
-        replaceCollection(user.getIms(), input, "ims", item -> buildIm(item));
-        replaceCollection(user.getPhotos(), input, KEY_PHOTOS, item -> buildPhoto(item));
-        replaceCollection(user.getEntitlements(), input, KEY_ENTITLEMENTS, item -> buildEntitlement(item));
-        replaceCollection(user.getRoles(), input, KEY_ROLES, item -> buildRole(item));
-        replaceCollection(user.getX509Certificates(), input, KEY_X509_CERTIFICATES, item -> buildCertificate(item));
+        if (input.containsKey("name")) {
+            applyNameAttribute(user, input.get("name"));
+        }
+        replaceCollection(user.getEmails(), input, KEY_EMAILS, ScimUserMapper::buildEmail);
+        replaceCollection(user.getPhoneNumbers(), input, KEY_PHONE_NUMBERS, ScimUserMapper::buildPhone);
+        replaceCollection(user.getAddresses(), input, KEY_ADDRESSES, ScimUserMapper::buildAddress);
+        replaceCollection(user.getIms(), input, "ims", ScimUserMapper::buildIm);
+        replaceCollection(user.getPhotos(), input, KEY_PHOTOS, ScimUserMapper::buildPhoto);
+        replaceCollection(user.getEntitlements(), input, KEY_ENTITLEMENTS, ScimUserMapper::buildEntitlement);
+        replaceCollection(user.getRoles(), input, KEY_ROLES, ScimUserMapper::buildRole);
+        replaceCollection(user.getX509Certificates(), input, KEY_X509_CERTIFICATES, ScimUserMapper::buildCertificate);
         applyEnterpriseExtension(user, input);
     }
 
@@ -230,10 +257,17 @@ public class ScimUserMapper {
         return name;
     }
 
-    private static Map<String, Object> buildManagerMap(ScimUser user) {
+    private static Map<String, Object> buildManagerMap(ScimUser user, String baseUrl) {
         Map<String, Object> manager = new LinkedHashMap<>(4);
-        putIfNotNull(manager, KEY_VALUE, user.getEnterpriseManagerValue());
-        putIfNotNull(manager, "$ref", user.getEnterpriseManagerRef());
+        String mgrVal = user.getEnterpriseManagerValue();
+        putIfNotNull(manager, KEY_VALUE, mgrVal);
+        String rawRef = user.getEnterpriseManagerRef();
+        if (mgrVal != null && !mgrVal.isBlank() && baseUrl != null && !baseUrl.isBlank()
+                && (rawRef == null || rawRef.isBlank() || ScimCanonicalizer.extractCanonicalScimResourceTail(rawRef) != null)) {
+            manager.put("$ref", baseUrl + "/Users/" + mgrVal);
+        } else {
+            putIfNotNull(manager, "$ref", rawRef);
+        }
         putIfNotNull(manager, KEY_DISPLAY_NAME, user.getEnterpriseManagerDisplay());
         return manager;
     }
@@ -256,32 +290,58 @@ public class ScimUserMapper {
     }
 
     private static void applySimpleAttributes(ScimUser user, Map<String, Object> input) {
-        if (input.containsKey(KEY_USER_NAME)) user.setUserName((String) input.get(KEY_USER_NAME));
-        if (input.containsKey(KEY_EXTERNAL_ID)) user.setExternalId((String) input.get(KEY_EXTERNAL_ID));
-        if (input.containsKey(KEY_DISPLAY_NAME)) user.setDisplayName((String) input.get(KEY_DISPLAY_NAME));
-        if (input.containsKey(KEY_NICK_NAME)) user.setNickName((String) input.get(KEY_NICK_NAME));
-        if (input.containsKey(KEY_PROFILE_URL)) user.setProfileUrl((String) input.get(KEY_PROFILE_URL));
-        if (input.containsKey(KEY_TITLE)) user.setTitle((String) input.get(KEY_TITLE));
-        if (input.containsKey(KEY_USER_TYPE)) user.setUserType((String) input.get(KEY_USER_TYPE));
-        if (input.containsKey(KEY_PREFERRED_LANGUAGE)) user.setPreferredLanguage((String) input.get(KEY_PREFERRED_LANGUAGE));
-        if (input.containsKey(KEY_LOCALE)) user.setLocale((String) input.get(KEY_LOCALE));
-        if (input.containsKey(KEY_TIMEZONE)) user.setTimezone((String) input.get(KEY_TIMEZONE));
-        if (input.containsKey(KEY_ACTIVE)) user.setActive(toBoolean(input.get(KEY_ACTIVE)));
-        if (input.containsKey("password")) user.setPassword((String) input.get("password"));
+        if (input.containsKey(KEY_USER_NAME)) user.setUserName(ScimCanonicalizer.requireNullableString(input.get(KEY_USER_NAME), KEY_USER_NAME));
+        if (input.containsKey(KEY_EXTERNAL_ID)) user.setExternalId(ScimCanonicalizer.requireNullableString(input.get(KEY_EXTERNAL_ID), KEY_EXTERNAL_ID));
+        if (input.containsKey(KEY_DISPLAY_NAME)) user.setDisplayName(ScimCanonicalizer.requireNullableString(input.get(KEY_DISPLAY_NAME), KEY_DISPLAY_NAME));
+        if (input.containsKey(KEY_NICK_NAME)) user.setNickName(ScimCanonicalizer.requireNullableString(input.get(KEY_NICK_NAME), KEY_NICK_NAME));
+        if (input.containsKey(KEY_PROFILE_URL)) user.setProfileUrl(ScimCanonicalizer.requireNullableString(input.get(KEY_PROFILE_URL), KEY_PROFILE_URL));
+        if (input.containsKey(KEY_TITLE)) user.setTitle(ScimCanonicalizer.requireNullableString(input.get(KEY_TITLE), KEY_TITLE));
+        if (input.containsKey(KEY_USER_TYPE)) user.setUserType(ScimCanonicalizer.requireNullableString(input.get(KEY_USER_TYPE), KEY_USER_TYPE));
+        if (input.containsKey(KEY_PREFERRED_LANGUAGE)) user.setPreferredLanguage(ScimCanonicalizer.requireNullableString(input.get(KEY_PREFERRED_LANGUAGE), KEY_PREFERRED_LANGUAGE));
+        if (input.containsKey(KEY_LOCALE)) user.setLocale(ScimCanonicalizer.requireNullableString(input.get(KEY_LOCALE), KEY_LOCALE));
+        if (input.containsKey(KEY_TIMEZONE)) user.setTimezone(ScimCanonicalizer.requireNullableString(input.get(KEY_TIMEZONE), KEY_TIMEZONE));
+        if (input.containsKey(KEY_ACTIVE)) user.setActive(ScimCanonicalizer.requireBoolean(input.get(KEY_ACTIVE), KEY_ACTIVE, true));
+        if (input.containsKey("password")) {
+            String pw = ScimCanonicalizer.requireNullableString(input.get("password"), "password");
+            user.setPassword(hashPassword(pw));
+        }
+    }
+
+    public static String hashPassword(String password) {
+        if (password == null || password.isEmpty()) {
+            return password;
+        }
+        if (password.startsWith("$2a$") || password.startsWith("$2b$") || password.startsWith("$2y$")) {
+            return password;
+        }
+        return PASSWORD_ENCODER.encode(password);
     }
 
     @SuppressWarnings("unchecked")
     private static void applyNameAttribute(ScimUser user, Object nameObj) {
-        if (!(nameObj instanceof Map<?, ?> rawNameMap)) {
+        if (nameObj == null) {
+            user.setNameFormatted(null);
+            user.setNameFamilyName(null);
+            user.setNameGivenName(null);
+            user.setNameMiddleName(null);
+            user.setNameHonorificPrefix(null);
+            user.setNameHonorificSuffix(null);
             return;
         }
+        if (!(nameObj instanceof Map<?, ?> rawNameMap)) {
+            throw new ScimException(400, "invalidValue", "Attribute 'name' must be a complex object");
+        }
         Map<String, Object> nameMap = (Map<String, Object>) rawNameMap;
-        user.setNameFormatted((String) nameMap.get(KEY_FORMATTED));
-        user.setNameFamilyName((String) nameMap.get("familyName"));
-        user.setNameGivenName((String) nameMap.get("givenName"));
-        user.setNameMiddleName((String) nameMap.get("middleName"));
-        user.setNameHonorificPrefix((String) nameMap.get("honorificPrefix"));
-        user.setNameHonorificSuffix((String) nameMap.get("honorificSuffix"));
+        // Validate every sub-attribute in 'name' is scalar string (RFC 7643 §2.3.8: complex attributes MUST NOT have nested complex sub-attributes)
+        for (Map.Entry<String, Object> entry : nameMap.entrySet()) {
+            ScimCanonicalizer.requireNullableString(entry.getValue(), "name." + entry.getKey());
+        }
+        if (nameMap.containsKey(KEY_FORMATTED)) user.setNameFormatted(ScimCanonicalizer.requireNullableString(nameMap.get(KEY_FORMATTED), "name.formatted"));
+        if (nameMap.containsKey("familyName")) user.setNameFamilyName(ScimCanonicalizer.requireNullableString(nameMap.get("familyName"), "name.familyName"));
+        if (nameMap.containsKey("givenName")) user.setNameGivenName(ScimCanonicalizer.requireNullableString(nameMap.get("givenName"), "name.givenName"));
+        if (nameMap.containsKey("middleName")) user.setNameMiddleName(ScimCanonicalizer.requireNullableString(nameMap.get("middleName"), "name.middleName"));
+        if (nameMap.containsKey("honorificPrefix")) user.setNameHonorificPrefix(ScimCanonicalizer.requireNullableString(nameMap.get("honorificPrefix"), "name.honorificPrefix"));
+        if (nameMap.containsKey("honorificSuffix")) user.setNameHonorificSuffix(ScimCanonicalizer.requireNullableString(nameMap.get("honorificSuffix"), "name.honorificSuffix"));
     }
 
     @SuppressWarnings("unchecked")
@@ -291,118 +351,419 @@ public class ScimUserMapper {
             return;
         }
         target.clear();
-        List<Map<String, Object>> items = (List<Map<String, Object>>) input.get(key);
-        if (items == null) {
+        Object rawItems = input.get(key);
+        if (rawItems == null) {
             return;
         }
+        if (!(rawItems instanceof List<?> rawList)) {
+            throw new ScimException(400, "invalidValue", "Attribute '" + key + "' must be an array");
+        }
+        List<Map<String, Object>> items = new ArrayList<>(rawList.size());
+        for (Object elem : rawList) {
+            if (!(elem instanceof Map<?, ?> elemMap)) {
+                throw new ScimException(400, "invalidValue", "Elements of '" + key + "' must be complex objects");
+            }
+            items.add((Map<String, Object>) elemMap);
+        }
+        addAndNormalizeItems(items, target, mapper, KEY_EMAILS.equals(key));
+    }
+
+    public static <T> void addAndNormalizeItems(List<Map<String, Object>> items, List<T> target,
+                                                java.util.function.Function<Map<String, Object>, T> mapper,
+                                                boolean caseInsensitive) {
         for (Map<String, Object> item : items) {
-            target.add(mapper.apply(item));
+            T newItem = mapper.apply(item);
+            T existingDuplicate = findDuplicateItem(target, newItem, caseInsensitive);
+            boolean newIsPrimary = isPrimaryItem(newItem);
+            if (existingDuplicate != null) {
+                if (newIsPrimary) {
+                    for (T other : target) {
+                        setPrimaryItem(other, false);
+                    }
+                    setPrimaryItem(existingDuplicate, true);
+                }
+            } else {
+                if (newIsPrimary) {
+                    for (T other : target) {
+                        setPrimaryItem(other, false);
+                    }
+                }
+                target.add(newItem);
+            }
+        }
+    }
+
+    public static <T> void deduplicateAndNormalizeCollection(List<T> collection, boolean caseInsensitive) {
+        if (collection == null || collection.size() <= 1) {
+            return;
+        }
+        List<T> normalized = new ArrayList<>(collection.size());
+        for (T item : collection) {
+            T existingDuplicate = findDuplicateItem(normalized, item, caseInsensitive);
+            boolean itemIsPrimary = isPrimaryItem(item);
+            if (existingDuplicate != null) {
+                if (itemIsPrimary) {
+                    for (T other : normalized) {
+                        setPrimaryItem(other, false);
+                    }
+                    setPrimaryItem(existingDuplicate, true);
+                }
+            } else {
+                if (itemIsPrimary) {
+                    for (T other : normalized) {
+                        setPrimaryItem(other, false);
+                    }
+                }
+                normalized.add(item);
+            }
+        }
+        collection.clear();
+        collection.addAll(normalized);
+    }
+
+    private static <T> T findDuplicateItem(List<T> target, T candidate, boolean caseInsensitive) {
+        String candidateValue = getItemValue(candidate);
+        if (candidateValue == null) {
+            return null;
+        }
+        String candidateType = getItemType(candidate);
+        for (T existing : target) {
+            String existingValue = getItemValue(existing);
+            if (existingValue == null) {
+                continue;
+            }
+            String existingType = getItemType(existing);
+            if (caseInsensitive) {
+                String normCandType = candidateType != null ? candidateType.trim() : "";
+                String normExistType = existingType != null ? existingType.trim() : "";
+                if (normCandType.equalsIgnoreCase(normExistType)
+                        && candidateValue.trim().equalsIgnoreCase(existingValue.trim())) {
+                    return existing;
+                }
+            } else {
+                if (Objects.equals(candidateType, existingType) && Objects.equals(candidateValue, existingValue)) {
+                    return existing;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String getItemValue(Object item) {
+        return switch (item) {
+            case ScimUserEmail e -> e.getValue();
+            case ScimUserPhoneNumber p -> p.getValue();
+            case ScimUserIm i -> i.getValue();
+            case ScimUserPhoto ph -> ph.getValue();
+            case ScimUserEntitlement ent -> ent.getValue();
+            case ScimUserRole r -> r.getValue();
+            case ScimUserX509Certificate c -> c.getValue();
+            default -> null;
+        };
+    }
+
+    private static String getItemType(Object item) {
+        return switch (item) {
+            case ScimUserEmail e -> e.getType();
+            case ScimUserPhoneNumber p -> p.getType();
+            case ScimUserAddress a -> a.getType();
+            case ScimUserIm i -> i.getType();
+            case ScimUserPhoto ph -> ph.getType();
+            case ScimUserEntitlement ent -> ent.getType();
+            case ScimUserRole r -> r.getType();
+            case ScimUserX509Certificate c -> c.getType();
+            default -> null;
+        };
+    }
+
+    private static boolean isPrimaryItem(Object item) {
+        return switch (item) {
+            case ScimUserEmail e -> e.isPrimaryFlag();
+            case ScimUserPhoneNumber p -> p.isPrimaryFlag();
+            case ScimUserAddress a -> a.isPrimaryFlag();
+            case ScimUserIm i -> i.isPrimaryFlag();
+            case ScimUserPhoto ph -> ph.isPrimaryFlag();
+            case ScimUserEntitlement ent -> ent.isPrimaryFlag();
+            case ScimUserRole r -> r.isPrimaryFlag();
+            case ScimUserX509Certificate c -> c.isPrimaryFlag();
+            default -> false;
+        };
+    }
+
+    private static void setPrimaryItem(Object item, boolean primary) {
+        switch (item) {
+            case ScimUserEmail e -> e.setPrimaryFlag(primary);
+            case ScimUserPhoneNumber p -> p.setPrimaryFlag(primary);
+            case ScimUserAddress a -> a.setPrimaryFlag(primary);
+            case ScimUserIm i -> i.setPrimaryFlag(primary);
+            case ScimUserPhoto ph -> ph.setPrimaryFlag(primary);
+            case ScimUserEntitlement ent -> ent.setPrimaryFlag(primary);
+            case ScimUserRole r -> r.setPrimaryFlag(primary);
+            case ScimUserX509Certificate c -> c.setPrimaryFlag(primary);
+            default -> {
+            }
         }
     }
 
     @SuppressWarnings("unchecked")
     private static void applyEnterpriseExtension(ScimUser user, Map<String, Object> input) {
-        Map<String, Object> enterprise = (Map<String, Object>) input.get(ENTERPRISE_SCHEMA);
-        if (enterprise == null) {
+        Object rawEnterprise = input.get(ENTERPRISE_SCHEMA);
+        if (rawEnterprise == null) {
+            for (Map.Entry<String, Object> entry : input.entrySet()) {
+                if (ENTERPRISE_SCHEMA.equalsIgnoreCase(entry.getKey())) {
+                    rawEnterprise = entry.getValue();
+                    break;
+                }
+            }
+        }
+        if (rawEnterprise == null) {
             return;
         }
-        user.setEnterpriseEmployeeNumber((String) enterprise.get("employeeNumber"));
-        user.setEnterpriseCostCenter((String) enterprise.get("costCenter"));
-        user.setEnterpriseOrganization((String) enterprise.get("organization"));
-        user.setEnterpriseDivision((String) enterprise.get("division"));
-        user.setEnterpriseDepartment((String) enterprise.get("department"));
-        applyEnterpriseManager(user, enterprise.get(KEY_MANAGER));
+        if (!(rawEnterprise instanceof Map<?, ?> rawMap)) {
+            throw new ScimException(400, "invalidValue", "Enterprise extension must be a complex object");
+        }
+        Map<String, Object> enterprise = (Map<String, Object>) rawMap;
+        if (enterprise.containsKey("employeeNumber")) {
+            user.setEnterpriseEmployeeNumber(ScimCanonicalizer.requireNullableString(enterprise.get("employeeNumber"), "employeeNumber"));
+        }
+        if (enterprise.containsKey("costCenter")) {
+            user.setEnterpriseCostCenter(ScimCanonicalizer.requireNullableString(enterprise.get("costCenter"), "costCenter"));
+        }
+        if (enterprise.containsKey("organization")) {
+            user.setEnterpriseOrganization(ScimCanonicalizer.requireNullableString(enterprise.get("organization"), "organization"));
+        }
+        if (enterprise.containsKey("division")) {
+            user.setEnterpriseDivision(ScimCanonicalizer.requireNullableString(enterprise.get("division"), "division"));
+        }
+        if (enterprise.containsKey("department")) {
+            user.setEnterpriseDepartment(ScimCanonicalizer.requireNullableString(enterprise.get("department"), "department"));
+        }
+        if (enterprise.containsKey(KEY_MANAGER)) {
+            applyEnterpriseManager(user, enterprise.get(KEY_MANAGER));
+        }
     }
 
     @SuppressWarnings("unchecked")
-    private static void applyEnterpriseManager(ScimUser user, Object managerObj) {
+    public static void applyEnterpriseManager(ScimUser user, Object managerObj) {
+        if (managerObj == null) {
+            user.setEnterpriseManagerValue(null);
+            user.setEnterpriseManagerRef(null);
+            user.setEnterpriseManagerDisplay(null);
+            return;
+        }
         if (managerObj instanceof Map<?, ?> rawManager) {
             Map<String, Object> manager = (Map<String, Object>) rawManager;
-            user.setEnterpriseManagerValue((String) manager.get(KEY_VALUE));
-            user.setEnterpriseManagerRef((String) manager.get("$ref"));
-            user.setEnterpriseManagerDisplay((String) manager.get(KEY_DISPLAY_NAME));
+            // Validate scalar types inside manager (RFC 7643 §2.3.8)
+            for (Map.Entry<String, Object> entry : manager.entrySet()) {
+                ScimCanonicalizer.requireNullableString(entry.getValue(), "manager." + entry.getKey());
+            }
+            String mgrVal = ScimCanonicalizer.requireNullableString(manager.get(KEY_VALUE), "manager.value");
+            String rawRef = ScimCanonicalizer.requireNullableString(manager.get("$ref"), "manager.$ref");
+            boolean hasVal = mgrVal != null && !mgrVal.isBlank();
+            boolean hasRef = rawRef != null && !rawRef.isBlank();
+
+            if (!hasVal && !hasRef) {
+                user.setEnterpriseManagerValue(null);
+                user.setEnterpriseManagerRef(null);
+                user.setEnterpriseManagerDisplay(null);
+                return;
+            }
+
+            String refUserId = null;
+            String trimmedRef = null;
+            if (hasRef) {
+                trimmedRef = rawRef.trim();
+                refUserId = extractAndValidateManagerUserIdFromRef(trimmedRef, "manager.$ref");
+            }
+
+            if (hasVal) {
+                String canonicalVal = canonicalizeManagerIdentifier(ScimCanonicalizer.normalizeNfc(mgrVal.trim()));
+                if (refUserId != null && !canonicalVal.startsWith("bulkId:") && !refUserId.startsWith("bulkId:")
+                        && !canonicalVal.equals(refUserId)) {
+                    throw new ScimException(400, "invalidValue",
+                            "Attribute 'manager.$ref' does not match manager value '" + mgrVal.trim() + "'");
+                }
+                user.setEnterpriseManagerValue(canonicalVal);
+                user.setEnterpriseManagerRef(trimmedRef);
+            } else {
+                user.setEnterpriseManagerValue(refUserId);
+                user.setEnterpriseManagerRef(trimmedRef);
+            }
+            // RFC 7643 §4.3: manager.displayName is mutability="readOnly"; ignore client input and resolve server-side
+            user.setEnterpriseManagerDisplay(null);
             return;
         }
         if (managerObj instanceof String managerValue) {
-            user.setEnterpriseManagerValue(managerValue);
+            String normalized = ScimCanonicalizer.normalizeNfc(managerValue.trim());
+            if (normalized.isEmpty()) {
+                user.setEnterpriseManagerValue(null);
+                user.setEnterpriseManagerRef(null);
+                user.setEnterpriseManagerDisplay(null);
+            } else {
+                user.setEnterpriseManagerValue(canonicalizeManagerIdentifier(normalized));
+                user.setEnterpriseManagerRef(null);
+                user.setEnterpriseManagerDisplay(null);
+            }
+            return;
         }
+        throw new ScimException(400, "invalidValue", "Enterprise manager must be a complex object or string");
+    }
+
+    public static String canonicalizeManagerIdentifier(String rawId) {
+        if (rawId == null) {
+            return null;
+        }
+        String trimmed = rawId.trim();
+        if (trimmed.length() == 36) {
+            try {
+                UUID parsed = UUID.fromString(trimmed);
+                if (parsed.toString().equalsIgnoreCase(trimmed)) {
+                    return parsed.toString();
+                }
+            } catch (IllegalArgumentException _) {
+                // Keep non-UUID identifiers as-is
+            }
+        }
+        return trimmed;
+    }
+
+    public static String extractAndValidateManagerUserIdFromRef(String rawRef, String fieldName) {
+        String normalizedUri;
+        try {
+            normalizedUri = new java.net.URI(rawRef).normalize().toString();
+        } catch (java.net.URISyntaxException e) {
+            throw new ScimException(400, "invalidValue",
+                    "Invalid URI reference for attribute '" + fieldName + "': " + e.getMessage(), e);
+        }
+        String tail = ScimCanonicalizer.extractCanonicalScimResourceTail(normalizedUri);
+        if (tail == null || !tail.startsWith("Users/")) {
+            throw new ScimException(400, "invalidValue",
+                    "Attribute '" + fieldName + "' must reference a SCIM User URI: " + rawRef);
+        }
+        String userId = tail.substring("Users/".length());
+        if (userId.isBlank()) {
+            throw new ScimException(400, "invalidValue",
+                    "Attribute '" + fieldName + "' must include a non-empty User identifier: " + rawRef);
+        }
+        return userId;
     }
 
     public static ScimUserEmail buildEmail(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_EMAILS, KEY_PRIMARY);
         ScimUserEmail email = new ScimUserEmail();
-        email.setValue((String) item.get(KEY_VALUE));
-        email.setType(normalizeCanonical((String) item.get(KEY_TYPE), EMAIL_TYPES, "emails.type"));
-        email.setDisplay((String) item.get(KEY_DISPLAY));
-        email.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        String rawVal = ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "emails.value");
+        email.setValue(ScimCanonicalizer.canonicalizeEmail(rawVal));
+        email.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), EMAIL_TYPES, "work", "emails.type"));
+        email.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "emails.display"));
+        email.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "emails.primary", false));
         return email;
     }
 
     public static ScimUserPhoneNumber buildPhone(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_PHONE_NUMBERS, KEY_PRIMARY);
         ScimUserPhoneNumber phone = new ScimUserPhoneNumber();
-        phone.setValue((String) item.get(KEY_VALUE));
-        phone.setType(normalizeCanonical((String) item.get(KEY_TYPE), PHONE_TYPES, "phoneNumbers.type"));
-        phone.setDisplay((String) item.get(KEY_DISPLAY));
-        phone.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        String rawVal = ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "phoneNumbers.value");
+        phone.setValue(ScimCanonicalizer.canonicalizePhoneNumber(rawVal));
+        phone.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), PHONE_TYPES, null, "phoneNumbers.type"));
+        phone.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "phoneNumbers.display"));
+        phone.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "phoneNumbers.primary", false));
         return phone;
     }
 
     public static ScimUserAddress buildAddress(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_ADDRESSES, KEY_PRIMARY);
         ScimUserAddress address = new ScimUserAddress();
-        address.setFormatted((String) item.get(KEY_FORMATTED));
-        address.setStreetAddress((String) item.get("streetAddress"));
-        address.setLocality((String) item.get("locality"));
-        address.setRegion((String) item.get("region"));
-        address.setPostalCode((String) item.get("postalCode"));
-        address.setCountry((String) item.get("country"));
-        address.setType(normalizeCanonical((String) item.get(KEY_TYPE), ADDRESS_TYPES, "addresses.type"));
-        address.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        address.setFormatted(ScimCanonicalizer.requireNullableString(item.get(KEY_FORMATTED), "addresses.formatted"));
+        address.setStreetAddress(ScimCanonicalizer.requireNullableString(item.get("streetAddress"), "addresses.streetAddress"));
+        address.setLocality(ScimCanonicalizer.requireNullableString(item.get("locality"), "addresses.locality"));
+        address.setRegion(ScimCanonicalizer.requireNullableString(item.get("region"), "addresses.region"));
+        address.setPostalCode(ScimCanonicalizer.requireNullableString(item.get("postalCode"), "addresses.postalCode"));
+        address.setCountry(normalizeCountry(ScimCanonicalizer.requireNullableString(item.get("country"), "addresses.country")));
+        address.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), ADDRESS_TYPES, null, "addresses.type"));
+        address.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "addresses.primary", false));
         return address;
     }
 
+    public static String normalizeCountry(String raw) {
+        if (raw == null) return null;
+        String c = raw.trim().toUpperCase(Locale.ROOT);
+        if (c.isEmpty()) return null;
+        if (c.length() == 2 && ISO_ALPHA2_COUNTRIES.contains(c)) {
+            return c;
+        }
+        return ISO_ALPHA3_TO_ALPHA2.get(c);
+    }
+
     public static ScimUserIm buildIm(Map<String, Object> item) {
+        validateFlatComplexElement(item, "ims", KEY_PRIMARY);
         ScimUserIm im = new ScimUserIm();
-        im.setValue((String) item.get(KEY_VALUE));
-        im.setType(normalizeCanonical((String) item.get(KEY_TYPE), IM_TYPES, "ims.type"));
-        im.setDisplay((String) item.get(KEY_DISPLAY));
-        im.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        String rawVal = ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "ims.value");
+        im.setValue(ScimCanonicalizer.canonicalizeIm(rawVal));
+        im.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), IM_TYPES, null, "ims.type"));
+        im.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "ims.display"));
+        im.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "ims.primary", false));
         return im;
     }
 
     public static ScimUserPhoto buildPhoto(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_PHOTOS, KEY_PRIMARY);
         ScimUserPhoto photo = new ScimUserPhoto();
-        photo.setValue((String) item.get(KEY_VALUE));
-        photo.setType(normalizeCanonical((String) item.get(KEY_TYPE), PHOTO_TYPES, "photos.type"));
-        photo.setDisplay((String) item.get(KEY_DISPLAY));
-        photo.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        photo.setValue(ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "photos.value"));
+        photo.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), PHOTO_TYPES, null, "photos.type"));
+        photo.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "photos.display"));
+        photo.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "photos.primary", false));
         return photo;
     }
 
     public static ScimUserEntitlement buildEntitlement(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_ENTITLEMENTS, KEY_PRIMARY);
         ScimUserEntitlement entitlement = new ScimUserEntitlement();
-        entitlement.setValue((String) item.get(KEY_VALUE));
-        entitlement.setType((String) item.get(KEY_TYPE));
-        entitlement.setDisplay((String) item.get(KEY_DISPLAY));
-        entitlement.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        entitlement.setValue(ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "entitlements.value"));
+        entitlement.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), null, null, "entitlements.type"));
+        entitlement.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "entitlements.display"));
+        entitlement.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "entitlements.primary", false));
         return entitlement;
     }
 
     public static ScimUserRole buildRole(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_ROLES, KEY_PRIMARY);
         ScimUserRole role = new ScimUserRole();
-        role.setValue((String) item.get(KEY_VALUE));
-        role.setType((String) item.get(KEY_TYPE));
-        role.setDisplay((String) item.get(KEY_DISPLAY));
-        role.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
+        role.setValue(ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "roles.value"));
+        role.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), null, null, "roles.type"));
+        role.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "roles.display"));
+        role.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "roles.primary", false));
         return role;
     }
 
     public static ScimUserX509Certificate buildCertificate(Map<String, Object> item) {
+        validateFlatComplexElement(item, KEY_X509_CERTIFICATES, KEY_PRIMARY);
         ScimUserX509Certificate certificate = new ScimUserX509Certificate();
-        certificate.setValue((String) item.get(KEY_VALUE));
-        certificate.setType((String) item.get(KEY_TYPE));
-        certificate.setDisplay((String) item.get(KEY_DISPLAY));
-        certificate.setPrimaryFlag(toBoolean(item.get(KEY_PRIMARY)));
-        validateBinary(certificate.getValue(), "x509Certificates.value");
+        String rawVal = ScimCanonicalizer.requireNullableString(item.get(KEY_VALUE), "x509Certificates.value");
+        if (rawVal != null) {
+            ScimCertificateValidator.validateSingleDerCertificateOrBinary(rawVal, "x509Certificates.value");
+            certificate.setValue(rawVal.trim());
+        }
+        certificate.setType(ScimCanonicalizer.canonicalizeType(item.get(KEY_TYPE), null, null, "x509Certificates.type"));
+        certificate.setDisplay(ScimCanonicalizer.requireNullableString(item.get(KEY_DISPLAY), "x509Certificates.display"));
+        certificate.setPrimaryFlag(ScimCanonicalizer.requireBoolean(item.get(KEY_PRIMARY), "x509Certificates.primary", false));
         return certificate;
+    }
+
+    private static void validateFlatComplexElement(Map<String, Object> item, String parentName, String booleanKey) {
+        if (item == null) {
+            throw new ScimException(400, "invalidValue", "Element of '" + parentName + "' must not be null");
+        }
+        for (Map.Entry<String, Object> entry : item.entrySet()) {
+            Object val = entry.getValue();
+            if (val instanceof Map<?, ?> || val instanceof List<?>) {
+                throw new ScimException(400, "invalidValue",
+                        "Complex attribute '" + parentName + "." + entry.getKey() + "' cannot contain nested complex values");
+            }
+            if (val != null && !entry.getKey().equalsIgnoreCase(booleanKey) && !(val instanceof String)) {
+                throw new ScimException(400, "invalidValue",
+                        "Attribute '" + parentName + "." + entry.getKey() + "' must be a string");
+            }
+        }
     }
 
     private static Map<String, Object> emailToMap(ScimUserEmail e) {
@@ -479,29 +840,5 @@ public class ScimUserMapper {
         if (c.getDisplay() != null) m.put(KEY_DISPLAY, c.getDisplay());
         m.put(KEY_PRIMARY, c.isPrimaryFlag());
         return m;
-    }
-
-    private static String normalizeCanonical(String value, Set<String> allowed, String fieldName) {
-        if (value == null) return null;
-        String normalized = value.toLowerCase(Locale.ROOT);
-        if (!allowed.contains(normalized)) {
-            throw new ScimException(400, "invalidValue", "Invalid " + fieldName + ": " + value);
-        }
-        return normalized;
-    }
-
-    private static void validateBinary(String value, String fieldName) {
-        if (value == null || value.isBlank()) return;
-        try {
-            java.util.Base64.getDecoder().decode(value);
-        } catch (IllegalArgumentException e) {
-            throw new ScimException(400, "invalidValue", fieldName + " must be base64-encoded", e);
-        }
-    }
-
-    private static boolean toBoolean(Object value) {
-        if (value instanceof Boolean b) return b;
-        if (value instanceof String s) return Boolean.parseBoolean(s);
-        return false;
     }
 }

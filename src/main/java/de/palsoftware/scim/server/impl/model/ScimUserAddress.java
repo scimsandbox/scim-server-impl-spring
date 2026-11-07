@@ -1,5 +1,7 @@
 package de.palsoftware.scim.server.impl.model;
 
+import java.util.Objects;
+
 public class ScimUserAddress {
 
     private String formatted;
@@ -82,5 +84,38 @@ public class ScimUserAddress {
 
     public void setPrimaryFlag(boolean primaryFlag) {
         this.primaryFlag = primaryFlag;
+    }
+
+    public ScimUserAddress copy() {
+        ScimUserAddress copy = new ScimUserAddress();
+        copy.setFormatted(this.formatted);
+        copy.setStreetAddress(this.streetAddress);
+        copy.setLocality(this.locality);
+        copy.setRegion(this.region);
+        copy.setPostalCode(this.postalCode);
+        copy.setCountry(this.country);
+        copy.setType(this.type);
+        copy.setPrimaryFlag(this.primaryFlag);
+        return copy;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        ScimUserAddress that = (ScimUserAddress) o;
+        return primaryFlag == that.primaryFlag &&
+                Objects.equals(formatted, that.formatted) &&
+                Objects.equals(streetAddress, that.streetAddress) &&
+                Objects.equals(locality, that.locality) &&
+                Objects.equals(region, that.region) &&
+                Objects.equals(postalCode, that.postalCode) &&
+                Objects.equals(country, that.country) &&
+                Objects.equals(type, that.type);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(formatted, streetAddress, locality, region, postalCode, country, type, primaryFlag);
     }
 }

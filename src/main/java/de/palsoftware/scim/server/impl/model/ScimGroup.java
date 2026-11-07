@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import org.hibernate.annotations.OnDelete;
 import org.hibernate.annotations.OnDeleteAction;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -42,17 +43,18 @@ public class ScimGroup {
     private Long version;
 
     @OneToMany(mappedBy = "group", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @org.hibernate.annotations.BatchSize(size = 200)
     private List<ScimGroupMembership> members = new ArrayList<>();
 
     @PrePersist
     protected void onCreate() {
-        createdAt = Instant.now();
-        lastModified = Instant.now();
+        createdAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        lastModified = createdAt;
     }
 
     @PreUpdate
     protected void onUpdate() {
-        lastModified = Instant.now();
+        lastModified = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     // Getters and Setters
@@ -94,7 +96,7 @@ public class ScimGroup {
     }
 
     public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
+        this.createdAt = createdAt != null ? createdAt.truncatedTo(ChronoUnit.MICROS) : null;
     }
 
     public Instant getLastModified() {
@@ -102,7 +104,7 @@ public class ScimGroup {
     }
 
     public void setLastModified(Instant lastModified) {
-        this.lastModified = lastModified;
+        this.lastModified = lastModified != null ? lastModified.truncatedTo(ChronoUnit.MICROS) : null;
     }
 
     public Long getVersion() {

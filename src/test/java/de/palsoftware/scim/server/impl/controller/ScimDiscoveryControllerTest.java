@@ -1,29 +1,63 @@
 package de.palsoftware.scim.server.impl.controller;
 
+import de.palsoftware.scim.server.impl.model.ScimGroup;
+import de.palsoftware.scim.server.impl.model.ScimUser;
+import de.palsoftware.scim.server.impl.model.ScimUserEmail;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
+import de.palsoftware.scim.server.impl.service.ScimGroupService;
+import de.palsoftware.scim.server.impl.service.ScimUserService;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.http.ResponseEntity;
+import org.springframework.mock.web.MockHttpServletRequest;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.when;
 
 class ScimDiscoveryControllerTest {
 
-    private final ScimDiscoveryController controller = new ScimDiscoveryController();
+    private ScimUserService userService;
+    private ScimGroupService groupService;
+    private ScimDiscoveryController controller;
+    private MockHttpServletRequest request;
+    private final String workspaceId = "24fb7ccb-3458-44da-b5c8-92b97e2ad702";
+    private final UUID wsUuid = UUID.fromString(workspaceId);
+
+    @BeforeEach
+    void setUp() {
+        userService = Mockito.mock(ScimUserService.class);
+        groupService = Mockito.mock(ScimGroupService.class);
+        controller = new ScimDiscoveryController(userService, groupService);
+        request = new MockHttpServletRequest();
+        request.setServerName("localhost");
+        request.setServerPort(8080);
+        request.setScheme("http");
+    }
 
     @Test
     void getServiceProviderConfigReturns200() {
-        ResponseEntity<Map<String, Object>> response = controller.getServiceProviderConfig(null);
+        ResponseEntity<Map<String, Object>> response = controller.getServiceProviderConfig(null, null);
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
         assertTrue(response.getBody().containsKey("schemas"));
+        Map<?, ?> changePassword = (Map<?, ?>) response.getBody().get("changePassword");
+        assertNotNull(changePassword);
+        assertEquals(true, changePassword.get("supported"));
+        Map<?, ?> pagination = (Map<?, ?>) response.getBody().get("pagination");
+        assertNotNull(pagination);
+        assertEquals(true, pagination.get("cursor"));
+        assertEquals(true, pagination.get("index"));
+        assertEquals(3600, pagination.get("cursorTimeout"));
     }
 
     @Test
     void getSchemasReturns200() {
-        ResponseEntity<Map<String, Object>> response = controller.getSchemas(null);
+        ResponseEntity<Map<String, Object>> response = controller.getSchemas(null, null);
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
         assertEquals(List.of("urn:ietf:params:scim:api:messages:2.0:ListResponse"), response.getBody().get("schemas"));
@@ -34,11 +68,678 @@ class ScimDiscoveryControllerTest {
         assertThrows(ScimException.class, () -> controller.getSchemaById("unknown-schema", null));
     }
 
+    private ScimUser createMockUser(String userName) {
+        ScimUser user = new ScimUser();
+        user.setId(UUID.randomUUID());
+        user.setUserName(userName);
+        user.setCreatedAt(java.time.Instant.now());
+        user.setLastModified(java.time.Instant.now());
+        user.setVersion(1L);
+        return user;
+    }
+
+    private ScimGroup createMockGroup(String displayName) {
+        ScimGroup group = new ScimGroup();
+        group.setId(UUID.randomUUID());
+        group.setDisplayName(displayName);
+        group.setCreatedAt(java.time.Instant.now());
+        group.setLastModified(java.time.Instant.now());
+        group.setVersion(1L);
+        return group;
+    }
+
     @Test
-    void globalSearchThrows501NotImplemented() {
-        ScimException ex = assertThrows(ScimException.class, () ->
-                controller.globalSearchNotImplemented("24fb7ccb-3458-44da-b5c8-92b97e2ad702", null));
-        assertEquals(501, ex.getHttpStatus());
-        assertEquals("Global cross-resource search is not implemented", ex.getMessage());
+    void rootSearchGetUsersOnlyReturns200() {
+        ScimUser user = createMockUser("alice");
+
+        Map<String, Object> userCountResult = Map.of("totalResults", 1L, "Resources", Collections.emptyList());
+        Map<String, Object> userPageResult = Map.of("totalResults", 1L, "Resources", List.of(user));
+
+        when(userService.listUsers(eq(wsUuid), anyString(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(userCountResult);
+        when(userService.listUsers(eq(wsUuid), anyString(), eq("userName"), eq("ascending"), eq(1), eq(100)))
+                .thenReturn(userPageResult);
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, "meta.resourceType eq \"User\"", 1, 100, null, "userName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(1L, body.get("totalResults"));
+        assertEquals(1, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(1, resources.size());
+        assertEquals("alice", resources.get(0).get("userName"));
+    }
+
+    @Test
+    void rootSearchGetGroupsOnlyReturns200() {
+        ScimGroup group = createMockGroup("Engineers");
+
+        Map<String, Object> groupCountResult = Map.of("totalResults", 1L, "Resources", Collections.emptyList());
+        Map<String, Object> groupPageResult = Map.of("totalResults", 1L, "Resources", List.of(group));
+
+        when(groupService.listGroups(eq(wsUuid), anyString(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(groupCountResult);
+        when(groupService.listGroups(eq(wsUuid), anyString(), eq("displayName"), eq("ascending"), eq(1), eq(100)))
+                .thenReturn(groupPageResult);
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, "meta.resourceType eq \"Group\"", 1, 100, null, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(1L, body.get("totalResults"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(1, resources.size());
+        assertEquals("Engineers", resources.get(0).get("displayName"));
+    }
+
+    @Test
+    void rootSearchGetUnfilteredReturnsUsersAndGroups() {
+        ScimUser user = createMockUser("bob");
+        ScimGroup group = createMockGroup("Developers");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(9)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(2L, body.get("totalResults"));
+        assertEquals(2, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("bob", resources.get(0).get("userName"));
+        assertEquals("Developers", resources.get(1).get("displayName"));
+    }
+
+    @Test
+    void rootSearchPostReturns200() {
+        ScimUser user = createMockUser("carol");
+
+        when(userService.listUsers(eq(wsUuid), eq("userName sw \"carol\""), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        // Group service throws unknown attribute for userName
+        when(groupService.listGroups(eq(wsUuid), eq("userName sw \"carol\""), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenThrow(new ScimException(400, "invalidFilter", "Unknown attribute: userName"));
+
+        when(userService.listUsers(eq(wsUuid), eq("userName sw \"carol\""), isNull(), eq("ascending"), eq(1), eq(10)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        Map<String, Object> searchBody = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"),
+                "filter", "userName sw \"carol\"",
+                "count", 10
+        );
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchPost(
+                workspaceId, searchBody, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(1L, body.get("totalResults"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(1, resources.size());
+        assertEquals("carol", resources.get(0).get("userName"));
+    }
+
+    @Test
+    void rootSearchInvalidCompatReturns404() {
+        assertThrows(ScimException.class, () ->
+                controller.rootSearchGet(workspaceId, null, 1, 10, null, null, "ascending",
+                        null, null, "invalid-compat-value", request));
+    }
+
+    @Test
+    void rootMethodNotAllowedReturns405() {
+        ResponseEntity<Map<String, Object>> response = controller.rootMethodNotAllowed(null);
+        assertEquals(405, response.getStatusCode().value());
+        assertEquals("GET", response.getHeaders().getFirst("Allow"));
+    }
+
+    @Test
+    void discoveryEndpoints_MethodNotAllowed_EmitsAllowHeader() {
+        // DSC_11/12: RFC 7644 §4 / RFC 7231 §6.5.5 - 405 Method Not Allowed must emit Allow header
+        ResponseEntity<Map<String, Object>> spcResp = controller.serviceProviderConfigMethodNotAllowed(null);
+        assertEquals(405, spcResp.getStatusCode().value());
+        assertEquals("GET", spcResp.getHeaders().getFirst("Allow"));
+
+        ResponseEntity<Map<String, Object>> schemasResp = controller.schemasMethodNotAllowed(null, null);
+        assertEquals(405, schemasResp.getStatusCode().value());
+        assertEquals("GET", schemasResp.getHeaders().getFirst("Allow"));
+
+        ResponseEntity<Map<String, Object>> rtResp = controller.resourceTypesMethodNotAllowed(null, null);
+        assertEquals(405, rtResp.getStatusCode().value());
+        assertEquals("GET", rtResp.getHeaders().getFirst("Allow"));
+
+        ResponseEntity<Map<String, Object>> searchResp = controller.searchMethodNotAllowed(null);
+        assertEquals(405, searchResp.getStatusCode().value());
+        assertEquals("POST", searchResp.getHeaders().getFirst("Allow"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingOrdersAcrossTypesAscending() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(2L, body.get("totalResults"));
+        assertEquals(2, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Alice", resources.get(0).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Bob", resources.get(1).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingOrdersAcrossTypesDescending() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, "displayName", "descending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(2L, body.get("totalResults"));
+        assertEquals(2, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Bob", resources.get(0).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Alice", resources.get(1).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingWithAttributeProjection() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, "displayName", "ascending",
+                "id,meta.resourceType", null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Group", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("User", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+        assertFalse(resources.get(0).containsKey("displayName"));
+        assertFalse(resources.get(1).containsKey("displayName"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingNullsLastOnAscending() {
+        ScimUser userNullDisplay = createMockUser("user1");
+        userNullDisplay.setDisplayName(null);
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userNullDisplay)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Alice", resources.get(0).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertNull(resources.get(1).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingNullsFirstOnDescending() {
+        ScimUser userNullDisplay = createMockUser("user1");
+        userNullDisplay.setDisplayName(null);
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userNullDisplay)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, "displayName", "descending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertNull(resources.get(0).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Alice", resources.get(1).get("displayName"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchPostCombinedSortingOrdersAcrossTypes() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        Map<String, Object> searchBody = Map.of(
+                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"),
+                "sortBy", "displayName",
+                "sortOrder", "ascending",
+                "count", 10
+        );
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchPost(
+                workspaceId, searchBody, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("Alice", resources.get(0).get("displayName"));
+        assertEquals("Bob", resources.get(1).get("displayName"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingPaginationSlice() {
+        ScimUser userBob = createMockUser("bob");
+        userBob.setDisplayName("Bob");
+        ScimGroup groupAlice = createMockGroup("Alice");
+        ScimGroup groupCharlie = createMockGroup("Charlie");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 2L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 2L, "Resources", List.of(groupAlice, groupCharlie)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 2, 1, null, "displayName", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(3L, body.get("totalResults"));
+        assertEquals(2, body.get("startIndex"));
+        assertEquals(1, body.get("itemsPerPage"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(1, resources.size());
+        assertEquals("Bob", resources.get(0).get("displayName"));
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingEnterpriseDepartmentAscending() {
+        ScimUser user = createMockUser("dave");
+        user.setDisplayName("Dave");
+        user.setEnterpriseDepartment("Engineering");
+        ScimGroup group = createMockGroup("Admins");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null,
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        // User has non-null department "Engineering", Group has null enterprise department -> User first, Group last
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    @Test
+    void rootSearchCombinedSortingEmailPrimaryAscending() {
+        ScimUser user = createMockUser("eve");
+        user.setDisplayName("Eve");
+        ScimUserEmail email = new ScimUserEmail();
+        email.setValue("eve@example.com");
+        email.setPrimaryFlag(true);
+        user.setEmails(List.of(email));
+        ScimGroup group = createMockGroup("Auditors");
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), eq("emails"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(groupService.listGroups(eq(wsUuid), isNull(), eq("emails"), eq("ascending"), eq(1), anyInt()))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, 1, 10, null, "emails", "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) response.getBody().get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("User", ((Map<?, ?>) resources.get(0).get("meta")).get("resourceType"));
+        assertEquals("Group", ((Map<?, ?>) resources.get(1).get("meta")).get("resourceType"));
+    }
+
+    // ─── Tests for Root Search Cursor Pagination ─────────────────────────
+
+    @Test
+    void testRootSearchGetWithCursorReturnsNextCursor() {
+        ScimUser user = createMockUser("Alice");
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 5L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 0L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(Map.of("totalResults", 5L, "Resources", List.of(user)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, null, 1, "", null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertNull(body.get("startIndex"));
+        assertNull(body.get("previousCursor"));
+        assertNotNull(body.get("nextCursor"));
+        assertTrue(((String) body.get("nextCursor")).startsWith("scim_cur_"));
+    }
+
+    @Test
+    void testRootSearchGetMutualExclusivityCursorAndStartIndex() {
+        ScimException ex = assertThrows(ScimException.class, () -> controller.rootSearchGet(
+                workspaceId, null, 1, 10, "", null, "ascending",
+                null, null, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+        assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testRootSearchPostWithCursorReturnsNextCursor() {
+        ScimUser user = createMockUser("Bob");
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 3L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 0L, "Resources", Collections.emptyList()));
+
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(Map.of("totalResults", 3L, "Resources", List.of(user)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        Map<String, Object> reqBody = Map.of("cursor", "", "count", 1);
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchPost(
+                workspaceId, reqBody, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertNull(body.get("startIndex"));
+        assertNotNull(body.get("nextCursor"));
+    }
+
+    @Test
+    void testRootSearchPostMutualExclusivityCursorAndStartIndex() {
+        Map<String, Object> reqBody = Map.of("cursor", "", "startIndex", 1);
+
+        ScimException ex = assertThrows(ScimException.class, () -> controller.rootSearchPost(
+                workspaceId, reqBody, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+        assertEquals("Cannot specify both cursor and startIndex", ex.getMessage());
+    }
+
+    @Test
+    void testRootSearchGetInvalidCursorThrowsInvalidCursor() {
+        ScimException ex = assertThrows(ScimException.class, () -> controller.rootSearchGet(
+                workspaceId, null, null, 10, "bogus-cursor", null, "ascending",
+                null, null, null, request));
+
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidCursor", ex.getScimType());
+    }
+
+    @Test
+    void testDiscoveryFilterRejectedWith403() {
+        ScimException spcEx = assertThrows(ScimException.class,
+                () -> controller.getServiceProviderConfig(null, "patch.supported eq true"));
+        assertEquals(403, spcEx.getHttpStatus());
+
+        ScimException schemasEx = assertThrows(ScimException.class,
+                () -> controller.getSchemas(null, "id eq \"urn:ietf:params:scim:schemas:core:2.0:User\""));
+        assertEquals(403, schemasEx.getHttpStatus());
+
+        ScimException rtEx = assertThrows(ScimException.class,
+                () -> controller.getResourceTypes(request, workspaceId, null, "name eq \"User\""));
+        assertEquals(403, rtEx.getHttpStatus());
+    }
+
+    @Test
+    void testRootSearchPostInvalidCountThrows400() {
+        Map<String, Object> reqBody = Map.of("count", "not-a-number");
+        ScimException ex = assertThrows(ScimException.class,
+                () -> controller.rootSearchPost(workspaceId, reqBody, null, request));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void rootSearchNegatedResourceTypeQueriesGroupsAsWellAsUsers() {
+        String filter = "not (meta.resourceType eq \"User\")";
+        ScimGroup group = createMockGroup("OpsTeam");
+
+        when(userService.listUsers(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 0L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(10)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, filter, 1, 10, null, null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(1L, body.get("totalResults"));
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(1, resources.size());
+        assertEquals("OpsTeam", resources.get(0).get("displayName"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void rootSearchDisjunctiveResourceTypeOrDisplayNameQueriesBothUsersAndGroups() {
+        String filter = "meta.resourceType eq \"User\" or displayName eq \"Engineers\"";
+        ScimUser user = createMockUser("alice");
+        ScimGroup group = createMockGroup("Engineers");
+
+        when(userService.listUsers(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", Collections.emptyList()));
+        when(userService.listUsers(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(1)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
+        when(groupService.listGroups(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(9)))
+                .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
+        when(userService.getUserGroupsBatch(anyList(), anyString()))
+                .thenReturn(Collections.emptyMap());
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, filter, 1, 10, null, null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(2L, body.get("totalResults"));
+        List<Map<String, Object>> resources = (List<Map<String, Object>>) body.get("Resources");
+        assertEquals(2, resources.size());
+        assertEquals("alice", resources.get(0).get("userName"));
+        assertEquals("Engineers", resources.get(1).get("displayName"));
+    }
+
+    @Test
+    void testRootSearchGet_CountZeroWithCursor_OmitsNextAndPreviousCursors() {
+        String token = ScimCursorCodec.encodeCursor(wsUuid, 2, 3600);
+        when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 3L, "Resources", Collections.emptyList()));
+        when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(0)))
+                .thenReturn(Map.of("totalResults", 2L, "Resources", Collections.emptyList()));
+
+        ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
+                workspaceId, null, null, 0, token, null, "ascending",
+                null, null, null, request);
+
+        assertEquals(200, response.getStatusCode().value());
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertEquals(5L, body.get("totalResults"));
+        assertEquals(0, body.get("itemsPerPage"));
+        assertEquals(Collections.emptyList(), body.get("Resources"));
+        assertNull(body.get("nextCursor"));
+        assertNull(body.get("previousCursor"));
     }
 }

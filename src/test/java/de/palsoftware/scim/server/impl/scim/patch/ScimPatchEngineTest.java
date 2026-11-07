@@ -82,7 +82,30 @@ class ScimPatchEngineTest {
         assertEquals("en-US", user.getLocale());
         assertEquals("UTC", user.getTimezone());
         assertTrue(user.isActive());
-        assertEquals("secret", user.getPassword());
+        assertNotNull(user.getPassword());
+        assertTrue(user.getPassword().startsWith("$2a$") || user.getPassword().startsWith("$2b$"));
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("secret", user.getPassword()));
+    }
+
+    @Test
+    void testPatchAlreadyHashedPasswordNotRehashed() {
+        String preHashed = "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr";
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "path", "password", "value", preHashed)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+        assertEquals(preHashed, user.getPassword());
+    }
+
+    @Test
+    void testPatchPasswordViaValueMapWithoutPath() {
+        Map<String, Object> value = Map.of("password", "newSecret123");
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "value", value)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+        assertNotNull(user.getPassword());
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("newSecret123", user.getPassword()));
     }
 
     @Test
@@ -138,7 +161,8 @@ class ScimPatchEngineTest {
         ScimPatchEngine.applyPatchOperations(user, opsObjMgr);
         assertEquals("alice", user.getEnterpriseManagerValue());
         assertEquals("http://example.com/Users/alice", user.getEnterpriseManagerRef());
-        assertEquals("Alice", user.getEnterpriseManagerDisplay());
+        // RFC 7643 §4.3: manager.displayName is readOnly and ignored from client input (resolved by ScimUserService)
+        assertNull(user.getEnterpriseManagerDisplay());
 
         List<Map<String, Object>> opsErr = List.of(Map.of("op", "add", "path", enterprisePrefix + "unknown", "value", "Val"));
         assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsErr));
@@ -176,7 +200,7 @@ class ScimPatchEngineTest {
         assertEquals("123 Main St", user.getAddresses().get(0).getStreetAddress());
         assertEquals("12345", user.getAddresses().get(0).getPostalCode());
         assertEquals("NY", user.getAddresses().get(0).getRegion());
-        assertEquals("USA", user.getAddresses().get(0).getCountry());
+        assertEquals("US", user.getAddresses().get(0).getCountry());
         
         assertEquals(1, user.getIms().size());
         assertEquals("bob_aim", user.getIms().get(0).getValue());
@@ -195,6 +219,23 @@ class ScimPatchEngineTest {
         
         List<Map<String, Object>> opsErr2 = List.of(Map.of("op", "add", "path", "unknownCollection", "value", List.of("123")));
         assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsErr2));
+    }
+
+    @Test
+    void testAddOperation_missingValue_throws400() {
+        // PAT_24: RFC 7644 §3.5.2.1 - The 'add' operation MUST contain a 'value' member
+        List<Map<String, Object>> opsWithoutValue = List.of(Map.of("op", "add", "path", "title"));
+        ScimException ex = assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsWithoutValue));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("invalidValue", ex.getScimType());
+
+        Map<String, Object> opWithNullValue = new HashMap<>();
+        opWithNullValue.put("op", "add");
+        opWithNullValue.put("path", "title");
+        opWithNullValue.put("value", null);
+        ScimException exNull = assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, List.of(opWithNullValue)));
+        assertEquals(400, exNull.getHttpStatus());
+        assertEquals("invalidValue", exNull.getScimType());
     }
 
     // ── REPLACE TESTS ──
@@ -481,10 +522,18 @@ class ScimPatchEngineTest {
         email.setType("work");
         user.getEmails().add(email);
         
+        // RFC 7643 §7: canonicalValues on 'type' are advisory; custom string types are accepted
         List<Map<String, Object>> ops = List.of(
             Map.of("op", "replace", "path", "emails[type eq \"work\"].type", "value", "invalid_type")
         );
-        assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, ops));
+        ScimPatchEngine.applyPatchOperations(user, ops);
+        assertEquals("invalid_type", email.getType());
+
+        // Non-string type must fail with 400 invalidValue
+        List<Map<String, Object>> opsNonStringType = List.of(
+            Map.of("op", "replace", "path", "emails[type eq \"invalid_type\"].type", "value", 123)
+        );
+        assertThrows(ScimException.class, () -> ScimPatchEngine.applyPatchOperations(user, opsNonStringType));
         
         // Invalid cert
         ScimUserX509Certificate cert = new ScimUserX509Certificate();
@@ -536,5 +585,248 @@ class ScimPatchEngineTest {
         ScimPatchEngine.applyPatchOperations(user, opsRemove);
         assertNull(user.getNameFamilyName());
         assertNull(user.getNameGivenName());
+    }
+
+    @Test
+    void testPat27_filteredReplacePrimary_unsetsExistingPrimary() {
+        ScimUserEmail workEmail = new ScimUserEmail();
+        workEmail.setValue("work@example.com");
+        workEmail.setType("work");
+        workEmail.setPrimaryFlag(true);
+
+        ScimUserEmail homeEmail = new ScimUserEmail();
+        homeEmail.setValue("home@example.com");
+        homeEmail.setType("home");
+        homeEmail.setPrimaryFlag(false);
+
+        user.getEmails().add(workEmail);
+        user.getEmails().add(homeEmail);
+
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "replace", "path", "emails[type eq \"home\"].primary", "value", true)
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+
+        assertFalse(workEmail.isPrimaryFlag());
+        assertTrue(homeEmail.isPrimaryFlag());
+        assertEquals(1, user.getEmails().stream().filter(ScimUserEmail::isPrimaryFlag).count());
+
+        // Filtered replace with Map value (no subAttr) setting primary: true on work
+        List<Map<String, Object>> mapReplaceOps = List.of(
+            Map.of("op", "replace", "path", "emails[type eq \"work\"]",
+                   "value", Map.of("value", "work2@example.com", "type", "work", "primary", true))
+        );
+        ScimPatchEngine.applyPatchOperations(user, mapReplaceOps);
+
+        assertEquals("work2@example.com", user.getEmails().get(0).getValue());
+        assertTrue(user.getEmails().get(0).isPrimaryFlag());
+        assertFalse(user.getEmails().get(1).isPrimaryFlag());
+        assertEquals(1, user.getEmails().stream().filter(ScimUserEmail::isPrimaryFlag).count());
+    }
+
+    @Test
+    void testPat27_addAndReplaceMultiValued_normalizesSinglePrimary() {
+        ScimUserEmail existing = new ScimUserEmail();
+        existing.setValue("first@example.com");
+        existing.setType("work");
+        existing.setPrimaryFlag(true);
+        user.getEmails().add(existing);
+
+        // PATCH add with primary: true should unset existing primary
+        List<Map<String, Object>> addOps = List.of(
+            Map.of("op", "add", "path", "emails",
+                   "value", List.of(Map.of("value", "second@example.com", "type", "home", "primary", true)))
+        );
+        ScimPatchEngine.applyPatchOperations(user, addOps);
+
+        assertEquals(2, user.getEmails().size());
+        assertFalse(user.getEmails().get(0).isPrimaryFlag());
+        assertTrue(user.getEmails().get(1).isPrimaryFlag());
+
+        // Whole-array PATCH replace with multiple primary: true entries keeps at most one primary
+        List<Map<String, Object>> replaceOps = List.of(
+            Map.of("op", "replace", "path", "emails", "value", List.of(
+                Map.of("value", "a@example.com", "type", "work", "primary", true),
+                Map.of("value", "b@example.com", "type", "home", "primary", true)
+            ))
+        );
+        ScimPatchEngine.applyPatchOperations(user, replaceOps);
+
+        assertEquals(2, user.getEmails().size());
+        assertEquals(1, user.getEmails().stream().filter(ScimUserEmail::isPrimaryFlag).count());
+        assertFalse(user.getEmails().get(0).isPrimaryFlag());
+        assertTrue(user.getEmails().get(1).isPrimaryFlag());
+    }
+
+    @Test
+    void testAddEmails_deduplicatesCaseInsensitivelyAndMergesPrimary() {
+        ScimUserEmail existingWork = new ScimUserEmail();
+        existingWork.setValue("dup@example.com");
+        existingWork.setType("work");
+        existingWork.setPrimaryFlag(false);
+
+        ScimUserEmail existingHome = new ScimUserEmail();
+        existingHome.setValue("home@example.com");
+        existingHome.setType("home");
+        existingHome.setPrimaryFlag(true);
+
+        user.getEmails().add(existingWork);
+        user.getEmails().add(existingHome);
+
+        List<Map<String, Object>> ops = List.of(
+            Map.of("op", "add", "path", "emails",
+                   "value", List.of(Map.of("value", "DUP@EXAMPLE.COM", "type", "WORK", "primary", true)))
+        );
+        ScimPatchEngine.applyPatchOperations(user, ops);
+
+        assertEquals(2, user.getEmails().size());
+        assertTrue(user.getEmails().get(0).isPrimaryFlag());
+        assertFalse(user.getEmails().get(1).isPrimaryFlag());
+    }
+
+    @Test
+    void testFilteredPatch_caseExactPhotosAndCertificates() {
+        ScimUserX509Certificate cert = new ScimUserX509Certificate();
+        cert.setValue("QUJD");
+        cert.setDisplay("OldCert");
+        user.getX509Certificates().add(cert);
+
+        ScimUserPhoto photo = new ScimUserPhoto();
+        photo.setValue("https://example.com/Photos/UserPic.png");
+        photo.setType("photo");
+        user.getPhotos().add(photo);
+
+        // Wrong casing on caseExact=true x509Certificates.value must NOT match (400 noTarget on replace, no-op on remove)
+        ScimException certReplaceMismatch = assertThrows(ScimException.class, () ->
+                ScimPatchEngine.applyPatchOperations(user, List.of(
+                        Map.of("op", "replace", "path", "x509Certificates[value eq \"qujd\"].display", "value", "WrongCase"))));
+        assertEquals(400, certReplaceMismatch.getHttpStatus());
+        assertEquals("noTarget", certReplaceMismatch.getScimType());
+
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "remove", "path", "x509Certificates[value eq \"qujd\"]")));
+        assertEquals(1, user.getX509Certificates().size());
+
+        // Exact casing on x509Certificates.value and photos.value matches
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "replace", "path", "x509Certificates[value eq \"QUJD\"].display", "value", "ExactCert")));
+        assertEquals("ExactCert", user.getX509Certificates().get(0).getDisplay());
+
+        ScimException photoReplaceMismatch = assertThrows(ScimException.class, () ->
+                ScimPatchEngine.applyPatchOperations(user, List.of(
+                        Map.of("op", "replace", "path", "photos[value eq \"https://example.com/photos/userpic.png\"].display", "value", "Wrong"))));
+        assertEquals("noTarget", photoReplaceMismatch.getScimType());
+
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "remove", "path", "photos[value eq \"https://example.com/Photos/UserPic.png\"]")));
+        assertTrue(user.getPhotos().isEmpty());
+    }
+
+    @Test
+    void testFilteredPatch_addressSubAttributesAndCompoundFilterExpressions() {
+        ScimUserAddress workBerlin = new ScimUserAddress();
+        workBerlin.setType("work");
+        workBerlin.setLocality("Berlin");
+        workBerlin.setStreetAddress("Unter den Linden 1");
+
+        ScimUserAddress workMunich = new ScimUserAddress();
+        workMunich.setType("work");
+        workMunich.setLocality("Munich");
+        workMunich.setStreetAddress("Marienplatz 1");
+
+        user.getAddresses().add(workBerlin);
+        user.getAddresses().add(workMunich);
+
+        // Compound filter on addresses.locality + type
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "replace", "path", "addresses[locality eq \"Berlin\" and type eq \"work\"].postalCode", "value", "10117")));
+        assertEquals("10117", workBerlin.getPostalCode());
+        assertNull(workMunich.getPostalCode());
+
+        // Non-eq operator (sw) + pr in filtered remove
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "remove", "path", "addresses[streetAddress sw \"Marien\" and locality pr]")));
+        assertEquals(1, user.getAddresses().size());
+        assertEquals("Berlin", user.getAddresses().get(0).getLocality());
+    }
+
+    @Test
+    void testFilteredPatch_malformedFilterAndUnbalancedBrackets_throwScimErrorEvenOnEmptyRemove() {
+        // user.getEmails() is empty: op=remove with invalid filter syntax MUST still fail with 400 invalidFilter
+        for (String badFilterPath : List.of(
+                "emails[type eq]",
+                "emails[type eq\"work\"]",
+                "emails[unknownSub eq \"x\"]",
+                "emails[]")) {
+            ScimException ex = assertThrows(ScimException.class, () ->
+                    ScimPatchEngine.applyPatchOperations(user, List.of(
+                            Map.of("op", "remove", "path", badFilterPath))),
+                    "Expected 400 invalidFilter for path: " + badFilterPath);
+            assertEquals(400, ex.getHttpStatus());
+            assertEquals("invalidFilter", ex.getScimType());
+        }
+
+        // Unbalanced brackets in add, replace, and remove MUST fail with 400 invalidPath
+        for (String unbalanced : List.of("emails[type eq \"work\"", "emails]")) {
+            ScimException addEx = assertThrows(ScimException.class, () ->
+                    ScimPatchEngine.applyPatchOperations(user, List.of(
+                            Map.of("op", "add", "path", unbalanced, "value", "x"))));
+            assertEquals(400, addEx.getHttpStatus());
+            assertEquals("invalidPath", addEx.getScimType());
+
+            ScimException repEx = assertThrows(ScimException.class, () ->
+                    ScimPatchEngine.applyPatchOperations(user, List.of(
+                            Map.of("op", "replace", "path", unbalanced, "value", "x"))));
+            assertEquals(400, repEx.getHttpStatus());
+            assertEquals("invalidPath", repEx.getScimType());
+
+            ScimException remEx = assertThrows(ScimException.class, () ->
+                    ScimPatchEngine.applyPatchOperations(user, List.of(
+                            Map.of("op", "remove", "path", unbalanced))));
+            assertEquals(400, remEx.getHttpStatus());
+            assertEquals("invalidPath", remEx.getScimType());
+        }
+    }
+
+    @Test
+    // RFC7643-2.4-63934b
+    void testEnterpriseManagerPatch_refOnlyNoStaleRefAndPathlessConflictRejection() {
+        String ent = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+        UUID mgr1 = UUID.randomUUID();
+        UUID mgr2 = UUID.randomUUID();
+
+        // 1. $ref-only manager object via PATCH sets enterpriseManagerValue and enterpriseManagerRef
+        ScimPatchEngine.applyPatchOperations(user, List.of(Map.of(
+                "op", "replace",
+                "path", ent + ":manager",
+                "value", Map.of("$ref", "https://legacy.example/scim/v1/Users/" + mgr1))));
+        assertEquals(mgr1.toString(), user.getEnterpriseManagerValue());
+        assertEquals("https://legacy.example/scim/v1/Users/" + mgr1, user.getEnterpriseManagerRef());
+
+        // 2. Patching manager.value clears stale enterpriseManagerRef
+        ScimPatchEngine.applyPatchOperations(user, List.of(Map.of(
+                "op", "replace",
+                "path", ent + ":manager.value",
+                "value", mgr2.toString())));
+        assertEquals(mgr2.toString(), user.getEnterpriseManagerValue());
+        assertNull(user.getEnterpriseManagerRef());
+
+        // 3. Patching manager.$ref updates enterpriseManagerValue to match the new User $ref
+        ScimPatchEngine.applyPatchOperations(user, List.of(Map.of(
+                "op", "replace",
+                "path", ent + ":manager.$ref",
+                "value", "../Users/" + mgr1)));
+        assertEquals(mgr1.toString(), user.getEnterpriseManagerValue());
+        assertEquals("../Users/" + mgr1, user.getEnterpriseManagerRef());
+
+        // 4. Pathless PATCH with conflicting manager.value and manager.$ref fails with 400 invalidValue
+        ScimException conflict = assertThrows(ScimException.class, () ->
+                ScimPatchEngine.applyPatchOperations(user, List.of(Map.of(
+                        "op", "replace",
+                        "value", Map.of(
+                                ent + ":manager.value", mgr1.toString(),
+                                ent + ":manager.$ref", "/Users/" + mgr2)))));
+        assertEquals(400, conflict.getHttpStatus());
+        assertEquals("invalidValue", conflict.getScimType());
     }
 }

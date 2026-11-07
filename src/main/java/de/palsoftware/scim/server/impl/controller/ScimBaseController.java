@@ -1,7 +1,14 @@
 package de.palsoftware.scim.server.impl.controller;
 
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.model.ScimListResponse;
+import de.palsoftware.scim.server.impl.scim.pagination.ScimCursorCodec;
+import de.palsoftware.scim.server.impl.scim.projection.ScimAttributeProjector;
+import de.palsoftware.scim.server.impl.scim.util.ScimPreferHeaderUtil;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -12,6 +19,7 @@ abstract class ScimBaseController {
     }
 
     protected static final String KEY_SCHEMAS = "schemas";
+    protected static final MediaType SCIM_JSON = MediaType.parseMediaType("application/scim+json");
 
     protected static UUID resolveWorkspaceId(String workspaceId) {
         try {
@@ -77,21 +85,114 @@ abstract class ScimBaseController {
 
     protected static void applyAttributeProjection(Map<String, Object> resource,
                                                     String attributes, String excludedAttributes) {
-        // Defense-in-depth: never return password (returned="never" per RFC 7643 §7)
-        resource.remove("password");
+        ScimAttributeProjector.applyProjection(resource, attributes, excludedAttributes);
+    }
 
-        if (attributes != null && !attributes.isBlank()) {
-            Set<String> requested = parseAttrList(attributes);
-            requested.add(KEY_SCHEMAS);
-            requested.add("id");
-            requested.add("meta");
-            resource.keySet().retainAll(requested);
-        } else if (excludedAttributes != null && !excludedAttributes.isBlank()) {
-            Set<String> excluded = parseAttrList(excludedAttributes);
-            excluded.remove(KEY_SCHEMAS);
-            excluded.remove("id");
-            resource.keySet().removeAll(excluded);
+    @SuppressWarnings("unchecked")
+    protected static List<Map<String, Object>> extractAndValidatePatchOperations(Map<String, Object> body) {
+        if (body == null) {
+            throw new ScimException(400, "invalidSyntax", "PATCH request body is required");
         }
+        Object rawSchemas = body.get(KEY_SCHEMAS);
+        if (!(rawSchemas instanceof List<?> schemaList)
+                || !schemaList.contains("urn:ietf:params:scim:api:messages:2.0:PatchOp")) {
+            throw new ScimException(400, "invalidValue", "PATCH request must include PatchOp schema");
+        }
+
+        Object rawOps = body.get("Operations");
+        if (rawOps == null) {
+            for (Map.Entry<String, Object> entry : body.entrySet()) {
+                if ("operations".equalsIgnoreCase(entry.getKey())) {
+                    rawOps = entry.getValue();
+                    break;
+                }
+            }
+        }
+        if (!(rawOps instanceof List<?> list) || list.isEmpty()) {
+            throw new ScimException(400, "invalidSyntax", "PATCH Operations must be a non-empty array");
+        }
+
+        List<Map<String, Object>> operations = new ArrayList<>(list.size());
+        for (Object elem : list) {
+            if (!(elem instanceof Map<?, ?> opMap)) {
+                throw new ScimException(400, "invalidSyntax", "Each PATCH operation must be a JSON object");
+            }
+            Object opField = opMap.get("op");
+            if (!(opField instanceof String s) || s.isBlank()) {
+                throw new ScimException(400, "invalidValue", "Each PATCH operation must include a non-empty string 'op'");
+            }
+            operations.add((Map<String, Object>) opMap);
+        }
+        return operations;
+    }
+
+    protected static List<String> extractModifiedPatchAttributes(List<Map<String, Object>> operations) {
+        if (operations == null || operations.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Set<String> attrs = new LinkedHashSet<>();
+        for (Map<String, Object> op : operations) {
+            Object rawPath = op.get("path");
+            if (rawPath instanceof String p && !p.isBlank()) {
+                // Normalize filtered valuePath 'emails[type eq "work"].value' -> 'emails.value'
+                String cleaned = stripBracketFilters(p.trim());
+                if (!cleaned.isEmpty()) {
+                    attrs.add(cleaned);
+                }
+            } else if (op.get("value") instanceof Map<?, ?> valMap) {
+                for (Map.Entry<?, ?> entry : valMap.entrySet()) {
+                    if (entry.getKey() instanceof String k && !k.isBlank()
+                            && !"schemas".equalsIgnoreCase(k)
+                            && !"id".equalsIgnoreCase(k)
+                            && !"meta".equalsIgnoreCase(k)) {
+                        String trimmedKey = k.trim();
+                        if ("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User".equalsIgnoreCase(trimmedKey)
+                                && entry.getValue() instanceof Map<?, ?> extMap && !extMap.isEmpty()) {
+                            for (Object subK : extMap.keySet()) {
+                                if (subK instanceof String subStr && !subStr.isBlank()) {
+                                    attrs.add(trimmedKey + ":" + subStr.trim());
+                                }
+                            }
+                        } else {
+                            attrs.add(trimmedKey);
+                        }
+                    }
+                }
+            }
+        }
+        return new ArrayList<>(attrs);
+    }
+
+    /**
+     * Strips bracketed valuePath filter segments (e.g. {@code emails[type eq "work"].value -> emails.value})
+     * in linear O(n) time without regular expressions to avoid polynomial backtracking on unclosed brackets.
+     */
+    static String stripBracketFilters(String path) {
+        if (path == null) {
+            return "";
+        }
+        int firstOpen = path.indexOf('[');
+        if (firstOpen < 0) {
+            return path;
+        }
+        int len = path.length();
+        StringBuilder sb = new StringBuilder(len);
+        int cursor = 0;
+        int openIdx = firstOpen;
+        while (openIdx >= 0) {
+            sb.append(path, cursor, openIdx);
+            int closeIdx = path.indexOf(']', openIdx + 1);
+            if (closeIdx < 0) {
+                sb.append(path, openIdx, len);
+                return sb.toString();
+            }
+            cursor = closeIdx + 1;
+            openIdx = path.indexOf('[', cursor);
+        }
+        if (cursor < len) {
+            sb.append(path, cursor, len);
+        }
+        return sb.toString();
     }
 
     protected static Set<String> parseAttrList(String attrList) {
@@ -155,5 +256,78 @@ abstract class ScimBaseController {
             return str.isBlank() ? null : str.trim();
         }
         return value.toString().trim();
+    }
+
+    protected static Integer extractOptionalIntParam(Map<String, Object> body, String key) {
+        if (body == null || !body.containsKey(key) || body.get(key) == null) {
+            return null;
+        }
+        Object raw = body.get(key);
+        if (raw instanceof Integer i) {
+            return i;
+        }
+        if (raw instanceof Long l) {
+            return l.intValue();
+        }
+        if (raw instanceof Short s) {
+            return (int) s;
+        }
+        throw new ScimException(400, "invalidValue", "Parameter '" + key + "' must be an integer");
+    }
+
+    protected static String extractOptionalStringParam(Map<String, Object> body, String key) {
+        if (body == null || !body.containsKey(key) || body.get(key) == null) {
+            return null;
+        }
+        Object raw = body.get(key);
+        if (raw instanceof String s) {
+            return s;
+        }
+        throw new ScimException(400, "invalidValue", "Parameter '" + key + "' must be a string");
+    }
+
+    protected static <T> ResponseEntity<T> buildAsyncAcceptedResponse(String baseUrl, UUID txnId, HttpServletRequest request) {
+        String location = baseUrl + "/Events/" + txnId;
+        String preferenceApplied = ScimPreferHeaderUtil.buildPreferenceAppliedHeader(request);
+        return ResponseEntity.status(HttpStatus.ACCEPTED)
+                .header(ScimPreferHeaderUtil.SET_TXN_HEADER, txnId.toString())
+                .header(ScimPreferHeaderUtil.PREFERENCE_APPLIED_HEADER, preferenceApplied)
+                .header("Location", location)
+                .build();
+    }
+
+    protected ResponseEntity<Map<String, Object>> buildPaginatedListResponse(
+            UUID wsId,
+            int startIndex,
+            String cursor,
+            Integer effectiveCount,
+            long totalResults,
+            List<Map<String, Object>> resources) {
+        boolean zeroCountRequested = effectiveCount != null && effectiveCount == 0;
+        List<Map<String, Object>> effectiveResources = zeroCountRequested
+                ? Collections.emptyList()
+                : (resources != null ? resources : Collections.emptyList());
+        int itemsPerPage = zeroCountRequested ? 0 : effectiveResources.size();
+
+        if (cursor != null) {
+            int currentOffset = Math.max(0, startIndex - 1);
+            String nextCursor = null;
+            if (!zeroCountRequested && itemsPerPage > 0 && ((long) currentOffset + itemsPerPage) < totalResults) {
+                nextCursor = ScimCursorCodec.encodeCursor(wsId, currentOffset + itemsPerPage);
+            }
+            String previousCursor = null;
+            if (!zeroCountRequested && currentOffset > 0 && totalResults > 0) {
+                int step = (effectiveCount != null && effectiveCount > 0) ? effectiveCount : itemsPerPage;
+                int prevOffset = Math.max(0, currentOffset - step);
+                previousCursor = ScimCursorCodec.encodeCursor(wsId, prevOffset);
+            }
+            return ResponseEntity.ok()
+                    .contentType(SCIM_JSON)
+                    .body(ScimListResponse.ofCursor(effectiveResources, totalResults, nextCursor, previousCursor).toMap());
+        }
+
+        return ResponseEntity.ok()
+                .contentType(SCIM_JSON)
+                .body(ScimListResponse.ofIndex(effectiveResources, totalResults, startIndex).toMap());
     }
 }

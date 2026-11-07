@@ -41,9 +41,12 @@ public class ScimGroupMapper {
         Map<String, Object> meta = new LinkedHashMap<>(6);
         meta.put("resourceType", "Group");
         meta.put("created", group.getCreatedAt().toString());
-        meta.put("lastModified", group.getLastModified().toString());
+        String lastModified = (group.getVersion() == null || group.getVersion() == 0)
+                ? group.getCreatedAt().toString()
+                : group.getLastModified().toString();
+        meta.put("lastModified", lastModified);
         meta.put("location", baseUrl + "/Groups/" + group.getId());
-        meta.put("version", "W/\"" + group.getVersion() + "\"");
+        meta.put("version", "W/\"" + (group.getVersion() != null ? group.getVersion() : 0) + "\"");
         result.put("meta", meta);
 
         return result;
@@ -53,11 +56,14 @@ public class ScimGroupMapper {
         Map<String, Object> map = new LinkedHashMap<>(5);
         map.put("value", m.getMemberValue().toString());
 
-        String type = m.getMemberType() != null ? m.getMemberType() : "User";
-        String resourcePath = "User".equalsIgnoreCase(type) ? "/Users/" : "/Groups/";
+        String rawType = m.getMemberType();
+        boolean hasType = rawType != null && !rawType.isBlank();
+        String resourcePath = (hasType && "Group".equalsIgnoreCase(rawType)) ? "/Groups/" : "/Users/";
         map.put("$ref", baseUrl + resourcePath + m.getMemberValue());
         if (m.getDisplay() != null) map.put("display", m.getDisplay());
-        map.put("type", type);
+        if (hasType) {
+            map.put("type", rawType);
+        }
         return map;
     }
 }
