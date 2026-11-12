@@ -1,0 +1,9 @@
+# Spring Boot 3.5.x reached OSS EOL at 3.5.16 (Spring Framework 6.2.19).
+# The two CVEs below have no OSS patch in Spring Framework 6.2.x (fixed in 7.0.9+ / Spring Boot 4.x)
+# and are not reachable in this pure JSON SCIM 2.0 REST API. Remove upon Spring Boot 4.1 migration.
+
+# Spring MVC XsltView RCE/SSRF: no OSS patch in 6.2.x; not applicable (no XSLT view rendering).
+CVE-2026-47884 exp:2027-01-31
+
+# Spring MVC/WebFlux SSE view-fragment stream corruption: no OSS patch in 6.2.x; not applicable (no SSE HTML view fragment rendering).
+CVE-2026-47890 exp:2027-01-31
