@@ -47,6 +47,7 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
+          trivyignores: ".trivyignore"
           ignore-unfixed: true
           vuln-type: os,library
 

@@ -22,6 +22,7 @@ buildNumber.properties
 logs
 *.tmp
 temp
+.trivyignore
 trivy-image.sarif
 
 # OS & editor files
