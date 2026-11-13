@@ -14,6 +14,8 @@ import de.palsoftware.scim.server.impl.model.ScimUserRole;
 import de.palsoftware.scim.server.impl.model.ScimUserX509Certificate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
+import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.*;
 
 /**
@@ -22,6 +24,7 @@ import java.util.*;
  */
 public class ScimUserMapper {
 
+    public static final int MAX_BCRYPT_PASSWORD_BYTES = 72;
     private static final BCryptPasswordEncoder PASSWORD_ENCODER = new BCryptPasswordEncoder();
 
     private ScimUserMapper() {
@@ -311,6 +314,10 @@ public class ScimUserMapper {
         if (password == null || password.isEmpty()) {
             return password;
         }
+        if (password.getBytes(StandardCharsets.UTF_8).length > MAX_BCRYPT_PASSWORD_BYTES) {
+            throw new ScimException(400, "invalidValue",
+                    "Password must not exceed " + MAX_BCRYPT_PASSWORD_BYTES + " UTF-8 bytes");
+        }
         if (password.startsWith("$2a$") || password.startsWith("$2b$") || password.startsWith("$2y$")) {
             return password;
         }
@@ -594,7 +601,7 @@ public class ScimUserMapper {
             return;
         }
         if (managerObj instanceof String managerValue) {
-            String normalized = ScimCanonicalizer.normalizeNfc(managerValue.trim());
+            String normalized = Normalizer.normalize(managerValue.trim(), Normalizer.Form.NFC);
             if (normalized.isEmpty()) {
                 user.setEnterpriseManagerValue(null);
                 user.setEnterpriseManagerRef(null);

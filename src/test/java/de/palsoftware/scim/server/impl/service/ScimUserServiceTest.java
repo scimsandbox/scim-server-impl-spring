@@ -425,7 +425,7 @@ class ScimUserServiceTest {
 
         service.deleteUser(workspaceId, userId);
 
-        verify(membershipRepository).deleteByMemberValue(userId);
+        verify(membershipRepository).deleteByMemberValueAndWorkspaceId(userId, workspaceId);
         verify(userRepository).delete(user);
         verify(workspaceActivityService).touchWorkspace(workspaceId);
     }
@@ -442,9 +442,9 @@ class ScimUserServiceTest {
         membership.setMemberValue(userId);
         membership.setMemberType("User");
 
-        when(membershipRepository.findByMemberValue(userId)).thenReturn(List.of(membership));
+        when(membershipRepository.findByMemberValueAndWorkspaceId(userId, workspaceId)).thenReturn(List.of(membership));
 
-        List<Map<String, Object>> groups = service.getUserGroups(userId, "http://localhost");
+        List<Map<String, Object>> groups = service.getUserGroups(workspaceId, userId, "http://localhost");
 
         assertThat(groups).hasSize(1);
         assertThat(groups.get(0))
@@ -466,9 +466,10 @@ class ScimUserServiceTest {
         membership.setMemberValue(userId);
         membership.setMemberType("User");
 
-        when(membershipRepository.findByMemberValueIn(List.of(userId))).thenReturn(List.of(membership));
+        when(membershipRepository.findByMemberValueInAndWorkspaceId(List.of(userId), workspaceId))
+                .thenReturn(List.of(membership));
 
-        Map<UUID, List<Map<String, Object>>> batchMap = service.getUserGroupsBatch(List.of(userId), "http://loc");
+        Map<UUID, List<Map<String, Object>>> batchMap = service.getUserGroupsBatch(workspaceId, List.of(userId), "http://loc");
 
         assertThat(batchMap).containsKey(userId);
         List<Map<String, Object>> userList = batchMap.get(userId);
@@ -591,7 +592,7 @@ class ScimUserServiceTest {
         assertThat((List<ScimUser>) page.get("Resources")).containsExactly(matchingUser);
         assertThat(page.get("totalResults")).isEqualTo(1L);
         org.mockito.Mockito.verify(membershipRepository, org.mockito.Mockito.never())
-                .findByMemberValueIn(any());
+                .findByMemberValueInAndWorkspaceId(any(), any());
     }
 
     @Test
@@ -614,5 +615,18 @@ class ScimUserServiceTest {
         original.getEmails().get(0).setType("home");
         assertThat(original.hasSameMutableState(snapshot)).isFalse();
         assertThat(snapshot.getEmails().get(0).getType()).isEqualTo("work");
+    }
+
+    @Test
+    void groupMembershipOperations_AreStrictlyScopedByWorkspaceId() {
+        UUID otherWorkspaceId = UUID.randomUUID();
+        when(membershipRepository.findByMemberValueAndWorkspaceId(userId, workspaceId))
+                .thenReturn(Collections.emptyList());
+
+        List<Map<String, Object>> groupsInWs = service.getUserGroups(workspaceId, userId, "http://localhost");
+        assertThat(groupsInWs).isEmpty();
+        verify(membershipRepository).findByMemberValueAndWorkspaceId(userId, workspaceId);
+        org.mockito.Mockito.verify(membershipRepository, org.mockito.Mockito.never())
+                .findByMemberValueAndWorkspaceId(userId, otherWorkspaceId);
     }
 }

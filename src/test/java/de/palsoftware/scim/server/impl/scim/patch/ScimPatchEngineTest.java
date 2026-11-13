@@ -106,6 +106,23 @@ class ScimPatchEngineTest {
         ScimPatchEngine.applyPatchOperations(user, ops);
         assertNotNull(user.getPassword());
         assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("newSecret123", user.getPassword()));
+
+        // >72 UTF-8 byte password in PATCH (25x 3-byte '€' = 75 bytes) returns 400 invalidValue
+        List<Map<String, Object>> utf8PathOps = List.of(
+            Map.of("op", "replace", "path", "password", "value", "€".repeat(25))
+        );
+        ScimException ex1 = assertThrows(ScimException.class,
+                () -> ScimPatchEngine.applyPatchOperations(user, utf8PathOps));
+        assertEquals(400, ex1.getHttpStatus());
+        assertEquals("invalidValue", ex1.getScimType());
+
+        List<Map<String, Object>> utf8MapOps = List.of(
+            Map.of("op", "replace", "value", Map.of("password", "€".repeat(25)))
+        );
+        ScimException ex2 = assertThrows(ScimException.class,
+                () -> ScimPatchEngine.applyPatchOperations(user, utf8MapOps));
+        assertEquals(400, ex2.getHttpStatus());
+        assertEquals("invalidValue", ex2.getScimType());
     }
 
     @Test

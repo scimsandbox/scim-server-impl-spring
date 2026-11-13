@@ -235,4 +235,135 @@ class RequestResponseLoggingFilterTest {
         assertTrue(redacted.contains("\"[REDACTED]\""));
         assertTrue(elapsedMs < 500, "Expected linear-time redaction (<500ms), took " + elapsedMs + "ms");
     }
+
+    @Test
+    void nonBulkRequestWithOversizedContentLength_ImmediatelyReturns413ScimErrorWithoutCallingChain() throws Exception {
+        byte[] smallBuffer = "{\"userName\":\"alice\"}".getBytes(StandardCharsets.UTF_8);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users") {
+            @Override
+            public long getContentLengthLong() {
+                return RequestResponseLoggingFilter.MAX_NON_BULK_PAYLOAD_SIZE + 1L;
+            }
+
+            @Override
+            public int getContentLength() {
+                return RequestResponseLoggingFilter.MAX_NON_BULK_PAYLOAD_SIZE + 1;
+            }
+        };
+        request.setContentType("application/scim+json");
+        request.setContent(smallBuffer);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = Mockito.mock(FilterChain.class);
+
+        filter.doFilter(request, response, chain);
+
+        assertEquals(413, response.getStatus());
+        assertTrue(response.getContentAsString().contains("urn:ietf:params:scim:api:messages:2.0:Error"));
+        assertTrue(response.getContentAsString().contains("\"status\":\"413\""));
+        Mockito.verifyNoInteractions(chain);
+    }
+
+    @Test
+    void nonBulkChunkedStreamExceeding1MiB_AbortsImmediatelyAtLimitWithoutReadingRemainder() throws Exception {
+        int totalStreamSize = RequestResponseLoggingFilter.MAX_NON_BULK_PAYLOAD_SIZE * 4; // 4 MiB stream
+        java.util.concurrent.atomic.AtomicInteger bytesReadFromUnderlying = new java.util.concurrent.atomic.AtomicInteger();
+
+        MockHttpServletRequest baseRequest = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users");
+        baseRequest.setContentType("application/scim+json");
+        baseRequest.addHeader("Transfer-Encoding", "chunked");
+
+        jakarta.servlet.http.HttpServletRequest chunkedRequest = new jakarta.servlet.http.HttpServletRequestWrapper(baseRequest) {
+            @Override
+            public int getContentLength() {
+                return -1;
+            }
+
+            @Override
+            public long getContentLengthLong() {
+                return -1L;
+            }
+
+            @Override
+            public jakarta.servlet.ServletInputStream getInputStream() {
+                return new jakarta.servlet.ServletInputStream() {
+                    private int pos = 0;
+
+                    @Override
+                    public boolean isFinished() {
+                        return pos >= totalStreamSize;
+                    }
+
+                    @Override
+                    public boolean isReady() {
+                        return true;
+                    }
+
+                    @Override
+                    public void setReadListener(jakarta.servlet.ReadListener readListener) {
+                        // synchronous mock stream
+                    }
+
+                    @Override
+                    public int read() {
+                        if (pos >= totalStreamSize) {
+                            return -1;
+                        }
+                        pos++;
+                        bytesReadFromUnderlying.incrementAndGet();
+                        return 'x';
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) {
+                        if (pos >= totalStreamSize) {
+                            return -1;
+                        }
+                        int toRead = Math.min(len, Math.min(4096, totalStreamSize - pos));
+                        java.util.Arrays.fill(b, off, off + toRead, (byte) 'x');
+                        pos += toRead;
+                        bytesReadFromUnderlying.addAndGet(toRead);
+                        return toRead;
+                    }
+                };
+            }
+        };
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = (servletRequest, servletResponse) -> servletRequest.getInputStream().readAllBytes();
+
+        filter.doFilter(chunkedRequest, response, chain);
+
+        assertEquals(413, response.getStatus());
+        assertTrue(response.getContentAsString().contains("urn:ietf:params:scim:api:messages:2.0:Error"));
+        assertTrue(response.getContentAsString().contains("\"status\":\"413\""));
+        // Must abort right after crossing 1 MiB (within a single read chunk), never buffering all 4 MiB!
+        assertTrue(bytesReadFromUnderlying.get() <= RequestResponseLoggingFilter.MAX_NON_BULK_PAYLOAD_SIZE + 8192,
+                "Stream read too many bytes before aborting: " + bytesReadFromUnderlying.get());
+    }
+
+    @Test
+    void redactPasswords_AlsoRedactsAuthorizationFieldsAndNeverPersistsAuthHeader() throws Exception {
+        String payload = "{\"userName\":\"alice\",\"authorization\":\"Bearer secret-jwt\",\"Authorization\":\"Basic abc\"}";
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users");
+        request.setContentType("application/scim+json");
+        request.addHeader("Authorization", "Bearer top-secret-workspace-token");
+        request.setContent(payload.getBytes(StandardCharsets.UTF_8));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        FilterChain chain = (req, res) -> {
+            req.getInputStream().readAllBytes();
+            ((HttpServletResponse) res).setStatus(201);
+            res.getWriter().write("{\"id\":\"1\"}");
+        };
+
+        filter.doFilter(request, response, chain);
+
+        ArgumentCaptor<ScimRequestLog> logCaptor = ArgumentCaptor.forClass(ScimRequestLog.class);
+        verify(logRepository).save(logCaptor.capture());
+        ScimRequestLog saved = logCaptor.getValue();
+        assertFalse(saved.getRequestBody().contains("secret-jwt"));
+        assertFalse(saved.getRequestBody().contains("Basic abc"));
+        assertFalse(saved.getRequestBody().contains("top-secret-workspace-token"));
+        assertTrue(saved.getRequestBody().contains("\"[REDACTED]\""));
+    }
 }

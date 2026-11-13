@@ -31,6 +31,12 @@ public class ScimExceptionHandler {
 
     @ExceptionHandler(ScimException.class)
     public ResponseEntity<Map<String, Object>> handleScimException(ScimException ex) {
+        if (ex.getHttpStatus() >= 500) {
+            if (!"Internal server error".equals(ex.getMessage())) {
+                log.error("Internal SCIM exception (status={})", ex.getHttpStatus(), ex);
+            }
+            return buildErrorResponse(ex.getHttpStatus(), ex.getScimType(), "Internal server error");
+        }
         return buildErrorResponse(ex.getHttpStatus(), ex.getScimType(), ex.getMessage());
     }
 
@@ -87,13 +93,20 @@ public class ScimExceptionHandler {
 
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<Map<String, Object>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        String param = ex.getName() != null ? ex.getName() : "parameter";
+        String param = ex.getName();
         return buildErrorResponse(400, "invalidValue", "Invalid value for parameter '" + param + "'");
     }
 
-    @ExceptionHandler({MethodArgumentNotValidException.class, MissingServletRequestParameterException.class, IllegalArgumentException.class})
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Map<String, Object>> handleMissingParameter(MissingServletRequestParameterException ex) {
+        return buildErrorResponse(400, "invalidValue",
+                "Missing required parameter '" + ex.getParameterName() + "'");
+    }
+
+    @ExceptionHandler({MethodArgumentNotValidException.class, IllegalArgumentException.class})
     public ResponseEntity<Map<String, Object>> handleBadRequest(Exception ex) {
-        return buildErrorResponse(400, "invalidValue", ex.getMessage());
+        log.warn("Invalid request argument: {}", ex.getMessage());
+        return buildErrorResponse(400, "invalidValue", "Invalid request value");
     }
 
     @ExceptionHandler(Exception.class)

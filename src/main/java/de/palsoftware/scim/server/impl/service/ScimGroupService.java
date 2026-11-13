@@ -935,7 +935,7 @@ public class ScimGroupService {
         }
         if (RESOURCE_TYPE_GROUP.equalsIgnoreCase(trimmedType)) {
             Optional<ScimGroup> grpOpt = groupRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-            if ((grpOpt == null || grpOpt.isEmpty()) && !Objects.equals(group.getId(), memberId)) {
+            if (grpOpt.isEmpty() && !Objects.equals(group.getId(), memberId)) {
                 throw new ScimException(404, "invalidValue",
                         RESOURCE_TYPE_GROUP + " not found: " + memberId);
             }
@@ -1023,7 +1023,7 @@ public class ScimGroupService {
     public void deleteGroup(UUID workspaceId, UUID groupId, String ifMatch) {
         ScimGroup group = getGroup(workspaceId, groupId);
         validateIfMatch(ifMatch, group.getVersion());
-        membershipRepository.deleteByMemberValue(groupId);
+        membershipRepository.deleteByMemberValueAndWorkspaceId(groupId, workspaceId);
         groupRepository.delete(group);
         workspaceActivityService.touchWorkspace(workspaceId);
     }
@@ -1078,7 +1078,7 @@ public class ScimGroupService {
         } else if (resolved.inferredType() != null) {
             if (RESOURCE_TYPE_USER.equalsIgnoreCase(resolved.inferredType())) {
                 Optional<ScimUser> userOpt = userRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-                if (userOpt != null && userOpt.isPresent()) {
+                if (userOpt.isPresent()) {
                     memberType = RESOURCE_TYPE_USER;
                     ScimUser resolvedUser = userOpt.get();
                     resolvedDisplay = resolvedUser.getDisplayName() != null
@@ -1098,7 +1098,7 @@ public class ScimGroupService {
                     resolvedDisplay = grpOpt.get().getDisplayName();
                 } else {
                     Optional<ScimUser> userOpt = userRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-                    if (userOpt != null && userOpt.isPresent()) {
+                    if (userOpt.isPresent()) {
                         throw new ScimException(400, "invalidValue",
                                 "Member '$ref' points to Groups/" + memberId + " but target resource is a User");
                     }
@@ -1109,7 +1109,7 @@ public class ScimGroupService {
         } else {
             // When both 'type' and '$ref' are omitted, check User first, then Group within the same workspace
             Optional<ScimUser> userOpt = userRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-            if (userOpt != null && userOpt.isPresent()) {
+            if (userOpt.isPresent()) {
                 memberType = RESOURCE_TYPE_USER;
                 ScimUser resolvedUser = userOpt.get();
                 resolvedDisplay = resolvedUser.getDisplayName() != null
@@ -1138,7 +1138,7 @@ public class ScimGroupService {
 
     private Optional<ScimGroup> findGroupOrSelf(ScimGroup currentGroup, UUID workspaceId, UUID candidateId) {
         Optional<ScimGroup> grpOpt = groupRepository.findByIdAndWorkspaceId(candidateId, workspaceId);
-        if (grpOpt != null && grpOpt.isPresent()) {
+        if (grpOpt.isPresent()) {
             return grpOpt;
         }
         if (Objects.equals(currentGroup.getId(), candidateId)) {

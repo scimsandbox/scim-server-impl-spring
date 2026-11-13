@@ -40,19 +40,21 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
 @Component
 public class RequestResponseLoggingFilter extends OncePerRequestFilter {
 
+    public static final int MAX_NON_BULK_PAYLOAD_SIZE = 1_048_576; // 1 MiB
+
     private static final String REDACTED = "[REDACTED]";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final Pattern WORKSPACE_PATH = Pattern.compile("/ws/([0-9a-fA-F-]+)/scim/v2/.*");
+    private static final Pattern WORKSPACE_PATH = Pattern.compile("/ws/([0-9a-fA-F-]+)/scim/v2(?:/.*)?");
     private static final int MAX_BODY_CHARS = 20000;
 
-    // Linear-time possessive regex fallbacks for malformed or truncated JSON payloads containing passwords
-    private static final Pattern MALFORMED_PASSWORD_KV = Pattern.compile(
-            "(?is)(\"(?:[^\"\\\\]*:)?password\"\\s*+:\\s*+)(?:\"(?:\\\\.|[^\"\\\\])*+\"|\"(?:\\\\.|[^\"\\\\])*+$)");
+    // Linear-time possessive regex fallbacks for malformed or truncated JSON payloads containing passwords or auth tokens
+    private static final Pattern MALFORMED_SENSITIVE_KV = Pattern.compile(
+            "(?is)(\"(?:[^\"\\\\]*:)?(?:password|authorization)\"\\s*+:\\s*+)(?:\"(?:\\\\.|[^\"\\\\])*+\"|(?:\"(?:\\\\.|[^\"\\\\])*+$))");
     private static final Pattern FLAT_OBJECT_SEGMENT = Pattern.compile("\\{[^{}]*+(?:\\}|$)");
     private static final Pattern SEGMENT_HAS_PASSWORD_PATH = Pattern.compile(
             "(?is)\"path\"\\s*+:\\s*+\"(?:[^\"\\\\]*:)?password(?:[.\\[][^\"\\\\]*+)?(?:\"|$)");
     private static final Pattern SEGMENT_VALUE_FIELD = Pattern.compile(
-            "(?is)(\"value\"\\s*+:\\s*+)(?:\"(?:\\\\.|[^\"\\\\])*+\"|\"(?:\\\\.|[^\"\\\\])*+$)");
+            "(?is)(\"value\"\\s*+:\\s*+)(?:\"(?:\\\\.|[^\"\\\\])*+\"|(?:\"(?:\\\\.|[^\"\\\\])*+$))");
 
     private final ScimRequestLogRepository logRepository;
     private final WorkspaceRepository workspaceRepository;
@@ -66,7 +68,9 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return !path.startsWith("/ws/") || !path.contains("/scim/v2/");
+        return path == null
+                || !path.startsWith("/ws/")
+                || (!path.endsWith("/scim/v2") && !path.contains("/scim/v2/"));
     }
 
     @Override
@@ -75,28 +79,32 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         ContentCachingRequestWrapper requestWrapper = new ContentCachingRequestWrapper(request, MAX_BODY_CHARS);
         ContentCachingResponseWrapper responseWrapper = new ContentCachingResponseWrapper(response);
 
+        boolean bulkPost = isBulkPostRequest(request);
+        int maxPayloadBytes = bulkPost ? ScimBulkController.MAX_PAYLOAD_SIZE : MAX_NON_BULK_PAYLOAD_SIZE;
+        String payloadLimitDetail = bulkPost
+                ? "Bulk request payload size exceeds maxPayloadSize of " + maxPayloadBytes + " bytes"
+                : "Request payload size exceeds maximum allowed size of " + maxPayloadBytes + " bytes";
+
         try {
-            if (isBulkPostRequest(request)) {
-                if (request.getContentLengthLong() > ScimBulkController.MAX_PAYLOAD_SIZE) {
-                    writeScimErrorResponse(responseWrapper, 413, null,
-                            "Bulk request payload size exceeds maxPayloadSize of " + ScimBulkController.MAX_PAYLOAD_SIZE + " bytes");
+            if (request.getContentLengthLong() > maxPayloadBytes) {
+                writeScimErrorResponse(responseWrapper, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                        null, payloadLimitDetail);
+                return;
+            }
+
+            HttpServletRequest boundedRequest = new BoundedPayloadRequestWrapper(
+                    requestWrapper, maxPayloadBytes, payloadLimitDetail);
+            try {
+                filterChain.doFilter(boundedRequest, responseWrapper);
+            } catch (Exception ex) {
+                ScimException payloadEx = findScimExceptionByStatus(ex, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                if (payloadEx != null && !responseWrapper.isCommitted()) {
+                    responseWrapper.resetBuffer();
+                    writeScimErrorResponse(responseWrapper, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                            payloadEx.getScimType(), payloadEx.getMessage());
                     return;
                 }
-                HttpServletRequest boundedRequest = new BoundedBulkRequestWrapper(
-                        requestWrapper, ScimBulkController.MAX_PAYLOAD_SIZE);
-                try {
-                    filterChain.doFilter(boundedRequest, responseWrapper);
-                } catch (Exception ex) {
-                    ScimException payloadEx = findScimExceptionByStatus(ex, 413);
-                    if (payloadEx != null && !responseWrapper.isCommitted()) {
-                        responseWrapper.resetBuffer();
-                        writeScimErrorResponse(responseWrapper, 413, payloadEx.getScimType(), payloadEx.getMessage());
-                        return;
-                    }
-                    throw ex;
-                }
-            } else {
-                filterChain.doFilter(requestWrapper, responseWrapper);
+                throw ex;
             }
         } finally {
             try {
@@ -142,14 +150,16 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         response.getWriter().flush();
     }
 
-    private static final class BoundedBulkRequestWrapper extends HttpServletRequestWrapper {
+    private static final class BoundedPayloadRequestWrapper extends HttpServletRequestWrapper {
         private final int maxBytes;
+        private final String errorDetail;
         private ServletInputStream boundedInputStream;
         private BufferedReader boundedReader;
 
-        BoundedBulkRequestWrapper(HttpServletRequest request, int maxBytes) {
+        BoundedPayloadRequestWrapper(HttpServletRequest request, int maxBytes, String errorDetail) {
             super(request);
             this.maxBytes = maxBytes;
+            this.errorDetail = errorDetail;
         }
 
         @Override
@@ -163,8 +173,8 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
                         if (count > 0) {
                             bytesRead += count;
                             if (bytesRead > maxBytes) {
-                                throw new ScimException(413, null,
-                                        "Bulk request payload size exceeds maxPayloadSize of " + maxBytes + " bytes");
+                                throw new ScimException(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                                        null, errorDetail);
                             }
                         }
                     }
@@ -237,7 +247,7 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     }
 
     static String redactPasswords(String body) {
-        if (body == null || body.isEmpty() || !containsPasswordIgnoreCase(body)) {
+        if (body == null || body.isEmpty() || !containsSensitiveTokenIgnoreCase(body)) {
             return body;
         }
         try {
@@ -254,14 +264,22 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         return redactWithRegexFallback(body);
     }
 
-    private static boolean containsPasswordIgnoreCase(String rawBody) {
+    private static boolean containsSensitiveTokenIgnoreCase(String rawBody) {
+        return containsKeywordIgnoreCase(rawBody, "password")
+                || containsKeywordIgnoreCase(rawBody, "authorization");
+    }
+
+    private static boolean containsKeywordIgnoreCase(String rawBody, String keyword) {
         if (rawBody == null) {
             return false;
         }
-        int limit = rawBody.length() - 8;
+        int kwLen = keyword.length();
+        int limit = rawBody.length() - kwLen;
+        char firstLower = Character.toLowerCase(keyword.charAt(0));
+        char firstUpper = Character.toUpperCase(keyword.charAt(0));
         for (int i = 0; i <= limit; i++) {
             char c = rawBody.charAt(i);
-            if ((c == 'p' || c == 'P') && rawBody.regionMatches(true, i, "password", 0, 8)) {
+            if ((c == firstLower || c == firstUpper) && rawBody.regionMatches(true, i, keyword, 0, kwLen)) {
                 return true;
             }
         }
@@ -289,7 +307,7 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
             }
             for (String key : keys) {
                 JsonNode child = obj.get(key);
-                if (isPasswordAttributeOrPath(key)) {
+                if (isSensitiveAttributeOrPath(key)) {
                     if (child != null && !child.isNull()) {
                         obj.set(key, TextNode.valueOf(REDACTED));
                         modified = true;
@@ -315,6 +333,17 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         return modified;
     }
 
+    private static boolean isSensitiveAttributeOrPath(String raw) {
+        if (isPasswordAttributeOrPath(raw)) {
+            return true;
+        }
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        String lower = raw.trim().toLowerCase(Locale.ROOT);
+        return "authorization".equals(lower) || lower.endsWith(":authorization");
+    }
+
     private static boolean isPasswordAttributeOrPath(String raw) {
         if (raw == null || raw.isBlank()) {
             return false;
@@ -329,15 +358,15 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     }
 
     static String redactWithRegexFallback(String rawBody) {
-        if (rawBody == null || rawBody.isEmpty() || !containsPasswordIgnoreCase(rawBody)) {
+        if (rawBody == null || rawBody.isEmpty() || !containsSensitiveTokenIgnoreCase(rawBody)) {
             return rawBody;
         }
-        String step1 = MALFORMED_PASSWORD_KV.matcher(rawBody).replaceAll("$1\"[REDACTED]\"");
+        String step1 = MALFORMED_SENSITIVE_KV.matcher(rawBody).replaceAll("$1\"[REDACTED]\"");
         Matcher segMatcher = FLAT_OBJECT_SEGMENT.matcher(step1);
         StringBuilder sb = new StringBuilder(step1.length());
         while (segMatcher.find()) {
             String seg = segMatcher.group();
-            if (containsPasswordIgnoreCase(seg) && SEGMENT_HAS_PASSWORD_PATH.matcher(seg).find()) {
+            if (containsKeywordIgnoreCase(seg, "password") && SEGMENT_HAS_PASSWORD_PATH.matcher(seg).find()) {
                 seg = SEGMENT_VALUE_FIELD.matcher(seg).replaceAll("$1\"[REDACTED]\"");
             }
             segMatcher.appendReplacement(sb, Matcher.quoteReplacement(seg));

@@ -62,4 +62,24 @@ class ScimExceptionHandlerTest {
                 .doesNotContain("scim_playground")
                 .doesNotContain("insert ");
     }
+
+    @Test
+    void handleIllegalArgumentAnd5xxScimException_sanitizeInternalMessages() {
+        IllegalArgumentException iae = new IllegalArgumentException(
+                "password cannot be more than 72 bytes; internal class org.springframework.security.crypto.bcrypt.BCrypt");
+        ResponseEntity<Map<String, Object>> iaeResp = handler.handleBadRequest(iae);
+        assertThat(iaeResp.getStatusCode().value()).isEqualTo(400);
+        assertThat(iaeResp.getBody()).isNotNull();
+        assertThat(iaeResp.getBody().get("scimType")).isEqualTo("invalidValue");
+        assertThat(iaeResp.getBody().toString())
+                .doesNotContain("org.springframework")
+                .doesNotContain("BCrypt");
+
+        ScimException serverEx = new ScimException(500, null, "SELECT secret FROM scim_users WHERE id=1");
+        ResponseEntity<Map<String, Object>> scim500Resp = handler.handleScimException(serverEx);
+        assertThat(scim500Resp.getStatusCode().value()).isEqualTo(500);
+        assertThat(scim500Resp.getBody()).isNotNull();
+        assertThat(scim500Resp.getBody().get("detail")).isEqualTo("Internal server error");
+        assertThat(scim500Resp.getBody().toString()).doesNotContain("SELECT secret");
+    }
 }

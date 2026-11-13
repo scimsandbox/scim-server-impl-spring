@@ -655,4 +655,66 @@ class ScimFilterParserTest {
         assertTrue(ScimFilterParser.referencesUserGroups(
                 ScimFilterParser.parseAst("groups[display eq \"Admins\"]", true)));
     }
+
+    @Test
+    void testFilterGuardrails_MaxLengthMaxTokensAndMaxDepthReturn400InvalidFilter() {
+        // 1. Nesting depth <= 20 succeeds
+        String validNested = "(".repeat(20) + "userName eq \"alice\"" + ")".repeat(20);
+        assertNotNull(ScimFilterParser.parseAst(validNested, true));
+        assertNotNull(ScimFilterParser.parseUserFilter(validNested, workspaceId));
+
+        // 2. Parenthesis nesting > 20 throws 400 invalidFilter (never StackOverflowError)
+        String deepParens = "(".repeat(25) + "userName eq \"alice\"" + ")".repeat(25);
+        ScimException parenAstEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(deepParens, true));
+        assertEquals(400, parenAstEx.getHttpStatus());
+        assertEquals("invalidFilter", parenAstEx.getScimType());
+
+        ScimException parenSpecEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseUserFilter(deepParens, workspaceId));
+        assertEquals(400, parenSpecEx.getHttpStatus());
+        assertEquals("invalidFilter", parenSpecEx.getScimType());
+
+        ScimException parenGroupEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseGroupFilter("(".repeat(25) + "displayName eq \"g\"" + ")".repeat(25), workspaceId));
+        assertEquals(400, parenGroupEx.getHttpStatus());
+        assertEquals("invalidFilter", parenGroupEx.getScimType());
+
+        // 3. Chained 'not' recursion > 20 throws 400 invalidFilter
+        String deepNot = "not ".repeat(25) + "userName pr";
+        ScimException notAstEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(deepNot, true));
+        assertEquals(400, notAstEx.getHttpStatus());
+        assertEquals("invalidFilter", notAstEx.getScimType());
+
+        ScimException notSpecEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseUserFilter(deepNot, workspaceId));
+        assertEquals(400, notSpecEx.getHttpStatus());
+        assertEquals("invalidFilter", notSpecEx.getScimType());
+
+        // 4. Deeply nested valuePath inner filter throws 400 invalidFilter
+        String deepValuePath = "emails[" + "(".repeat(22) + "type eq \"work\"" + ")".repeat(22) + "]";
+        ScimException vpEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(deepValuePath, true));
+        assertEquals(400, vpEx.getHttpStatus());
+        assertEquals("invalidFilter", vpEx.getScimType());
+
+        // 5. Filter exceeding max length (4096 chars) throws 400 invalidFilter
+        String oversizedFilter = "userName eq \"" + "a".repeat(4100) + "\"";
+        ScimException lenEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(oversizedFilter, true));
+        assertEquals(400, lenEx.getHttpStatus());
+        assertEquals("invalidFilter", lenEx.getScimType());
+
+        // 6. Filter exceeding max tokens (200 tokens) throws 400 invalidFilter
+        StringBuilder manyTokens = new StringBuilder("userName pr");
+        for (int i = 0; i < 80; i++) {
+            manyTokens.append(" or userName pr"); // +3 tokens per iteration -> 242 tokens total
+        }
+        String manyTokensStr = manyTokens.toString();
+        ScimException tokEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(manyTokensStr, true));
+        assertEquals(400, tokEx.getHttpStatus());
+        assertEquals("invalidFilter", tokEx.getScimType());
+    }
 }

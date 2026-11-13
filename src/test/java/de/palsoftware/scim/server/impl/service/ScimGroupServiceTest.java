@@ -227,7 +227,7 @@ class ScimGroupServiceTest {
 
         service.deleteGroup(workspaceId, groupId);
 
-        verify(membershipRepository).deleteByMemberValue(groupId);
+        verify(membershipRepository).deleteByMemberValueAndWorkspaceId(groupId, workspaceId);
         verify(groupRepository).delete(group);
         verify(workspaceActivityService).touchWorkspace(workspaceId);
     }

@@ -118,7 +118,7 @@ public class ScimOperationMetricsFilter extends OncePerRequestFilter {
             return throttled;
         }
 
-        if (httpStatus == HttpServletResponse.SC_SERVICE_UNAVAILABLE
+        if ((httpStatus == 429 || httpStatus == HttpServletResponse.SC_SERVICE_UNAVAILABLE)
                 && StringUtils.hasText(response.getHeader("Retry-After"))) {
             return ScimRequestMetricAttributes.THROTTLED_YES;
         }

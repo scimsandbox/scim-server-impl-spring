@@ -55,7 +55,7 @@ management:
     port: ${MANAGEMENT_SERVER_PORT:9090}
   endpoint:
     health:
-      show-components: always
+      show-components: when_authorized
   endpoints:
     web:
       exposure:
@@ -72,10 +72,10 @@ app:
   rate-limit:
     enabled: true
     requests-per-second: 200
-    wait-timeout: 60s
+    wait-timeout: 0s
   security:
     actuator:
-      api-key: ${ACTUATOR_API_KEY}
+      api-key: ${ACTUATOR_API_KEY:}
   cleanup:
     workspace:
       enabled: true

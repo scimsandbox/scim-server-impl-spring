@@ -173,6 +173,25 @@ class ScimUserMapperTest {
         input.put("password", null);
         ScimUserMapper.applyFromScimInput(newUser, input);
         assertNull(newUser.getPassword());
+
+        // Exactly 72 UTF-8 bytes succeeds
+        String exact72Ascii = "a".repeat(72);
+        input.put("password", exact72Ascii);
+        ScimUserMapper.applyFromScimInput(newUser, input);
+        assertNotNull(newUser.getPassword());
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches(exact72Ascii, newUser.getPassword()));
+
+        // 73 ASCII bytes rejected with 400 invalidValue (not 500 IllegalArgumentException)
+        input.put("password", "a".repeat(73));
+        ScimException asciiEx = assertThrows(ScimException.class, () -> ScimUserMapper.applyFromScimInput(newUser, input));
+        assertEquals(400, asciiEx.getHttpStatus());
+        assertEquals("invalidValue", asciiEx.getScimType());
+
+        // 25x 3-byte UTF-8 characters ('€') = 25 chars but 75 UTF-8 bytes -> rejected with 400 invalidValue
+        input.put("password", "€".repeat(25));
+        ScimException utf8Ex = assertThrows(ScimException.class, () -> ScimUserMapper.applyFromScimInput(newUser, input));
+        assertEquals(400, utf8Ex.getHttpStatus());
+        assertEquals("invalidValue", utf8Ex.getScimType());
     }
 
     @Test
