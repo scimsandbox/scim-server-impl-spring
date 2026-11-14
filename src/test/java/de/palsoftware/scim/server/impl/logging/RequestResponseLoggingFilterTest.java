@@ -300,4 +300,157 @@ class RequestResponseLoggingFilterTest {
         assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, savedLogs.get(2).getStatus());
         assertEquals(HttpServletResponse.SC_BAD_GATEWAY, savedLogs.get(3).getStatus());
     }
+
+    @Test
+    void redactPasswords_RedactsPatchAuthorizationPathsSymmetricallyWithPassword() {
+        String patchJson = "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],"
+                + "\"Operations\":["
+                + "{\"op\":\"replace\",\"path\":\"authorization\",\"value\":\"Bearer secret-token-1\"},"
+                + "{\"op\":\"replace\",\"value\":\"Bearer secret-token-2\",\"path\":\"urn:example:ext:2.0:User:authorization\"},"
+                + "{\"op\":\"replace\",\"path\":\"authorization.token\",\"value\":\"sub-secret-3\"},"
+                + "{\"op\":\"replace\",\"path\":\"authorization[type eq \\\"bearer\\\"]\",\"value\":{\"token\":\"filter-secret-4\"}},"
+                + "{\"op\":\"replace\",\"path\":\"urn:example:ext:2.0:User:authorization.secret\",\"value\":987654},"
+                + "{\"op\":\"replace\",\"path\":\"urn:example:ext:2.0:User:authorization[primary eq true]\",\"value\":[\"arr-secret-5\"]},"
+                + "{\"op\":\"replace\",\"path\":\"authorization\",\"value\":null},"
+                + "{\"op\":\"replace\",\"path\":\"title\",\"value\":\"VisibleTitle\"}"
+                + "]}";
+
+        String redacted = RequestResponseLoggingFilter.redactPasswords(patchJson);
+
+        assertFalse(redacted.contains("secret-token-1"));
+        assertFalse(redacted.contains("secret-token-2"));
+        assertFalse(redacted.contains("sub-secret-3"));
+        assertFalse(redacted.contains("filter-secret-4"));
+        assertFalse(redacted.contains("987654"));
+        assertFalse(redacted.contains("arr-secret-5"));
+        assertTrue(redacted.contains("\"value\":null"));
+        assertTrue(redacted.contains("\"VisibleTitle\""));
+    }
+
+    @Test
+    void redactPasswords_FallbackScannerRedactsUnicodeEscapesAndNonStringSecretValuesInMalformedJson() {
+        // 1. Unicode-escaped keys ("pass\u0077ord" and "auth\u006frization") in valid and broken JSON
+        String validUnicodeJson = "{\"userName\":\"alice\",\"pass\\u0077ord\":\"UnicodeValidSecret!1\",\"auth\\u006frization\":\"Bearer UnicodeAuth!1\"}";
+        String redactedValidUnicode = RequestResponseLoggingFilter.redactPasswords(validUnicodeJson);
+        assertFalse(redactedValidUnicode.contains("UnicodeValidSecret!1"));
+        assertFalse(redactedValidUnicode.contains("UnicodeAuth!1"));
+
+        String brokenUnicodeJson = "{\"userName\":\"alice\",\"pass\\u0077ord\":\"UnicodeBrokenSecret!2\",\"auth\\u006Frization\":123456789, broken";
+        String redactedBrokenUnicode = RequestResponseLoggingFilter.redactPasswords(brokenUnicodeJson);
+        assertFalse(redactedBrokenUnicode.contains("UnicodeBrokenSecret!2"));
+        assertFalse(redactedBrokenUnicode.contains("123456789"));
+        assertTrue(redactedBrokenUnicode.contains("\"[REDACTED]\""));
+
+        // 2. Number, boolean, object, array, and null values on sensitive keys in malformed/truncated JSON
+        String brokenMixedValues = "{\"password\":424242,\"Password\":true,\"authorization\":{\"nested\":\"ObjSecret!3\"},"
+                + "\"urn:ietf:params:scim:schemas:core:2.0:User:password\":[\"ArrSecret!4\",777],\"password\":null, malformed";
+        String redactedMixed = RequestResponseLoggingFilter.redactPasswords(brokenMixedValues);
+        assertFalse(redactedMixed.contains("424242"));
+        assertFalse(redactedMixed.contains(":true"));
+        assertFalse(redactedMixed.contains("ObjSecret!3"));
+        assertFalse(redactedMixed.contains("ArrSecret!4"));
+        assertFalse(redactedMixed.contains("777"));
+        assertTrue(redactedMixed.contains("\"password\":null"));
+
+        // 3. Truncated composite object and array secret values at EOF
+        String truncatedObjectSecret = "{\"userName\":\"bob\",\"password\":{\"raw\":\"TruncatedObjSecret!5\",\"extra\":123";
+        String redactedTruncatedObj = RequestResponseLoggingFilter.redactPasswords(truncatedObjectSecret);
+        assertFalse(redactedTruncatedObj.contains("TruncatedObjSecret!5"));
+        assertFalse(redactedTruncatedObj.contains("123"));
+        assertTrue(redactedTruncatedObj.contains("\"userName\":\"bob\""));
+
+        String truncatedArraySecret = "{\"userName\":\"bob\",\"authorization\":[\"TruncatedArrSecret!6\",999";
+        String redactedTruncatedArr = RequestResponseLoggingFilter.redactPasswords(truncatedArraySecret);
+        assertFalse(redactedTruncatedArr.contains("TruncatedArrSecret!6"));
+        assertFalse(redactedTruncatedArr.contains("999"));
+
+        // 4. Malformed/truncated PATCH operations with non-string values and authorization paths
+        String malformedPatchAuthObj = "{\"Operations\":[{\"op\":\"replace\",\"path\":\"authorization\",\"value\":{\"bearer\":\"PatchObjSecret!7\"}}, broken";
+        String redactedPatchAuthObj = RequestResponseLoggingFilter.redactPasswords(malformedPatchAuthObj);
+        assertFalse(redactedPatchAuthObj.contains("PatchObjSecret!7"));
+
+        String truncatedOpWithoutPathYet = "{\"Operations\":[{\"op\":\"replace\",\"value\":888999111,\"path\":\"pass\\u0077ord";
+        String redactedTruncatedOp = RequestResponseLoggingFilter.redactPasswords(truncatedOpWithoutPathYet);
+        assertFalse(redactedTruncatedOp.contains("888999111"));
+    }
+
+    @Test
+    void redactPasswords_RedactsTruncatedPatchPayloadsWithoutFullSensitiveKeywordAndDotQualifiedParentPaths() {
+        // 1. Truncated mid-"password" with NO complete "password"/"authorization"/unicode-escape anywhere in payload
+        String truncatedMidPassw = "{\"Operations\":[{\"op\":\"replace\",\"value\":\"Secret1!\",\"path\":\"passw";
+        String redacted1 = RequestResponseLoggingFilter.redactPasswords(truncatedMidPassw);
+        assertFalse(redacted1.contains("Secret1!"));
+        assertTrue(redacted1.contains("\"[REDACTED]\""));
+
+        // 2. Truncated before "path" appears at all (no "password"/"authorization"/unicode-escape anywhere)
+        String truncatedBeforePath = "{\"Operations\":[{\"op\":\"replace\",\"value\":\"Secret2!\", ";
+        String redacted2 = RequestResponseLoggingFilter.redactPasswords(truncatedBeforePath);
+        assertFalse(redacted2.contains("Secret2!"));
+        assertTrue(redacted2.contains("\"[REDACTED]\""));
+
+        // 3. Truncated mid-URN before final ":password" segment
+        String truncatedMidUrn = "{\"Operations\":[{\"op\":\"replace\",\"value\":\"Secret3!\",\"path\":\"urn:ietf:params:scim:schemas:core:2.0:User";
+        String redacted3 = RequestResponseLoggingFilter.redactPasswords(truncatedMidUrn);
+        assertFalse(redacted3.contains("Secret3!"));
+        assertTrue(redacted3.contains("\"[REDACTED]\""));
+
+        // 4. Truncated dot-qualified path ("nested.auth")
+        String truncatedDotPath = "{\"Operations\":[{\"op\":\"replace\",\"value\":\"Secret4!\",\"path\":\"nested.auth";
+        String redacted4 = RequestResponseLoggingFilter.redactPasswords(truncatedDotPath);
+        assertFalse(redacted4.contains("Secret4!"));
+        assertTrue(redacted4.contains("\"[REDACTED]\""));
+
+        // 5. Dot-qualified parent paths ("nested.password", "items[primary eq true].authorization", sub-paths)
+        String dotQualifiedPatch = "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],"
+                + "\"Operations\":["
+                + "{\"op\":\"replace\",\"path\":\"nested.password\",\"value\":\"DotSecret5!\"},"
+                + "{\"op\":\"replace\",\"path\":\"items[primary eq true].authorization\",\"value\":\"DotSecret6!\"},"
+                + "{\"op\":\"replace\",\"path\":\"nested.password.sub\",\"value\":\"DotSecret7!\"},"
+                + "{\"op\":\"replace\",\"path\":\"items[primary eq true].authorization[type eq \\\"bearer\\\"]\",\"value\":\"DotSecret8!\"},"
+                + "{\"op\":\"replace\",\"path\":\"displayName\",\"value\":\"SafeDisplay\"}"
+                + "]}";
+        String redactedDot = RequestResponseLoggingFilter.redactPasswords(dotQualifiedPatch);
+        assertFalse(redactedDot.contains("DotSecret5!"));
+        assertFalse(redactedDot.contains("DotSecret6!"));
+        assertFalse(redactedDot.contains("DotSecret7!"));
+        assertFalse(redactedDot.contains("DotSecret8!"));
+        assertTrue(redactedDot.contains("\"SafeDisplay\""));
+
+        // 6. Complete valid non-sensitive PATCH fast-paths cleanly without mutating
+        String safeCompletePatch = "{\"Operations\":[{\"op\":\"replace\",\"path\":\"displayName\",\"value\":\"Alice\"}]}";
+        assertEquals(safeCompletePatch, RequestResponseLoggingFilter.redactPasswords(safeCompletePatch));
+    }
+
+    @Test
+    void invalidOrUnsupportedRequestCharset_FallsBackToUtf8WithoutMaskingClientErrorStatus() throws Exception {
+        String rawPayload = "{\"userName\":\"alice\",\"password\":\"CharsetSecret!9\"}";
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users") {
+            @Override
+            public String getCharacterEncoding() {
+                return "BOGUS;illegal!charset";
+            }
+        };
+        request.setContentType("application/scim+json");
+        request.setContent(rawPayload.getBytes(StandardCharsets.UTF_8));
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        FilterChain chain = (req, res) -> {
+            req.getInputStream().readAllBytes();
+            HttpServletResponse httpRes = (HttpServletResponse) res;
+            httpRes.setStatus(HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE);
+            httpRes.getOutputStream().write("{\"status\":\"415\"}".getBytes(StandardCharsets.UTF_8));
+        };
+
+        filter.doFilter(request, response, chain);
+
+        assertEquals(HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE, response.getStatus());
+        ArgumentCaptor<ScimRequestLog> logCaptor = ArgumentCaptor.forClass(ScimRequestLog.class);
+        verify(logRepository).save(logCaptor.capture());
+
+        ScimRequestLog saved = logCaptor.getValue();
+        assertEquals(HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE, saved.getStatus());
+        assertFalse(saved.getRequestBody().contains("CharsetSecret!9"));
+        assertTrue(saved.getRequestBody().contains("\"[REDACTED]\""));
+    }
 }

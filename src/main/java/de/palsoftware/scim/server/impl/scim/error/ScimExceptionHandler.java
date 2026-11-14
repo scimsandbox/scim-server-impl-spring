@@ -16,8 +16,6 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -27,7 +25,6 @@ import java.util.Map;
 public class ScimExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ScimExceptionHandler.class);
-    private static final String ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error";
 
     @ExceptionHandler(ScimException.class)
     public ResponseEntity<Map<String, Object>> handleScimException(ScimException ex) {
@@ -42,12 +39,9 @@ public class ScimExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Map<String, Object>> handleBadJson(HttpMessageNotReadableException ex) {
-        Throwable cause = ex.getCause();
-        while (cause != null) {
-            if (cause instanceof ScimException scimEx) {
-                return handleScimException(scimEx);
-            }
-            cause = cause.getCause() != cause ? cause.getCause() : null;
+        ScimException scimEx = ScimFilterErrorWriter.findScimException(ex);
+        if (scimEx != null) {
+            return handleScimException(scimEx);
         }
         return buildErrorResponse(400, "invalidSyntax", "Invalid or malformed JSON in request body");
     }
@@ -111,29 +105,22 @@ public class ScimExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleGeneral(Exception ex) {
-        Throwable cause = ex;
-        while (cause.getCause() != null && cause.getCause() != cause) {
-            cause = cause.getCause();
-            if (cause instanceof ScimException se) {
-                return handleScimException(se);
-            }
-            if (cause instanceof DataIntegrityViolationException dive) {
-                return handleDataIntegrityViolation(dive);
-            }
+        ScimException scimEx = ScimFilterErrorWriter.findScimException(ex);
+        if (scimEx != null) {
+            return handleScimException(scimEx);
+        }
+        DataIntegrityViolationException dive = ScimFilterErrorWriter.findCause(
+                ex, DataIntegrityViolationException.class);
+        if (dive != null) {
+            return handleDataIntegrityViolation(dive);
         }
         log.error("Unhandled exception in SCIM controller", ex);
         return buildErrorResponse(500, null, "Internal server error");
     }
 
     private ResponseEntity<Map<String, Object>> buildErrorResponse(int status, String scimType, String detail) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("schemas", List.of(ERROR_SCHEMA));
-        body.put("status", String.valueOf(status));
-        if (scimType != null) body.put("scimType", scimType);
-        body.put("detail", detail);
-
         return ResponseEntity.status(status)
-                .header("Content-Type", "application/scim+json;charset=UTF-8")
-                .body(body);
+                .header("Content-Type", ScimFilterErrorWriter.SCIM_CONTENT_TYPE)
+                .body(ScimFilterErrorWriter.buildErrorBody(status, scimType, detail));
     }
 }

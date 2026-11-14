@@ -1,6 +1,7 @@
 package de.palsoftware.scim.server.impl.security;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import de.palsoftware.scim.server.impl.scim.error.ScimFilterErrorWriter;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -16,9 +17,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Authenticates Spring Boot Actuator endpoints using a constant-time SHA-256 comparison
@@ -92,7 +91,11 @@ public class ActuatorApiKeyAuthFilter extends OncePerRequestFilter {
 
         if (expectedKeyDigest != null) {
             if (!hasMatchingApiKey(request)) {
-                sendErrorResponse(response, HttpServletResponse.SC_UNAUTHORIZED,
+                ScimFilterErrorWriter.writeScimError(
+                        response,
+                        objectMapper,
+                        HttpServletResponse.SC_UNAUTHORIZED,
+                        null,
                         "Missing or invalid actuator API key");
                 return;
             }
@@ -107,7 +110,11 @@ public class ActuatorApiKeyAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        sendErrorResponse(response, HttpServletResponse.SC_FORBIDDEN,
+        ScimFilterErrorWriter.writeScimError(
+                response,
+                objectMapper,
+                HttpServletResponse.SC_FORBIDDEN,
+                null,
                 "Actuator endpoint is restricted to the management port");
     }
 
@@ -162,21 +169,6 @@ public class ActuatorApiKeyAuthFilter extends OncePerRequestFilter {
                 null,
                 List.of(new SimpleGrantedAuthority(ROLE_ACTUATOR))));
         SecurityContextHolder.setContext(context);
-    }
-
-    private void sendErrorResponse(HttpServletResponse response, int status, String detail) throws IOException {
-        response.setStatus(status);
-        response.setCharacterEncoding("UTF-8");
-        response.setContentType("application/scim+json;charset=UTF-8");
-        if (status == HttpServletResponse.SC_UNAUTHORIZED) {
-            response.setHeader("WWW-Authenticate", "Bearer");
-        }
-        Map<String, Object> error = new LinkedHashMap<>();
-        error.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:Error"));
-        error.put("status", String.valueOf(status));
-        error.put("detail", detail);
-        response.getWriter().write(objectMapper.writeValueAsString(error));
-        response.getWriter().flush();
     }
 
     private static byte[] sha256Bytes(String value) {

@@ -1,6 +1,10 @@
 package de.palsoftware.scim.server.impl.filter;
 
-import de.palsoftware.scim.server.impl.controller.ScimBulkController;
+import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
+import de.palsoftware.scim.server.impl.model.ScimRequestLog;
+import de.palsoftware.scim.server.impl.model.Workspace;
+import de.palsoftware.scim.server.impl.repository.ScimRequestLogRepository;
+import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import de.palsoftware.scim.server.impl.scim.schema.ScimSchemaDefinitions;
 import jakarta.servlet.FilterChain;
@@ -11,6 +15,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -27,22 +32,26 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class PayloadSizeLimitFilterTest {
 
     private PayloadSizeLimitFilter filter;
+    private ServletPayloadStreamGuardFilter streamGuardFilter;
     private UUID workspaceId;
 
     @BeforeEach
     void setUp() {
         filter = new PayloadSizeLimitFilter();
+        streamGuardFilter = new ServletPayloadStreamGuardFilter();
         workspaceId = UUID.randomUUID();
     }
 
     @Test
-    void maxPayloadBytesConstant_IsUnifiedAcrossBulkControllerAndServiceProviderConfig() {
+    void maxPayloadBytesConstant_IsUnifiedWithServiceProviderConfig() {
         assertThat(PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES).isEqualTo(1_048_576);
-        assertThat(ScimBulkController.MAX_PAYLOAD_SIZE).isEqualTo(PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES);
         @SuppressWarnings("unchecked")
         Map<String, Object> bulkConfig = (Map<String, Object>) ScimSchemaDefinitions.serviceProviderConfig().get("bulk");
         assertThat(bulkConfig).containsEntry("maxPayloadSize", PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES);
@@ -117,6 +126,98 @@ class PayloadSizeLimitFilterTest {
                 .contains("urn:ietf:params:scim:api:messages:2.0:Error")
                 .contains("\"status\":\"413\"")
                 .contains("Bulk request payload size exceeds maxPayloadSize of 1048576 bytes");
+    }
+
+    @Test
+    void servletPayloadStreamGuardFilter_GuardsPreAuthReadsWhileDeferringNormalUnauthRequests() throws Exception {
+        // 1. Normal path where no pre-auth filter reads body: delegates with 0 bytes read so auth returns 401
+        MockHttpServletRequest unauthOversized = fixedLengthRequest(
+                "PUT",
+                "/ws/" + workspaceId + "/scim/v2/Users/" + UUID.randomUUID(),
+                PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 5000L);
+        MockHttpServletResponse unauthResp = new MockHttpServletResponse();
+        streamGuardFilter.doFilter(unauthOversized, unauthResp, (_, res) ->
+                ((jakarta.servlet.http.HttpServletResponse) res).setStatus(401));
+        assertThat(unauthResp.getStatus()).isEqualTo(401);
+
+        // 2. If a pre-auth filter calls getInputStream() or getReader() on fixed-length > 1 MiB -> immediate 413 with 0 bytes read!
+        MockHttpServletRequest preAuthStreamReq = fixedLengthRequest(
+                "PUT",
+                "/ws/" + workspaceId + "/scim/v2/Users/" + UUID.randomUUID(),
+                PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 1L);
+        MockHttpServletResponse preAuthStreamResp = new MockHttpServletResponse();
+        streamGuardFilter.doFilter(preAuthStreamReq, preAuthStreamResp, (req, _) -> req.getInputStream());
+        assertThat(preAuthStreamResp.getStatus()).isEqualTo(413);
+        assertThat(preAuthStreamResp.getContentAsString()).contains("\"status\":\"413\"");
+
+        MockHttpServletRequest preAuthReaderReq = fixedLengthRequest(
+                "POST",
+                "/ws/" + workspaceId + "/scim/v2/Bulk",
+                PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 1L);
+        MockHttpServletResponse preAuthReaderResp = new MockHttpServletResponse();
+        streamGuardFilter.doFilter(preAuthReaderReq, preAuthReaderResp, (req, _) -> req.getReader());
+        assertThat(preAuthReaderResp.getStatus()).isEqualTo(413);
+        assertThat(preAuthReaderResp.getContentAsString())
+                .contains("Bulk request payload size exceeds maxPayloadSize of 1048576 bytes");
+
+        // 3. If a pre-auth filter reads a chunked stream > 1 MiB -> aborts at byte 1,048,577 with 413!
+        byte[] chunkedOversized = new byte[PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 128];
+        Arrays.fill(chunkedOversized, (byte) 'x');
+        HttpServletRequest preAuthChunkedReq = unknownLengthWrapper(
+                "PUT", "/ws/" + workspaceId + "/scim/v2/Users/" + UUID.randomUUID(), chunkedOversized, null);
+        MockHttpServletResponse preAuthChunkedResp = new MockHttpServletResponse();
+        streamGuardFilter.doFilter(preAuthChunkedReq, preAuthChunkedResp,
+                (req, _) -> req.getInputStream().readAllBytes());
+        assertThat(preAuthChunkedResp.getStatus()).isEqualTo(413);
+
+        // 4. Non-SCIM paths skip streamGuardFilter without wrapping
+        MockHttpServletRequest actuatorReq = fixedLengthRequest("POST", "/actuator/health", 5_000_000L);
+        AtomicReference<HttpServletRequest> observed = new AtomicReference<>();
+        streamGuardFilter.doFilter(actuatorReq, new MockHttpServletResponse(),
+                (req, _) -> observed.set((HttpServletRequest) req));
+        assertThat(observed.get()).isSameAs(actuatorReq);
+    }
+
+    @Test
+    void loggingBeforePayloadLimit_Persists413StatusAndResponseBodyForBothFixedAndChunkedRequests() throws Exception {
+        ScimRequestLogRepository logRepo = Mockito.mock(ScimRequestLogRepository.class);
+        WorkspaceRepository wsRepo = Mockito.mock(WorkspaceRepository.class);
+        Workspace ws = new Workspace();
+        ws.setId(workspaceId);
+        when(wsRepo.getReferenceById(workspaceId)).thenReturn(ws);
+        when(logRepo.save(any(ScimRequestLog.class))).thenAnswer(inv -> inv.getArgument(0));
+        RequestResponseLoggingFilter loggingFilter = new RequestResponseLoggingFilter(logRepo, wsRepo);
+
+        // 1. Fixed Content-Length > 1 MiB Bulk request
+        MockHttpServletRequest fixedReq = fixedLengthRequest(
+                "POST",
+                "/ws/" + workspaceId + "/scim/v2/Bulk",
+                PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 100L);
+        MockHttpServletResponse fixedResp = new MockHttpServletResponse();
+        streamGuardFilter.doFilter(fixedReq, fixedResp,
+                (r1, s1) -> loggingFilter.doFilter(r1, s1,
+                        (r2, s2) -> filter.doFilter(r2, s2, (_, _) -> {})));
+        assertThat(fixedResp.getStatus()).isEqualTo(413);
+
+        // 2. Chunked > 1 MiB Bulk request
+        byte[] chunkedBytes = new byte[PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 200];
+        Arrays.fill(chunkedBytes, (byte) 'b');
+        HttpServletRequest chunkedReq = unknownLengthWrapper(
+                "POST", "/ws/" + workspaceId + "/scim/v2/Bulk", chunkedBytes, null);
+        MockHttpServletResponse chunkedResp = new MockHttpServletResponse();
+        streamGuardFilter.doFilter(chunkedReq, chunkedResp,
+                (r1, s1) -> loggingFilter.doFilter(r1, s1,
+                        (r2, s2) -> filter.doFilter(r2, s2, (r3, _) -> r3.getInputStream().readAllBytes())));
+        assertThat(chunkedResp.getStatus()).isEqualTo(413);
+
+        ArgumentCaptor<ScimRequestLog> logCaptor = ArgumentCaptor.forClass(ScimRequestLog.class);
+        verify(logRepo, Mockito.times(2)).save(logCaptor.capture());
+        for (ScimRequestLog entry : logCaptor.getAllValues()) {
+            assertThat(entry.getStatus()).isEqualTo(413);
+            assertThat(entry.getResponseBody())
+                    .contains("\"status\":\"413\"")
+                    .contains("Bulk request payload size exceeds maxPayloadSize of 1048576 bytes");
+        }
     }
 
     @Test
@@ -222,7 +323,6 @@ class PayloadSizeLimitFilterTest {
         byte[] exactLimitPlusOne = new byte[PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 1];
         Arrays.fill(exactLimitPlusOne, (byte) 'z');
 
-        // 1. Single-byte read() up to limit + 1
         HttpServletRequest singleByteReq = unknownLengthWrapper(
                 "POST", "/ws/" + workspaceId + "/scim/v2/Users", exactLimitPlusOne, null);
         MockHttpServletResponse singleByteResp = new MockHttpServletResponse();
@@ -231,12 +331,11 @@ class PayloadSizeLimitFilterTest {
             byte[] chunk = new byte[PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES - 1];
             int n = in.read(chunk, 0, chunk.length);
             assertThat(n).isEqualTo(chunk.length);
-            assertThat(in.read()).isEqualTo('z'); // hits exact limit
-            in.read(); // crosses limit -> throws ScimException(413)
+            assertThat(in.read()).isEqualTo('z');
+            in.read();
         });
         assertThat(singleByteResp.getStatus()).isEqualTo(413);
 
-        // 2. getReader() with explicit ISO-8859-1 encoding exceeding 1 MiB
         HttpServletRequest readerReq = unknownLengthWrapper(
                 "POST", "/ws/" + workspaceId + "/scim/v2/Users", exactLimitPlusOne, StandardCharsets.ISO_8859_1.name());
         MockHttpServletResponse readerResp = new MockHttpServletResponse();
@@ -250,7 +349,6 @@ class PayloadSizeLimitFilterTest {
         });
         assertThat(readerResp.getStatus()).isEqualTo(413);
 
-        // 3. getReader() with null/blank encoding falls back to UTF-8 and succeeds within limit
         byte[] validPayload = "{\"userName\":\"alice\"}".getBytes(StandardCharsets.UTF_8);
         HttpServletRequest okReaderReq = unknownLengthWrapper(
                 "POST", "/ws/" + workspaceId + "/scim/v2/Users", validPayload, null);
@@ -258,13 +356,11 @@ class PayloadSizeLimitFilterTest {
         AtomicReference<String> readLine = new AtomicReference<>();
         filter.doFilter(okReaderReq, okReaderResp, (req, _) -> {
             readLine.set(req.getReader().readLine());
-            // Also verify EOF (-1) on single-byte read does not throw
             assertThat(req.getInputStream().read()).isEqualTo(-1);
         });
         assertThat(okReaderResp.getStatus()).isEqualTo(200);
         assertThat(readLine.get()).isEqualTo("{\"userName\":\"alice\"}");
 
-        // 4. getReader() with unsupported or illegal character encoding throws UnsupportedEncodingException per ServletRequest spec
         for (String invalidEncoding : new String[]{"NO-SUCH-CHARSET-999", "invalid charset!"}) {
             HttpServletRequest badEncodingReq = unknownLengthWrapper(
                     "POST", "/ws/" + workspaceId + "/scim/v2/Users", validPayload, invalidEncoding);
@@ -306,7 +402,6 @@ class PayloadSizeLimitFilterTest {
 
     @Test
     void downstreamExceptions_Unwrap413WithScimTypeAndRethrowNon413OrCommittedResponses() throws Exception {
-        // Wrapped 413 ScimException with scimType is rendered cleanly
         MockHttpServletRequest req1 = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Bulk");
         MockHttpServletResponse resp1 = new MockHttpServletResponse();
         filter.doFilter(req1, resp1, (_, _) -> {
@@ -317,19 +412,20 @@ class PayloadSizeLimitFilterTest {
                 .contains("\"scimType\":\"tooLarge\"")
                 .contains("Custom payload error");
 
-        // Non-413 ScimException is rethrown
         MockHttpServletRequest req2 = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users");
         MockHttpServletResponse resp2 = new MockHttpServletResponse();
         assertThatThrownBy(() -> filter.doFilter(req2, resp2, (_, _) -> {
             throw new ScimException(400, "invalidSyntax", "Bad JSON");
         })).isInstanceOf(ScimException.class);
 
-        // Already-committed response rethrows 413 ScimException
         MockHttpServletRequest req3 = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users");
         MockHttpServletResponse resp3 = new MockHttpServletResponse();
         resp3.setCommitted(true);
         assertThatThrownBy(() -> filter.doFilter(req3, resp3, (_, _) -> {
             throw new ScimException(413, null, "Too large after commit");
+        })).isInstanceOf(ScimException.class);
+        assertThatThrownBy(() -> streamGuardFilter.doFilter(req3, resp3, (_, _) -> {
+            throw new ScimException(400, "invalidSyntax", "Bad JSON in guard");
         })).isInstanceOf(ScimException.class);
     }
 

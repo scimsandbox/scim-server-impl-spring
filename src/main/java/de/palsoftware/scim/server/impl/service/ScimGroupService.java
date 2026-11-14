@@ -531,7 +531,7 @@ public class ScimGroupService {
                     String existingType = m.getMemberType();
                     if (existingType == null || existingType.isBlank()) {
                         // RFC 7644 §3.5.2 (RFC7644-3.5.2-0cc87d): client MAY add a value to an immutable attribute if previously unset
-                        String canonicalType = validateAndResolveExplicitMemberType(group, workspaceId, m.getMemberValue(), newType);
+                        String canonicalType = validateAndResolveExplicitMemberType(workspaceId, m.getMemberValue(), newType);
                         m.setMemberType(canonicalType);
                     } else if (!existingType.equalsIgnoreCase(newType.trim())) {
                         throw new ScimException(400, "mutability", "Group member 'type' is immutable");
@@ -586,7 +586,7 @@ public class ScimGroupService {
             }
             if (newType != null && !newType.isBlank()) {
                 if (m.getMemberType() == null || m.getMemberType().isBlank()) {
-                    m.setMemberType(validateAndResolveExplicitMemberType(group, workspaceId, m.getMemberValue(), newType));
+                    m.setMemberType(validateAndResolveExplicitMemberType(workspaceId, m.getMemberValue(), newType));
                 } else if (!m.getMemberType().equalsIgnoreCase(newType.trim())) {
                     throw new ScimException(400, "mutability", "Group member 'type' is immutable");
                 }
@@ -925,10 +925,7 @@ public class ScimGroupService {
         }
     }
 
-    private String validateAndResolveExplicitMemberType(ScimGroup group, UUID workspaceId, UUID memberId, String rawType) {
-        if (group.getId() != null && Objects.equals(group.getId(), memberId)) {
-            throw new ScimException(400, "invalidValue", "Group cannot include itself as a member");
-        }
+    private String validateAndResolveExplicitMemberType(UUID workspaceId, UUID memberId, String rawType) {
         String trimmedType = rawType.trim();
         if (RESOURCE_TYPE_USER.equalsIgnoreCase(trimmedType)) {
             userRepository.findByIdAndWorkspaceId(memberId, workspaceId)
@@ -1047,7 +1044,7 @@ public class ScimGroupService {
             String effType = resolved.effectiveType();
             if (effType != null) {
                 if (existingType == null || existingType.isBlank()) {
-                    existing.setMemberType(validateAndResolveExplicitMemberType(group, workspaceId, memberId, effType));
+                    existing.setMemberType(validateAndResolveExplicitMemberType(workspaceId, memberId, effType));
                 } else if (!existingType.equalsIgnoreCase(effType)) {
                     throw new ScimException(400, "invalidValue",
                             "Conflicting member 'type' or '$ref' for member: " + memberId);

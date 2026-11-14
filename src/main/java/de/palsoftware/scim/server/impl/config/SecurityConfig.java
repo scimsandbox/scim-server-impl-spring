@@ -3,6 +3,7 @@ package de.palsoftware.scim.server.impl.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.filter.ThrottlingFilter;
+import de.palsoftware.scim.server.impl.filter.WorkspaceRateLimitFilter;
 import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
 import de.palsoftware.scim.server.impl.metrics.ScimOperationMetricsFilter;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
@@ -65,12 +66,15 @@ public class SecurityConfig {
 
     @Bean
     @SuppressWarnings("java:S4502") // Stateless REST API authenticated via Bearer/API-key headers without session cookies
-    public SecurityFilterChain securityFilterChain(HttpSecurity http,
-                                                   ScimOperationMetricsFilter scimOperationMetricsFilter,
-                                                   ObjectProvider<ThrottlingFilter> throttlingFilterProvider,
-                                                   PayloadSizeLimitFilter payloadSizeLimitFilter,
-                                                   RequestResponseLoggingFilter loggingFilter) throws Exception {
+    public SecurityFilterChain securityFilterChain(
+            HttpSecurity http,
+            ScimOperationMetricsFilter scimOperationMetricsFilter,
+            ObjectProvider<ThrottlingFilter> throttlingFilterProvider,
+            ObjectProvider<WorkspaceRateLimitFilter> workspaceRateLimitFilterProvider,
+            RequestResponseLoggingFilter loggingFilter,
+            PayloadSizeLimitFilter payloadSizeLimitFilter) throws Exception {
         ThrottlingFilter throttlingFilter = throttlingFilterProvider.getIfAvailable();
+        WorkspaceRateLimitFilter workspaceRateLimitFilter = workspaceRateLimitFilterProvider.getIfAvailable();
 
         http
             .csrf(csrf -> csrf.ignoringRequestMatchers(scimPaths(), actuatorPaths(), errorPaths()))
@@ -92,8 +96,14 @@ public class SecurityConfig {
             http.addFilterAfter(bearerTokenAuthFilter, ActuatorApiKeyAuthFilter.class);
         }
 
-        http.addFilterAfter(payloadSizeLimitFilter, BearerTokenAuthFilter.class)
-            .addFilterAfter(loggingFilter, PayloadSizeLimitFilter.class);
+        if (workspaceRateLimitFilter != null) {
+            http.addFilterAfter(workspaceRateLimitFilter, BearerTokenAuthFilter.class)
+                .addFilterAfter(loggingFilter, WorkspaceRateLimitFilter.class);
+        } else {
+            http.addFilterAfter(loggingFilter, BearerTokenAuthFilter.class);
+        }
+
+        http.addFilterAfter(payloadSizeLimitFilter, RequestResponseLoggingFilter.class);
 
         return http.build();
     }

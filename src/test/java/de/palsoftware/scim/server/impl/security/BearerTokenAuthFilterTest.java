@@ -171,6 +171,7 @@ class BearerTokenAuthFilterTest {
         filter.doFilter(request, response, filterChain);
 
         assertEquals(200, response.getStatus());
+        assertEquals(workspaceId, request.getAttribute(BearerTokenAuthFilter.AUTHENTICATED_WORKSPACE_ID));
         assertEquals(ScimRequestMetricAttributes.AUTH_OK,
                 request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
         Mockito.verify(filterChain).doFilter(request, response);
@@ -222,6 +223,7 @@ class BearerTokenAuthFilterTest {
         filter.doFilter(request, response, filterChain);
 
         assertEquals(200, response.getStatus());
+        assertEquals(workspaceId, request.getAttribute(BearerTokenAuthFilter.AUTHENTICATED_WORKSPACE_ID));
         assertEquals(ScimRequestMetricAttributes.AUTH_OK,
                 request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
         Mockito.verify(filterChain).doFilter(request, response);
@@ -255,16 +257,18 @@ class BearerTokenAuthFilterTest {
     }
 
     @Test
-    void anonymousGetServiceProviderConfig_PassesThrough() throws Exception {
+    void anonymousGetServiceProviderConfig_PassesThroughWithoutSettingAuthenticatedWorkspaceId() throws Exception {
         UUID workspaceId = UUID.randomUUID();
         MockHttpServletRequest request = new MockHttpServletRequest("GET",
                 "/ws/" + workspaceId + "/scim/v2/ServiceProviderConfig");
+        request.setAttribute(BearerTokenAuthFilter.AUTHENTICATED_WORKSPACE_ID, workspaceId);
         MockHttpServletResponse response = new MockHttpServletResponse();
 
         filter.doFilter(request, response, filterChain);
 
         assertEquals(200, response.getStatus());
         assertEquals(workspaceId.toString(), request.getAttribute("WORKSPACE_ID"));
+        assertNull(request.getAttribute(BearerTokenAuthFilter.AUTHENTICATED_WORKSPACE_ID));
         assertEquals(ScimRequestMetricAttributes.AUTH_OK,
                 request.getAttribute(ScimRequestMetricAttributes.AUTHENTICATION));
         Mockito.verify(filterChain).doFilter(request, response);

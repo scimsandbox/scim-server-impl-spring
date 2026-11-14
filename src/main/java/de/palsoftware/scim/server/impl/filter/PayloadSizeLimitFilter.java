@@ -2,11 +2,14 @@ package de.palsoftware.scim.server.impl.filter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.scim.error.ScimFilterErrorWriter;
 import de.palsoftware.scim.server.impl.security.RequestPaths;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.ServletInputStream;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletRequestWrapper;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
@@ -21,14 +24,12 @@ import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 /**
  * Enforces the 1 MiB SCIM request body limit across both fixed-length ({@code Content-Length})
- * and streaming/chunked requests before request body buffering or controller deserialization.
+ * and streaming/chunked requests after authentication and inside request logging so rejected
+ * authenticated {@code 413} responses are recorded in {@code scim_request_logs}.
  */
 @Component
 public class PayloadSizeLimitFilter extends OncePerRequestFilter {
@@ -55,30 +56,44 @@ public class PayloadSizeLimitFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        String payloadLimitDetail = isBulkPostRequest(request)
-                ? "Bulk request payload size exceeds maxPayloadSize of " + MAX_PAYLOAD_BYTES + " bytes"
-                : "Request payload size exceeds maximum allowed size of " + MAX_PAYLOAD_BYTES + " bytes";
+        String payloadLimitDetail = resolvePayloadLimitDetail(request);
 
         if (request.getContentLengthLong() > MAX_PAYLOAD_BYTES) {
-            writeScimErrorResponse(response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                    null, payloadLimitDetail);
+            ScimFilterErrorWriter.writeScimError(
+                    response,
+                    objectMapper,
+                    HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                    null,
+                    payloadLimitDetail);
             return;
         }
 
-        HttpServletRequest boundedRequest = new BoundedPayloadRequestWrapper(
-                request, MAX_PAYLOAD_BYTES, payloadLimitDetail);
+        HttpServletRequest boundedRequest = BoundedPayloadRequestWrapper.isBounded(request)
+                ? request
+                : new BoundedPayloadRequestWrapper(request, MAX_PAYLOAD_BYTES, payloadLimitDetail);
         try {
             filterChain.doFilter(boundedRequest, response);
         } catch (ServletException | IOException | RuntimeException ex) {
-            ScimException payloadEx = findScimExceptionByStatus(ex, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+            ScimException payloadEx = ScimFilterErrorWriter.findScimException(
+                    ex, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
             if (payloadEx != null && !response.isCommitted()) {
                 response.resetBuffer();
-                writeScimErrorResponse(response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                        payloadEx.getScimType(), payloadEx.getMessage());
+                ScimFilterErrorWriter.writeScimError(
+                        response,
+                        objectMapper,
+                        HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                        payloadEx.getScimType(),
+                        payloadEx.getMessage());
                 return;
             }
             throw ex;
         }
+    }
+
+    static String resolvePayloadLimitDetail(HttpServletRequest request) {
+        return isBulkPostRequest(request)
+                ? "Bulk request payload size exceeds maxPayloadSize of " + MAX_PAYLOAD_BYTES + " bytes"
+                : "Request payload size exceeds maximum allowed size of " + MAX_PAYLOAD_BYTES + " bytes";
     }
 
     private static boolean isBulkPostRequest(HttpServletRequest request) {
@@ -89,36 +104,7 @@ public class PayloadSizeLimitFilter extends OncePerRequestFilter {
         return uri != null && (uri.endsWith("/Bulk") || uri.endsWith("/Bulk/"));
     }
 
-    private static ScimException findScimExceptionByStatus(Throwable ex, int status) {
-        Throwable cur = ex;
-        while (cur != null) {
-            if (cur instanceof ScimException scimEx && scimEx.getHttpStatus() == status) {
-                return scimEx;
-            }
-            cur = cur.getCause() != cur ? cur.getCause() : null;
-        }
-        return null;
-    }
-
-    private void writeScimErrorResponse(HttpServletResponse response,
-                                        int status,
-                                        String scimType,
-                                        String detail) throws IOException {
-        response.setStatus(status);
-        response.setCharacterEncoding("UTF-8");
-        response.setContentType("application/scim+json;charset=UTF-8");
-        Map<String, Object> error = new LinkedHashMap<>();
-        error.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:Error"));
-        error.put("status", String.valueOf(status));
-        if (scimType != null) {
-            error.put("scimType", scimType);
-        }
-        error.put("detail", detail);
-        response.getWriter().write(objectMapper.writeValueAsString(error));
-        response.getWriter().flush();
-    }
-
-    private static final class BoundedPayloadRequestWrapper extends HttpServletRequestWrapper {
+    static final class BoundedPayloadRequestWrapper extends HttpServletRequestWrapper {
         private final int maxBytes;
         private final String errorDetail;
         private ServletInputStream boundedInputStream;
@@ -130,8 +116,26 @@ public class PayloadSizeLimitFilter extends OncePerRequestFilter {
             this.errorDetail = errorDetail;
         }
 
+        static boolean isBounded(ServletRequest request) {
+            ServletRequest current = request;
+            while (current != null) {
+                if (current instanceof BoundedPayloadRequestWrapper) {
+                    return true;
+                }
+                if (current instanceof ServletRequestWrapper wrapper) {
+                    current = wrapper.getRequest();
+                } else {
+                    break;
+                }
+            }
+            return false;
+        }
+
         @Override
         public ServletInputStream getInputStream() throws IOException {
+            if (getContentLengthLong() > maxBytes) {
+                throw new ScimException(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, null, errorDetail);
+            }
             if (boundedInputStream == null) {
                 ServletInputStream delegate = super.getInputStream();
                 boundedInputStream = new BoundedServletInputStream(delegate, maxBytes, errorDetail);
@@ -141,6 +145,9 @@ public class PayloadSizeLimitFilter extends OncePerRequestFilter {
 
         @Override
         public BufferedReader getReader() throws IOException {
+            if (getContentLengthLong() > maxBytes) {
+                throw new ScimException(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, null, errorDetail);
+            }
             if (boundedReader == null) {
                 Charset cs = resolveCharset(getCharacterEncoding());
                 boundedReader = new BufferedReader(new InputStreamReader(getInputStream(), cs));

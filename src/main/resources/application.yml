@@ -2,6 +2,10 @@ server:
   tomcat:
     max-http-form-post-size: 1MB
 spring:
+  mvc:
+    formcontent:
+      filter:
+        enabled: false
   threads:
     virtual:
       enabled: true

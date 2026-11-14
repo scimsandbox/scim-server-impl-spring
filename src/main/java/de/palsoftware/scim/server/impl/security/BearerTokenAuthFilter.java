@@ -7,6 +7,7 @@ import de.palsoftware.scim.server.impl.model.WorkspaceToken;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import de.palsoftware.scim.server.impl.scim.compat.CompatMode;
+import de.palsoftware.scim.server.impl.scim.error.ScimFilterErrorWriter;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,13 +16,21 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.*;
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Authenticates SCIM API requests using Bearer token.
  * Resolves workspace from URL path and validates token belongs to that workspace.
  */
 public class BearerTokenAuthFilter extends OncePerRequestFilter {
+
+    /**
+     * Request attribute populated ONLY after a valid, non-revoked, non-expired workspace
+     * bearer token has been verified for the requested workspace UUID.
+     */
+    public static final String AUTHENTICATED_WORKSPACE_ID =
+            BearerTokenAuthFilter.class.getName() + ".AUTHENTICATED_WORKSPACE_ID";
 
     private final WorkspaceTokenRepository tokenRepository;
     private final WorkspaceRepository workspaceRepository;
@@ -43,6 +52,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                      FilterChain filterChain) throws ServletException, IOException {
+        request.removeAttribute(AUTHENTICATED_WORKSPACE_ID);
         String path = request.getRequestURI();
 
         // Only filter SCIM API paths: /ws/{workspaceId}/scim/v2/**
@@ -55,7 +65,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         UUID workspaceId = RequestPaths.extractWorkspaceId(path);
         if (workspaceId == null) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 404, null, "Invalid workspace ID");
+            ScimFilterErrorWriter.writeScimError(response, objectMapper, 404, null, "Invalid workspace ID");
             return;
         }
 
@@ -64,7 +74,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         if (authHeader == null && "GET".equalsIgnoreCase(request.getMethod()) && isServiceProviderConfigEndpoint(path)) {
             if (workspaceRepository != null && !workspaceRepository.existsById(workspaceId)) {
                 request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-                sendScimError(response, 404, null, "Workspace not found");
+                ScimFilterErrorWriter.writeScimError(response, objectMapper, 404, null, "Workspace not found");
                 return;
             }
             request.setAttribute("WORKSPACE_ID", workspaceId.toString());
@@ -74,14 +84,15 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         }
         if (authHeader == null || !authHeader.regionMatches(true, 0, "Bearer ", 0, 7)) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 401, null, "Missing or invalid Authorization header");
+            ScimFilterErrorWriter.writeScimError(
+                    response, objectMapper, 401, null, "Missing or invalid Authorization header");
             return;
         }
 
         String token = authHeader.substring(7).trim();
         if (token.isEmpty()) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 401, null, "Empty bearer token");
+            ScimFilterErrorWriter.writeScimError(response, objectMapper, 401, null, "Empty bearer token");
             return;
         }
 
@@ -90,7 +101,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         Optional<WorkspaceToken> tokenOpt = tokenRepository.findByTokenHashAndNotRevoked(tokenHash);
         if (tokenOpt.isEmpty()) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 401, null, "Invalid or revoked token");
+            ScimFilterErrorWriter.writeScimError(response, objectMapper, 401, null, "Invalid or revoked token");
             return;
         }
 
@@ -100,19 +111,21 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         // Check token belongs to this workspace
         if (!tokenWorkspace.getId().equals(workspaceId)) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 401, null, "Token does not belong to this workspace");
+            ScimFilterErrorWriter.writeScimError(
+                    response, objectMapper, 401, null, "Token does not belong to this workspace");
             return;
         }
 
         // Check expiry
         if (wsToken.getExpiresAt() != null && wsToken.getExpiresAt().isBefore(Instant.now())) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 401, null, "Token has expired");
+            ScimFilterErrorWriter.writeScimError(response, objectMapper, 401, null, "Token has expired");
             return;
         }
 
         request.setAttribute("USER_EMAIL", tokenWorkspace.getCreatedByUsername());
         request.setAttribute("WORKSPACE_ID", workspaceId.toString());
+        request.setAttribute(AUTHENTICATED_WORKSPACE_ID, workspaceId);
         request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_OK);
 
         filterChain.doFilter(request, response);
@@ -137,26 +150,5 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
                     && "ServiceProviderConfig".equals(segments[6]);
         }
         return false;
-    }
-
-    private void sendScimError(HttpServletResponse response, int status, String scimType, String detail)
-            throws IOException {
-        response.setStatus(status);
-        response.setCharacterEncoding("UTF-8");
-        response.setContentType("application/scim+json;charset=UTF-8");
-
-        // RFC 7644 §3.12: 401 responses MUST include WWW-Authenticate header
-        if (status == 401) {
-            response.setHeader("WWW-Authenticate", "Bearer");
-        }
-
-        Map<String, Object> error = new LinkedHashMap<>();
-        error.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:Error"));
-        error.put("status", String.valueOf(status));
-        if (scimType != null) error.put("scimType", scimType);
-        error.put("detail", detail);
-
-        response.getWriter().write(objectMapper.writeValueAsString(error));
-        response.getWriter().flush();
     }
 }

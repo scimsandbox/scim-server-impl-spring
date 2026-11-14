@@ -37,17 +37,54 @@
     {
       "name": "app.rate-limit.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enables per-workspace SCIM API rate limiting."
+      "description": "Enables three-tier SCIM API rate limiting (pre-auth per-IP, pre-auth global cap, post-auth per-workspace)."
     },
     {
       "name": "app.rate-limit.requests-per-second",
       "type": "java.lang.Double",
-      "description": "Sustained token refill rate per second for each workspace."
+      "description": "Server-wide global sustained token refill rate per second across all clients and workspaces."
     },
     {
       "name": "app.rate-limit.burst",
       "type": "java.lang.Integer",
-      "description": "Optional burst token capacity per workspace (defaults to ceil(requests-per-second), capped at 1000, when <= 0)."
+      "defaultValue": 0,
+      "description": "Optional server-wide global burst token capacity (defaults to ceil(requests-per-second), capped at 1000, when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Pre-authentication sustained token refill rate per second for each client IP (defaults to min(requests-per-second, 250.0) when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Pre-authentication burst capacity per client IP (defaults to ceil(per-ip-requests-per-second) when explicit, else min(globalBurst, 250))."
+    },
+    {
+      "name": "app.rate-limit.per-workspace-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Post-authentication sustained token refill rate per second for each verified workspace (defaults to min(requests-per-second, 250.0) when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.per-workspace-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Post-authentication burst capacity per verified workspace (defaults to ceil(per-workspace-requests-per-second) when explicit, else min(globalBurst, 250))."
+    },
+    {
+      "name": "app.rate-limit.trusted-proxies",
+      "type": "java.lang.String",
+      "defaultValue": "",
+      "description": "Comma-separated list of trusted reverse-proxy IPs or CIDR ranges allowed to supply X-Forwarded-For headers (when blank, only loopback/private/link-local/ULA peers are trusted for X-Forwarded-For)."
+    },
+    {
+      "name": "app.rate-limit.trusted-cloudflare-proxies",
+      "type": "java.lang.String",
+      "defaultValue": "",
+      "description": "Comma-separated list of trusted Cloudflare edge proxy IPs or CIDR ranges allowed to supply CF-Connecting-IP (and X-Forwarded-For) headers (when blank, CF-Connecting-IP is never trusted)."
     },
     {
       "name": "app.rate-limit.wait-timeout",

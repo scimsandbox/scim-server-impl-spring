@@ -233,7 +233,7 @@ class NaComplianceUnitTest {
         mockMvc = MockMvcBuilders.standaloneSetup(
                         userController, groupController, bulkController, discoveryController, asyncEventController)
                 .setControllerAdvice(new ScimExceptionHandler())
-                .addFilters(authFilter, payloadSizeLimitFilter, loggingFilter)
+                .addFilters(authFilter, loggingFilter, payloadSizeLimitFilter)
                 .build();
 
         workspaceA = seedWorkspace("tenant-alpha");

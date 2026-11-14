@@ -348,49 +348,66 @@ public class ScimUserMapper {
         if (input == null || input.isEmpty()) {
             return;
         }
-        List<PasswordCandidate> candidates = new ArrayList<>(2);
-        for (Map.Entry<String, Object> entry : input.entrySet()) {
-            String key = entry.getKey();
-            if (key == null) {
-                continue;
-            }
-            String trimmedKey = key.trim();
-            if ("password".equals(key)) {
-                candidates.add(new PasswordCandidate(0, key, entry.getValue()));
-            } else if (isAsciiPasswordKey(key) || isAsciiPasswordKey(trimmedKey)) {
-                candidates.add(new PasswordCandidate(1, key, entry.getValue()));
-            } else if (isCoreUserSchemaKey(key) || isCoreUserSchemaKey(trimmedKey)) {
-                Object nestedRaw = entry.getValue();
-                if (nestedRaw != null && !(nestedRaw instanceof Map<?, ?>)) {
-                    throw new ScimException(400, "invalidValue", "Core User schema extension must be a complex object");
-                }
-                if (nestedRaw instanceof Map<?, ?> nestedMap) {
-                    for (Map.Entry<?, ?> nestedEntry : nestedMap.entrySet()) {
-                        if (nestedEntry.getKey() instanceof String subKey
-                                && (equalsAsciiIgnoreCase(subKey, "password")
-                                    || equalsAsciiIgnoreCase(subKey.trim(), "password"))) {
-                            int priority = (USER_SCHEMA.equals(trimmedKey) && "password".equals(subKey)) ? 2 : 3;
-                            candidates.add(new PasswordCandidate(priority, key + "\u0000" + subKey, nestedEntry.getValue()));
-                        }
-                    }
-                }
-            }
-        }
+        List<PasswordCandidate> candidates = collectPasswordCandidates(input);
         if (candidates.isEmpty()) {
             return;
         }
-        if (candidates.size() > 1) {
-            Collections.sort(candidates);
+        String winningPassword = validateAndSelectWinningPassword(candidates);
+        user.setPassword(encodeValidatedPassword(winningPassword));
+    }
+
+    private static List<PasswordCandidate> collectPasswordCandidates(Map<String, Object> input) {
+        List<PasswordCandidate> candidates = new ArrayList<>(2);
+        for (Map.Entry<String, Object> entry : input.entrySet()) {
+            collectPasswordCandidateFromEntry(entry.getKey(), entry.getValue(), candidates);
         }
+        return candidates;
+    }
+
+    private static void collectPasswordCandidateFromEntry(
+            String key, Object value, List<PasswordCandidate> candidates) {
+        if (key == null) {
+            return;
+        }
+        String trimmedKey = key.trim();
+        if ("password".equals(key)) {
+            candidates.add(new PasswordCandidate(0, key, value));
+        } else if (isAsciiPasswordKey(trimmedKey)) {
+            candidates.add(new PasswordCandidate(1, key, value));
+        } else if (isCoreUserSchemaKey(trimmedKey)) {
+            collectCoreSchemaPasswordCandidates(key, trimmedKey, value, candidates);
+        }
+    }
+
+    private static void collectCoreSchemaPasswordCandidates(
+            String key, String trimmedKey, Object nestedRaw, List<PasswordCandidate> candidates) {
+        if (nestedRaw == null) {
+            return;
+        }
+        if (!(nestedRaw instanceof Map<?, ?> nestedMap)) {
+            throw new ScimException(400, "invalidValue", "Core User schema extension must be a complex object");
+        }
+        for (Map.Entry<?, ?> nestedEntry : nestedMap.entrySet()) {
+            if (nestedEntry.getKey() instanceof String subKey
+                    && equalsAsciiIgnoreCase(subKey.trim(), "password")) {
+                int priority = (USER_SCHEMA.equals(trimmedKey) && "password".equals(subKey)) ? 2 : 3;
+                candidates.add(new PasswordCandidate(priority, key + "\u0000" + subKey, nestedEntry.getValue()));
+            }
+        }
+    }
+
+    private static String validateAndSelectWinningPassword(List<PasswordCandidate> candidates) {
+        PasswordCandidate bestCandidate = null;
         String winningPassword = null;
-        for (int i = 0; i < candidates.size(); i++) {
+        for (PasswordCandidate candidate : candidates) {
             String validated = validatePasswordPlaintext(
-                    ScimCanonicalizer.requireNullableString(candidates.get(i).rawValue(), "password"));
-            if (i == 0) {
+                    ScimCanonicalizer.requireNullableString(candidate.rawValue(), "password"));
+            if (bestCandidate == null || candidate.compareTo(bestCandidate) < 0) {
+                bestCandidate = candidate;
                 winningPassword = validated;
             }
         }
-        user.setPassword(hashPassword(winningPassword));
+        return winningPassword;
     }
 
     private static String validatePasswordPlaintext(String password) {
@@ -407,12 +424,12 @@ public class ScimUserMapper {
         return password;
     }
 
+    private static String encodeValidatedPassword(String validatedPassword) {
+        return validatedPassword == null ? null : PASSWORD_ENCODER.encode(validatedPassword);
+    }
+
     public static String hashPassword(String password) {
-        String validated = validatePasswordPlaintext(password);
-        if (validated == null) {
-            return null;
-        }
-        return PASSWORD_ENCODER.encode(validated);
+        return encodeValidatedPassword(validatePasswordPlaintext(password));
     }
 
     @SuppressWarnings("unchecked")
