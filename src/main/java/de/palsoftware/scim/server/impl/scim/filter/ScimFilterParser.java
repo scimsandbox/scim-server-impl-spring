@@ -24,6 +24,10 @@ import java.util.regex.Pattern;
  */
 public class ScimFilterParser {
 
+    public static final int MAX_FILTER_LENGTH = 16_384;
+    public static final int MAX_FILTER_TOKENS = 2_000;
+    public static final int MAX_FILTER_DEPTH = 20;
+
     private ScimFilterParser() {
     }
 
@@ -141,7 +145,7 @@ public class ScimFilterParser {
         }
         List<String> tokens = tokenize(filter);
         int[] pos = {0};
-        FilterNode node = parseAstOr(tokens, pos);
+        FilterNode node = parseAstOr(tokens, pos, 0);
         if (pos[0] < tokens.size()) {
             throw new ScimException(400, "invalidFilter", "Unexpected tokens at end of filter: " + tokens.get(pos[0]));
         }
@@ -452,42 +456,51 @@ public class ScimFilterParser {
         return true;
     }
 
-    private static FilterNode parseAstOr(List<String> tokens, int[] pos) {
-        FilterNode left = parseAstAnd(tokens, pos);
+    private static void enforceMaxDepth(int depth) {
+        if (depth > MAX_FILTER_DEPTH) {
+            throw new ScimException(400, "invalidFilter",
+                    "Filter expression exceeds maximum nesting depth of " + MAX_FILTER_DEPTH);
+        }
+    }
+
+    private static FilterNode parseAstOr(List<String> tokens, int[] pos, int depth) {
+        enforceMaxDepth(depth);
+        FilterNode left = parseAstAnd(tokens, pos, depth);
         while (pos[0] < tokens.size() && "or".equalsIgnoreCase(tokens.get(pos[0]))) {
             pos[0]++;
-            FilterNode right = parseAstAnd(tokens, pos);
+            FilterNode right = parseAstAnd(tokens, pos, depth);
             left = new FilterNode.OrNode(left, right);
         }
         return left;
     }
 
-    private static FilterNode parseAstAnd(List<String> tokens, int[] pos) {
-        FilterNode left = parseAstNot(tokens, pos);
+    private static FilterNode parseAstAnd(List<String> tokens, int[] pos, int depth) {
+        FilterNode left = parseAstNot(tokens, pos, depth);
         while (pos[0] < tokens.size() && "and".equalsIgnoreCase(tokens.get(pos[0]))) {
             pos[0]++;
-            FilterNode right = parseAstNot(tokens, pos);
+            FilterNode right = parseAstNot(tokens, pos, depth);
             left = new FilterNode.AndNode(left, right);
         }
         return left;
     }
 
-    private static FilterNode parseAstNot(List<String> tokens, int[] pos) {
+    private static FilterNode parseAstNot(List<String> tokens, int[] pos, int depth) {
+        enforceMaxDepth(depth);
         if (pos[0] < tokens.size() && "not".equalsIgnoreCase(tokens.get(pos[0]))) {
             pos[0]++;
-            return new FilterNode.NotNode(parseAstAtom(tokens, pos));
+            return new FilterNode.NotNode(parseAstNot(tokens, pos, depth + 1));
         }
-        return parseAstAtom(tokens, pos);
+        return parseAstAtom(tokens, pos, depth);
     }
 
-    private static FilterNode parseAstAtom(List<String> tokens, int[] pos) {
+    private static FilterNode parseAstAtom(List<String> tokens, int[] pos, int depth) {
         if (pos[0] >= tokens.size()) {
             throw new ScimException(400, "invalidFilter", "Unexpected end of filter expression");
         }
         String token = tokens.get(pos[0]);
         if ("(".equals(token)) {
             pos[0]++;
-            FilterNode inner = parseAstOr(tokens, pos);
+            FilterNode inner = parseAstOr(tokens, pos, depth + 1);
             if (pos[0] >= tokens.size() || !")".equals(tokens.get(pos[0]))) {
                 throw new ScimException(400, "invalidFilter", "Missing closing parenthesis");
             }
@@ -503,7 +516,7 @@ public class ScimFilterParser {
 
         if (pos[0] < tokens.size() && "[".equals(tokens.get(pos[0]))) {
             pos[0]++; // consume [
-            FilterNode inner = parseAstOr(tokens, pos);
+            FilterNode inner = parseAstOr(tokens, pos, depth + 1);
             if (pos[0] >= tokens.size() || !"]".equals(tokens.get(pos[0]))) {
                 throw new ScimException(400, "invalidFilter", "Missing closing bracket for value path filter");
             }
@@ -574,7 +587,7 @@ public class ScimFilterParser {
         try {
             List<String> tokens = tokenize(filter);
             int[] pos = {0};
-            Specification<ScimUser> spec = parseOrExpression(tokens, pos, true, null, workspaceId);
+            Specification<ScimUser> spec = parseOrExpression(tokens, pos, true, null, workspaceId, 0);
             if (pos[0] < tokens.size()) {
                 throw new ScimException(400, "invalidFilter", "Unexpected tokens at end of filter: " + tokens.get(pos[0]));
             }
@@ -596,7 +609,7 @@ public class ScimFilterParser {
         try {
             List<String> tokens = tokenize(filter);
             int[] pos = {0};
-            Specification<ScimGroup> spec = parseOrExpression(tokens, pos, false, null, workspaceId);
+            Specification<ScimGroup> spec = parseOrExpression(tokens, pos, false, null, workspaceId, 0);
             if (pos[0] < tokens.size()) {
                 throw new ScimException(400, "invalidFilter", "Unexpected tokens at end of filter: " + tokens.get(pos[0]));
             }
@@ -611,33 +624,35 @@ public class ScimFilterParser {
 
     // ── RECURSIVE DESCENT PARSER (JPA SPECIFICATION) ─────
 
-    private static <T> Specification<T> parseOrExpression(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId) {
-        Specification<T> left = parseAndExpression(tokens, pos, isUser, parentPath, workspaceId);
+    private static <T> Specification<T> parseOrExpression(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId, int depth) {
+        enforceMaxDepth(depth);
+        Specification<T> left = parseAndExpression(tokens, pos, isUser, parentPath, workspaceId, depth);
         while (pos[0] < tokens.size() && "or".equalsIgnoreCase(tokens.get(pos[0]))) {
             pos[0]++;
-            Specification<T> right = parseAndExpression(tokens, pos, isUser, parentPath, workspaceId);
+            Specification<T> right = parseAndExpression(tokens, pos, isUser, parentPath, workspaceId, depth);
             left = left.or(right);
         }
         return left;
     }
 
-    private static <T> Specification<T> parseAndExpression(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId) {
-        Specification<T> left = parseNotExpression(tokens, pos, isUser, parentPath, workspaceId);
+    private static <T> Specification<T> parseAndExpression(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId, int depth) {
+        Specification<T> left = parseNotExpression(tokens, pos, isUser, parentPath, workspaceId, depth);
         while (pos[0] < tokens.size() && "and".equalsIgnoreCase(tokens.get(pos[0]))) {
             pos[0]++;
-            Specification<T> right = parseNotExpression(tokens, pos, isUser, parentPath, workspaceId);
+            Specification<T> right = parseNotExpression(tokens, pos, isUser, parentPath, workspaceId, depth);
             left = left.and(right);
         }
         return left;
     }
 
-    private static <T> Specification<T> parseNotExpression(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId) {
+    private static <T> Specification<T> parseNotExpression(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId, int depth) {
+        enforceMaxDepth(depth);
         if (pos[0] < tokens.size() && "not".equalsIgnoreCase(tokens.get(pos[0]))) {
             pos[0]++;
-            Specification<T> inner = parseAtom(tokens, pos, isUser, parentPath, workspaceId);
+            Specification<T> inner = parseNotExpression(tokens, pos, isUser, parentPath, workspaceId, depth + 1);
             return Specification.not(inner);
         }
-        return parseAtom(tokens, pos, isUser, parentPath, workspaceId);
+        return parseAtom(tokens, pos, isUser, parentPath, workspaceId, depth);
     }
 
     static String stripCoreUrnPrefix(String attrPath, boolean isUser) {
@@ -719,7 +734,7 @@ public class ScimFilterParser {
         return ScimCanonicalizer.normalizeNfc(rawValue);
     }
 
-    private static <T> Specification<T> parseAtom(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId) {
+    private static <T> Specification<T> parseAtom(List<String> tokens, int[] pos, boolean isUser, String parentPath, UUID workspaceId, int depth) {
         if (pos[0] >= tokens.size()) {
             throw new ScimException(400, "invalidFilter", "Unexpected end of filter expression");
         }
@@ -728,7 +743,7 @@ public class ScimFilterParser {
 
         if ("(".equals(token)) {
             pos[0]++;
-            Specification<T> inner = parseOrExpression(tokens, pos, isUser, parentPath, workspaceId);
+            Specification<T> inner = parseOrExpression(tokens, pos, isUser, parentPath, workspaceId, depth + 1);
             if (pos[0] >= tokens.size() || !")".equals(tokens.get(pos[0]))) {
                 throw new ScimException(400, "invalidFilter", "Missing closing parenthesis");
             }
@@ -1325,7 +1340,11 @@ public class ScimFilterParser {
     // ── TOKENIZER ─────────────────────────────────────────
 
     private static List<String> tokenize(String filter) {
-        List<String> tokens = new ArrayList<>(filter.length() / 4 + 4);
+        if (filter.length() > MAX_FILTER_LENGTH) {
+            throw new ScimException(400, "invalidFilter",
+                    "Filter expression exceeds maximum length of " + MAX_FILTER_LENGTH + " characters");
+        }
+        List<String> tokens = new ArrayList<>(Math.min(filter.length() / 4 + 4, MAX_FILTER_TOKENS + 1));
         Matcher matcher = TOKEN_PATTERN.matcher(filter);
         int lastEnd = 0;
         while (matcher.find()) {
@@ -1348,6 +1367,10 @@ public class ScimFilterParser {
                 }
             }
             tokens.add(token);
+            if (tokens.size() > MAX_FILTER_TOKENS) {
+                throw new ScimException(400, "invalidFilter",
+                        "Filter expression exceeds maximum token count of " + MAX_FILTER_TOKENS);
+            }
             lastEnd = matcher.end();
         }
         for (int i = lastEnd; i < filter.length(); i++) {

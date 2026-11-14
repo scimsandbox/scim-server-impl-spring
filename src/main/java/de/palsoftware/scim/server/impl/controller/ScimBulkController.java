@@ -1,5 +1,6 @@
 package de.palsoftware.scim.server.impl.controller;
 
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimUser;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
@@ -33,7 +34,7 @@ public class ScimBulkController extends ScimBaseController {
     private static final String BULK_REQUEST_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:BulkRequest";
     private static final String ENTERPRISE_USER_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
     private static final int MAX_OPERATIONS = 1000;
-    public static final int MAX_PAYLOAD_SIZE = 1048576; // 1 MB per ServiceProviderConfig
+    public static final int MAX_PAYLOAD_SIZE = PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES;
     private static final String KEY_FAIL_ON_ERRORS = "failOnErrors";
     private static final String KEY_OPERATIONS = "Operations";
     private static final String KEY_STATUS = "status";

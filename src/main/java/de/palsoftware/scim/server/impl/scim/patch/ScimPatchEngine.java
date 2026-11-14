@@ -149,7 +149,14 @@ public class ScimPatchEngine {
         }
         validateUnmatchedBrackets(path);
 
-        // Handle enterprise extension paths
+        // Handle core User URN whole-schema object & enterprise extension paths
+        if (ScimUserMapper.isCoreUserSchemaKey(path)) {
+            if (!(value instanceof Map<?, ?> coreMap)) {
+                throw new ScimException(400, "invalidValue", "Core User schema extension must be an object");
+            }
+            applyValueMap(user, (Map<String, Object>) coreMap);
+            return;
+        }
         if (path.equalsIgnoreCase(ENTERPRISE_PREFIX)) {
             setWholeEnterpriseExtension(user, value);
             return;
@@ -203,7 +210,14 @@ public class ScimPatchEngine {
         }
         validateUnmatchedBrackets(path);
 
-        // Enterprise extension
+        // Core User URN whole-schema object & Enterprise extension
+        if (ScimUserMapper.isCoreUserSchemaKey(path)) {
+            if (!(value instanceof Map<?, ?> coreMap)) {
+                throw new ScimException(400, "invalidValue", "Core User schema extension must be an object");
+            }
+            applyValueMap(user, (Map<String, Object>) coreMap);
+            return;
+        }
         if (path.equalsIgnoreCase(ENTERPRISE_PREFIX)) {
             setWholeEnterpriseExtension(user, value);
             return;
@@ -714,13 +728,32 @@ public class ScimPatchEngine {
     }
 
     private static void applyValueMap(ScimUser user, Map<String, Object> valueMap) {
+        applyValueMapInternal(user, valueMap, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void applyValueMapInternal(ScimUser user, Map<String, Object> valueMap, boolean topLevel) {
+        if (topLevel) {
+            ScimUserMapper.applyPasswordFromScimInput(user, valueMap);
+        }
+
         Map<String, Object> normalized = new LinkedHashMap<>();
         Map<String, Object> dottedEnterpriseAttrs = new LinkedHashMap<>();
 
         for (Map.Entry<String, Object> entry : valueMap.entrySet()) {
             String rawKey = entry.getKey();
             Object val = entry.getValue();
+            if (rawKey != null && topLevel && ScimUserMapper.isCoreUserSchemaKey(rawKey.trim())) {
+                if (!(val instanceof Map<?, ?> nestedCoreMap)) {
+                    throw new ScimException(400, "invalidValue", "Core User schema extension must be a complex object");
+                }
+                applyValueMapInternal(user, (Map<String, Object>) nestedCoreMap, false);
+                continue;
+            }
             String key = stripPathPrefix(rawKey);
+            if (key != null && ScimUserMapper.isAsciiPasswordKey(key)) {
+                continue;
+            }
             String keyLower = key.toLowerCase(Locale.ROOT);
 
             // Ignore echoed readOnly/schema metadata in pathless add/replace; reject groups modification
@@ -804,6 +837,7 @@ public class ScimPatchEngine {
             case "preferredlanguage" -> user.setPreferredLanguage(null);
             case "locale" -> user.setLocale(null);
             case "timezone" -> user.setTimezone(null);
+            case "password" -> user.setPassword(null);
             case "name" -> {
                 user.setNameFormatted(null);
                 user.setNameFamilyName(null);

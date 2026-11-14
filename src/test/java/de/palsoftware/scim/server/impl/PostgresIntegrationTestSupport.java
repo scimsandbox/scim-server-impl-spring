@@ -107,17 +107,21 @@ public abstract class PostgresIntegrationTestSupport {
         try (Connection connection = DriverManager.getConnection(jdbcUrl, username, password)) {
             boolean hasWorkspaces = tableExists(connection, "workspaces");
             boolean hasAsyncEvents = tableExists(connection, "scim_async_events");
-            if (hasWorkspaces && hasAsyncEvents) {
+            boolean hasV5Constraints = constraintExists(connection, "chk_scim_users_password_bcrypt");
+            if (hasWorkspaces && hasAsyncEvents && hasV5Constraints) {
                 return;
             }
             if (localSqlDir == null) {
+                if (migratedByContainer && hasWorkspaces && hasAsyncEvents) {
+                    return;
+                }
                 if (!migratedByContainer) {
                     throw new SQLException("No local SQL migration directory found and DB migration image was unavailable");
                 }
                 throw new SQLException("Test database schema '" + SCHEMA
                         + "' is missing required tables (scim_async_events); rebuild scim-server-db image or provide ../scim-server-db/sql");
             }
-            int minVersion = hasWorkspaces ? 2 : 1;
+            int minVersion = !hasWorkspaces ? 1 : (!hasAsyncEvents ? 2 : 5);
             List<Path> migrationFiles;
             try (Stream<Path> stream = Files.list(localSqlDir)) {
                 migrationFiles = stream
@@ -144,6 +148,16 @@ public abstract class PostgresIntegrationTestSupport {
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT to_regclass('" + SCHEMA + "." + tableName + "')")) {
             return rs.next() && rs.getString(1) != null;
+        }
+    }
+
+    private static boolean constraintExists(Connection connection, String constraintName) throws SQLException {
+        String sql = "SELECT 1 FROM pg_constraint c "
+                + "JOIN pg_namespace n ON n.oid = c.connamespace "
+                + "WHERE n.nspname = '" + SCHEMA + "' AND c.conname = '" + constraintName + "'";
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            return rs.next();
         }
     }
 

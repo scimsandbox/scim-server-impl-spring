@@ -261,7 +261,7 @@ public class ScimDiscoveryController extends ScimBaseController {
     }
 
     private static TargetResourceTypes resolveTargetResourceTypes(String filter) {
-        if (filter == null || filter.isBlank()) {
+        if (filter == null || filter.isBlank() || filter.length() > ScimFilterParser.MAX_FILTER_LENGTH) {
             return new TargetResourceTypes(true, true);
         }
         String unwrapped = stripOuterParentheses(filter);
@@ -405,7 +405,7 @@ public class ScimDiscoveryController extends ScimBaseController {
                 Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, effectiveStartIndex, count);
                 @SuppressWarnings("unchecked")
                 List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
-                allResources.addAll(mapUsers(users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
+                allResources.addAll(mapUsers(wsId, users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
             } else if (!usersEligible && groupsEligible) {
                 Map<String, Object> gResult = groupService.listGroups(wsId, filter, sortBy, sortOrder, effectiveStartIndex, count);
                 @SuppressWarnings("unchecked")
@@ -423,7 +423,7 @@ public class ScimDiscoveryController extends ScimBaseController {
                         List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
                         if (users != null && !users.isEmpty()) {
                             List<UUID> userIds = users.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
-                            Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(userIds, baseUrl);
+                            Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(wsId, userIds, baseUrl);
                             for (ScimUser u : users) {
                                 List<Map<String, Object>> userGroups = groupsByUserId.getOrDefault(u.getId(), Collections.emptyList());
                                 combined.add(ScimUserMapper.toScimResponse(u, compatBaseUrl, userGroups));
@@ -461,7 +461,7 @@ public class ScimDiscoveryController extends ScimBaseController {
                             Map<String, Object> uResult = userService.listUsers(wsId, filter, sortBy, sortOrder, effectiveStartIndex, takeUsers);
                             @SuppressWarnings("unchecked")
                             List<ScimUser> users = (List<ScimUser>) uResult.get("Resources");
-                            allResources.addAll(mapUsers(users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
+                            allResources.addAll(mapUsers(wsId, users, baseUrl, compatBaseUrl, compatMode, attributes, excludedAttributes));
                         }
                         int remaining = count - takeUsers;
                         if (remaining > 0 && totalGroups > 0) {
@@ -487,6 +487,7 @@ public class ScimDiscoveryController extends ScimBaseController {
     }
 
     private List<Map<String, Object>> mapUsers(
+            UUID wsId,
             List<ScimUser> users,
             String baseUrl,
             String compatBaseUrl,
@@ -497,7 +498,7 @@ public class ScimDiscoveryController extends ScimBaseController {
             return Collections.emptyList();
         }
         List<UUID> userIds = users.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
-        Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(userIds, baseUrl);
+        Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(wsId, userIds, baseUrl);
 
         return users.stream()
                 .map(u -> {

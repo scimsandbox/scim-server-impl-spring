@@ -54,7 +54,7 @@ class ScimUserControllerTest {
     @Test
     void testCreateUser() {
         when(userService.createUser(eq(workspaceId), any())).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         Map<String, Object> body = Map.of("userName", "test.user");
         ResponseEntity<Map<String, Object>> response = controller.createUser(workspaceId.toString(), body, null, request);
@@ -71,7 +71,7 @@ class ScimUserControllerTest {
     @Test
     void testGetUser() {
         when(userService.getUser(workspaceId, userId)).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         ResponseEntity<Map<String, Object>> response = controller.getUser(workspaceId.toString(), userId.toString(), null, null, null, null, request);
 
@@ -91,7 +91,7 @@ class ScimUserControllerTest {
         result.put("Resources", List.of(mockUser));
         
         when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.listUsers(workspaceId.toString(), null, "userName", "ascending", -1, 300, null, null, null, null, request);
 
@@ -105,7 +105,7 @@ class ScimUserControllerTest {
     @Test
     void testReplaceUser() {
         when(userService.replaceUser(eq(workspaceId), eq(userId), any(), any())).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         Map<String, Object> body = Map.of("userName", "test.user");
         ResponseEntity<Map<String, Object>> response = controller.replaceUser(workspaceId.toString(), userId.toString(), body, null, null, request);
@@ -118,7 +118,7 @@ class ScimUserControllerTest {
     @Test
     void testPatchUser() {
         when(userService.patchUser(eq(workspaceId), eq(userId), any(), any())).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         Map<String, Object> body = new HashMap<>();
         body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:PatchOp"));
@@ -161,7 +161,7 @@ class ScimUserControllerTest {
         result.put("Resources", List.of(mockUser));
 
         when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         Map<String, Object> body = new HashMap<>();
         body.put("filter", "userName eq \"test.user\"");
@@ -184,7 +184,7 @@ class ScimUserControllerTest {
         result.put("Resources", List.of(mockUser));
 
         when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         // Empty body — should use defaults
         Map<String, Object> body = new HashMap<>();
@@ -201,7 +201,7 @@ class ScimUserControllerTest {
         result.put("Resources", List.of(mockUser));
 
         when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         Map<String, Object> body = new HashMap<>();
         body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"));
@@ -225,7 +225,7 @@ class ScimUserControllerTest {
         result.put("Resources", List.of(mockUser));
 
         when(userService.listUsers(eq(workspaceId), any(), any(), any(), anyInt(), anyInt())).thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         Map<String, Object> body = new HashMap<>();
         body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:SearchRequest"));
@@ -266,7 +266,7 @@ class ScimUserControllerTest {
     @Test
     void testGetUser_IfNoneMatch_Mismatch_Returns200() {
         when(userService.getUser(workspaceId, userId)).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         ResponseEntity<Map<String, Object>> response = controller.getUser(
                 workspaceId.toString(), userId.toString(), null, null, "W/\"999\"", null, request);
@@ -280,7 +280,7 @@ class ScimUserControllerTest {
     @Test
     void testCreateUser_HasContentLocationHeader() {
         when(userService.createUser(eq(workspaceId), any())).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         Map<String, Object> body = Map.of("userName", "test.user");
         ResponseEntity<Map<String, Object>> response = controller.createUser(workspaceId.toString(), body, null, request);
@@ -293,7 +293,7 @@ class ScimUserControllerTest {
     @Test
     void testGetUser_HasContentLocationHeader() {
         when(userService.getUser(workspaceId, userId)).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         ResponseEntity<Map<String, Object>> response = controller.getUser(
                 workspaceId.toString(), userId.toString(), null, null, null, null, request);
@@ -306,7 +306,7 @@ class ScimUserControllerTest {
     @Test
     void testReplaceUser_HasContentLocationHeader() {
         when(userService.replaceUser(eq(workspaceId), eq(userId), any(), any())).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         Map<String, Object> body = Map.of("userName", "test.user");
         ResponseEntity<Map<String, Object>> response = controller.replaceUser(workspaceId.toString(), userId.toString(), body, null, null, request);
@@ -319,7 +319,7 @@ class ScimUserControllerTest {
     @Test
     void testPatchUser_HasContentLocationHeader() {
         when(userService.patchUser(eq(workspaceId), eq(userId), any(), any())).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         Map<String, Object> body = new HashMap<>();
         body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:PatchOp"));
@@ -338,7 +338,7 @@ class ScimUserControllerTest {
     void testGetUser_PasswordRemovedFromProjection() {
         mockUser.setPassword("secret123");
         when(userService.getUser(workspaceId, userId)).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         ResponseEntity<Map<String, Object>> response = controller.getUser(
                 workspaceId.toString(), userId.toString(), "userName", null, null, null, request);
@@ -352,7 +352,7 @@ class ScimUserControllerTest {
     @Test
     void testGetUser_UrnPrefixedCoreAttribute() {
         when(userService.getUser(workspaceId, userId)).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         // Use urn:ietf:params:scim:schemas:core:2.0:User:userName — should resolve to "userName"
         ResponseEntity<Map<String, Object>> response = controller.getUser(
@@ -368,7 +368,7 @@ class ScimUserControllerTest {
     @Test
     void testGetUser_UrnPrefixedEnterpriseExtension() {
         when(userService.getUser(workspaceId, userId)).thenReturn(mockUser);
-        when(userService.getUserGroups(any(), any())).thenReturn(Collections.emptyList());
+        when(userService.getUserGroups(any(), any(), any())).thenReturn(Collections.emptyList());
 
         // Enterprise URN should be kept as the top-level key
         ResponseEntity<Map<String, Object>> response = controller.getUser(
@@ -392,7 +392,7 @@ class ScimUserControllerTest {
 
         when(userService.listUsers(eq(workspaceId), isNull(), eq("userName"), eq("ascending"), eq(1), eq(1)))
                 .thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.listUsers(
                 workspaceId.toString(), null, "userName", "ascending", null, 1, "", null, null, null, request);
@@ -417,7 +417,7 @@ class ScimUserControllerTest {
 
         when(userService.listUsers(eq(workspaceId), isNull(), eq("userName"), eq("ascending"), eq(2), eq(1)))
                 .thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.listUsers(
                 workspaceId.toString(), null, "userName", "ascending", null, 1, token, null, null, null, request);
@@ -440,7 +440,7 @@ class ScimUserControllerTest {
 
         when(userService.listUsers(eq(workspaceId), isNull(), eq("userName"), eq("ascending"), eq(5), eq(1)))
                 .thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.listUsers(
                 workspaceId.toString(), null, "userName", "ascending", null, 1, token, null, null, null, request);
@@ -482,7 +482,7 @@ class ScimUserControllerTest {
 
         when(userService.listUsers(eq(workspaceId), isNull(), eq("userName"), eq("ascending"), eq(1), eq(1)))
                 .thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         Map<String, Object> searchBody = Map.of("cursor", "", "count", 1);
         ResponseEntity<Map<String, Object>> response = controller.searchUsers(
@@ -597,7 +597,7 @@ class ScimUserControllerTest {
 
         when(userService.listUsers(eq(workspaceId), isNull(), eq("userName"), eq("ascending"), eq(3), eq(0)))
                 .thenReturn(result);
-        when(userService.getUserGroupsBatch(any(), any())).thenReturn(Collections.emptyMap());
+        when(userService.getUserGroupsBatch(any(), any(), any())).thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.listUsers(
                 workspaceId.toString(), null, "userName", "ascending", null, 0, token, null, null, null, request);

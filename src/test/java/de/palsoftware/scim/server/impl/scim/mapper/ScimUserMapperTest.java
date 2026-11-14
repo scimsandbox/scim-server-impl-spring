@@ -163,16 +163,47 @@ class ScimUserMapperTest {
         assertTrue(newUser.getPassword().startsWith("$2a$") || newUser.getPassword().startsWith("$2b$"));
         assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("PlaintextPassword!123", newUser.getPassword()));
 
-        // When password is already bcrypt-hashed, it should not be rehashed
-        String preHashed = "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr";
-        input.put("password", preHashed);
-        ScimUserMapper.applyFromScimInput(newUser, input);
-        assertEquals(preHashed, newUser.getPassword());
+        // Any $2a$/$2b$/$2y$-prefixed client input (whether malformed or 60 chars) is hashed as cleartext
+        for (String bcryptPrefixedInput : List.of(
+                "$2a$hello",
+                "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr")) {
+            input.put("password", bcryptPrefixedInput);
+            ScimUserMapper.applyFromScimInput(newUser, input);
+            assertNotNull(newUser.getPassword());
+            assertNotEquals(bcryptPrefixedInput, newUser.getPassword());
+            assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder()
+                    .matches(bcryptPrefixedInput, newUser.getPassword()));
+        }
 
-        // When password is null or empty
+        // Null password clears to null, while empty string "" is rejected with 400 invalidValue
         input.put("password", null);
         ScimUserMapper.applyFromScimInput(newUser, input);
         assertNull(newUser.getPassword());
+
+        input.put("password", "");
+        ScimException emptyEx = assertThrows(ScimException.class,
+                () -> ScimUserMapper.applyFromScimInput(newUser, input));
+        assertEquals(400, emptyEx.getHttpStatus());
+        assertEquals("invalidValue", emptyEx.getScimType());
+
+        // Exactly 72 UTF-8 bytes succeeds
+        String exact72Ascii = "a".repeat(72);
+        input.put("password", exact72Ascii);
+        ScimUserMapper.applyFromScimInput(newUser, input);
+        assertNotNull(newUser.getPassword());
+        assertTrue(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches(exact72Ascii, newUser.getPassword()));
+
+        // 73 ASCII bytes rejected with 400 invalidValue (not 500 IllegalArgumentException)
+        input.put("password", "a".repeat(73));
+        ScimException asciiEx = assertThrows(ScimException.class, () -> ScimUserMapper.applyFromScimInput(newUser, input));
+        assertEquals(400, asciiEx.getHttpStatus());
+        assertEquals("invalidValue", asciiEx.getScimType());
+
+        // 25x 3-byte UTF-8 characters ('€') = 25 chars but 75 UTF-8 bytes -> rejected with 400 invalidValue
+        input.put("password", "€".repeat(25));
+        ScimException utf8Ex = assertThrows(ScimException.class, () -> ScimUserMapper.applyFromScimInput(newUser, input));
+        assertEquals(400, utf8Ex.getHttpStatus());
+        assertEquals("invalidValue", utf8Ex.getScimType());
     }
 
     @Test
@@ -464,5 +495,82 @@ class ScimUserMapperTest {
                         "$ref", "/Groups/" + mgr1)));
         assertEquals(400, wrongType.getHttpStatus());
         assertEquals("invalidValue", wrongType.getScimType());
+    }
+
+    @Test
+    void applyFromScimInput_caseInsensitiveAndCoreUrnPasswords_validatesAllAndSelectsDeterministically() {
+        var encoder = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder();
+
+        // Case-insensitive "Password": "ValidSecret!1" is BCrypt-hashed instead of dropped
+        ScimUser uValidUpper = new ScimUser();
+        ScimUserMapper.applyFromScimInput(uValidUpper, Map.of(
+                "userName", "alice",
+                "Password", "ValidSecret!1"));
+        assertNotNull(uValidUpper.getPassword());
+        assertTrue(encoder.matches("ValidSecret!1", uValidUpper.getPassword()));
+
+        // URN-prefixed and nested Core User URN valid passwords are also BCrypt-hashed
+        ScimUser uUrnValid = new ScimUser();
+        ScimUserMapper.applyFromScimInput(uUrnValid, Map.of(
+                "userName", "alice",
+                "urn:ietf:params:scim:schemas:core:2.0:User:Password", "UrnSecret!2"));
+        assertNotNull(uUrnValid.getPassword());
+        assertTrue(encoder.matches("UrnSecret!2", uUrnValid.getPassword()));
+
+        ScimUser uNestedValid = new ScimUser();
+        ScimUserMapper.applyFromScimInput(uNestedValid, Map.of(
+                "userName", "alice",
+                "urn:ietf:params:scim:schemas:core:2.0:User", Map.of("Password", "NestedSecret!3")));
+        assertNotNull(uNestedValid.getPassword());
+        assertTrue(encoder.matches("NestedSecret!3", uNestedValid.getPassword()));
+
+        // Empty, non-string, >72B, and mixed valid+invalid case/URN variants all fail with 400 invalidValue
+        List<Map<String, Object>> invalidInputs = List.of(
+                Map.of("userName", "alice", "Password", ""),
+                Map.of("userName", "alice", "Password", 123),
+                Map.of("userName", "alice", "Password", "a".repeat(73)),
+                Map.of("userName", "alice", "urn:ietf:params:scim:schemas:core:2.0:User:Password", ""),
+                Map.of("userName", "alice", "urn:ietf:params:scim:schemas:core:2.0:User", Map.of("Password", "")),
+                Map.of("userName", "alice", "password", "Valid!1", "Password", ""),
+                Map.of("userName", "alice", "Password", "Valid!1", "password", 123),
+                Map.of("userName", "alice", "password", "Valid!1", "urn:ietf:params:scim:schemas:core:2.0:User:Password", ""),
+                Map.of("userName", "alice", "password", "Valid!1",
+                        "urn:ietf:params:scim:schemas:core:2.0:User", Map.of("Password", "")));
+
+        for (Map<String, Object> badInput : invalidInputs) {
+            ScimUser target = new ScimUser();
+            ScimException ex = assertThrows(ScimException.class,
+                    () -> ScimUserMapper.applyFromScimInput(target, badInput),
+                    "Expected 400 invalidValue for input: " + badInput);
+            assertEquals(400, ex.getHttpStatus());
+            assertEquals("invalidValue", ex.getScimType());
+        }
+
+        // Deterministic winner: exact "password" beats "PASSWORD" and "Password"
+        Map<String, Object> withExact = new LinkedHashMap<>();
+        withExact.put("userName", "alice");
+        withExact.put("PASSWORD", "UpperLoser!1");
+        withExact.put("Password", "MixedLoser!2");
+        withExact.put("password", "ExactWinner!3");
+        ScimUser uExact = new ScimUser();
+        ScimUserMapper.applyFromScimInput(uExact, withExact);
+        assertTrue(encoder.matches("ExactWinner!3", uExact.getPassword()));
+
+        // Without exact "password", lexically smallest key ("PASSWORD" < "Password" < "pAssword") wins
+        Map<String, Object> withoutExact = new LinkedHashMap<>();
+        withoutExact.put("userName", "alice");
+        withoutExact.put("pAssword", "ThirdLexical!3");
+        withoutExact.put("Password", "SecondLexical!2");
+        withoutExact.put("PASSWORD", "FirstLexical!1");
+        ScimUser uLexical = new ScimUser();
+        ScimUserMapper.applyFromScimInput(uLexical, withoutExact);
+        assertTrue(encoder.matches("FirstLexical!1", uLexical.getPassword()));
+
+        // Non-ASCII Unicode fold equivalent ("pa\u017fsword") is NOT matched as ASCII "password"
+        ScimUser uNonAscii = new ScimUser();
+        ScimUserMapper.applyFromScimInput(uNonAscii, Map.of(
+                "userName", "alice",
+                "pa\u017fsword", "IgnoredNonAscii!1"));
+        assertNull(uNonAscii.getPassword());
     }
 }

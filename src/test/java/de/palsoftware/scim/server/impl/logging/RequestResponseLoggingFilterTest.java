@@ -4,9 +4,12 @@ import de.palsoftware.scim.server.impl.model.ScimRequestLog;
 import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.repository.ScimRequestLogRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
+import de.palsoftware.scim.server.impl.scim.error.ScimException;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +21,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
@@ -191,30 +195,6 @@ class RequestResponseLoggingFilterTest {
     }
 
     @Test
-    void bulkRequestStreamExceedingMaxPayloadSize_AbortsEarlyWith413() throws Exception {
-        byte[] oversizedBody = new byte[de.palsoftware.scim.server.impl.controller.ScimBulkController.MAX_PAYLOAD_SIZE + 512];
-        java.util.Arrays.fill(oversizedBody, (byte) 'a');
-
-        MockHttpServletRequest request = new MockHttpServletRequest();
-        request.setMethod("POST");
-        request.setRequestURI("/ws/" + workspaceId + "/scim/v2/Bulk");
-        request.setContentType("application/scim+json");
-        request.setContent(oversizedBody);
-        MockHttpServletResponse response = new MockHttpServletResponse();
-
-        FilterChain chain = (servletRequest, servletResponse) -> {
-            // Attempting to read the entire stream triggers the 1 MiB cap in BoundedBulkRequestWrapper
-            servletRequest.getInputStream().readAllBytes();
-        };
-
-        filter.doFilter(request, response, chain);
-
-        assertEquals(413, response.getStatus());
-        assertTrue(response.getContentAsString().contains("urn:ietf:params:scim:api:messages:2.0:Error"));
-        assertTrue(response.getContentAsString().contains("\"status\":\"413\""));
-    }
-
-    @Test
     void redactWithRegexFallback_LinearTimeOnAdversarialMalformedInput() {
         // 20,000-character malformed JSON payload with repeated "value":"..." segments and unclosed quotes
         StringBuilder sb = new StringBuilder(22_000);
@@ -234,5 +214,90 @@ class RequestResponseLoggingFilterTest {
         assertFalse(redacted.contains("FinalSecret!99"));
         assertTrue(redacted.contains("\"[REDACTED]\""));
         assertTrue(elapsedMs < 500, "Expected linear-time redaction (<500ms), took " + elapsedMs + "ms");
+    }
+
+    @Test
+    void nonScimAndMalformedWorkspacePaths_SkipLogPersistenceWithoutBreakingResponse() throws Exception {
+        MockHttpServletRequest actuatorReq = new MockHttpServletRequest("GET", "/actuator/health");
+        MockHttpServletResponse actuatorResp = new MockHttpServletResponse();
+        filter.doFilter(actuatorReq, actuatorResp, (_, res) -> ((HttpServletResponse) res).setStatus(200));
+        Mockito.verifyNoInteractions(logRepository);
+
+        MockHttpServletRequest nonUuidScimReq = new MockHttpServletRequest("GET", "/ws/not-a-uuid/scim/v2/Users");
+        MockHttpServletResponse nonUuidScimResp = new MockHttpServletResponse();
+        filter.doFilter(nonUuidScimReq, nonUuidScimResp, (_, res) -> {
+            ((HttpServletResponse) res).setStatus(404);
+            res.getWriter().write("{\"status\":\"404\"}");
+        });
+        assertEquals(404, nonUuidScimResp.getStatus());
+        assertEquals("{\"status\":\"404\"}", nonUuidScimResp.getContentAsString());
+        Mockito.verifyNoInteractions(logRepository);
+    }
+
+    @Test
+    void redactPasswords_AlsoRedactsAuthorizationFieldsAndNeverPersistsAuthHeader() throws Exception {
+        String payload = "{\"userName\":\"alice\",\"authorization\":\"Bearer secret-jwt\",\"Authorization\":\"Basic abc\"}";
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users");
+        request.setContentType("application/scim+json");
+        request.addHeader("Authorization", "Bearer top-secret-workspace-token");
+        request.setContent(payload.getBytes(StandardCharsets.UTF_8));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        FilterChain chain = (req, res) -> {
+            req.getInputStream().readAllBytes();
+            ((HttpServletResponse) res).setStatus(201);
+            res.getWriter().write("{\"id\":\"1\"}");
+        };
+
+        filter.doFilter(request, response, chain);
+
+        ArgumentCaptor<ScimRequestLog> logCaptor = ArgumentCaptor.forClass(ScimRequestLog.class);
+        verify(logRepository).save(logCaptor.capture());
+        ScimRequestLog saved = logCaptor.getValue();
+        assertFalse(saved.getRequestBody().contains("secret-jwt"));
+        assertFalse(saved.getRequestBody().contains("Basic abc"));
+        assertFalse(saved.getRequestBody().contains("top-secret-workspace-token"));
+        assertTrue(saved.getRequestBody().contains("\"[REDACTED]\""));
+    }
+
+    @Test
+    void uncaughtScimExceptionAndRuntimeException_LogActualErrorStatusInsteadOfDefault200() {
+        // 1. Uncaught ScimException(413) logs status 413
+        MockHttpServletRequest scimExReq = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Users");
+        MockHttpServletResponse scimExResp = new MockHttpServletResponse();
+        assertThrows(ScimException.class, () -> filter.doFilter(scimExReq, scimExResp, (_, _) -> {
+            throw new ScimException(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, null, "Payload too large");
+        }));
+
+        // 2. Wrapped ScimException(413) inside ServletException also logs status 413
+        MockHttpServletRequest wrappedScimExReq = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Bulk");
+        MockHttpServletResponse wrappedScimExResp = new MockHttpServletResponse();
+        assertThrows(ServletException.class, () -> filter.doFilter(wrappedScimExReq, wrappedScimExResp, (_, _) -> {
+            throw new ServletException(new ScimException(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, null, "Bulk payload too large"));
+        }));
+
+        // 3. Uncaught RuntimeException logs status 500 (never 200)
+        MockHttpServletRequest runtimeExReq = new MockHttpServletRequest("GET", "/ws/" + workspaceId + "/scim/v2/Users");
+        MockHttpServletResponse runtimeExResp = new MockHttpServletResponse();
+        assertThrows(IllegalStateException.class, () -> filter.doFilter(runtimeExReq, runtimeExResp, (_, _) -> {
+            throw new IllegalStateException("Unexpected failure");
+        }));
+
+        // 4. Pre-populated >=400 response status is preserved when an exception unwinds
+        MockHttpServletRequest presetStatusReq = new MockHttpServletRequest("PATCH", "/ws/" + workspaceId + "/scim/v2/Users/1");
+        MockHttpServletResponse presetStatusResp = new MockHttpServletResponse();
+        assertThrows(RuntimeException.class, () -> filter.doFilter(presetStatusReq, presetStatusResp, (_, res) -> {
+            ((HttpServletResponse) res).setStatus(HttpServletResponse.SC_BAD_GATEWAY);
+            throw new RuntimeException("Upstream error");
+        }));
+
+        ArgumentCaptor<ScimRequestLog> logCaptor = ArgumentCaptor.forClass(ScimRequestLog.class);
+        verify(logRepository, Mockito.times(4)).save(logCaptor.capture());
+        List<ScimRequestLog> savedLogs = logCaptor.getAllValues();
+
+        assertEquals(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, savedLogs.get(0).getStatus());
+        assertEquals(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, savedLogs.get(1).getStatus());
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, savedLogs.get(2).getStatus());
+        assertEquals(HttpServletResponse.SC_BAD_GATEWAY, savedLogs.get(3).getStatus());
     }
 }

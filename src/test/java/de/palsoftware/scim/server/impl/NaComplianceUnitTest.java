@@ -8,6 +8,7 @@ import de.palsoftware.scim.server.impl.controller.ScimDiscoveryController;
 import de.palsoftware.scim.server.impl.controller.ScimGroupController;
 import de.palsoftware.scim.server.impl.controller.ScimUserController;
 import de.palsoftware.scim.server.impl.entity.ScimAsyncEvent;
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
 import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimGroupMembership;
@@ -151,7 +152,7 @@ class NaComplianceUnitTest {
                         .filter(u -> u.getWorkspace() != null && workspaceId.equals(u.getWorkspace().getId()))
                         .toList();
                 List<UUID> ids = wsUsers.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
-                Map<UUID, List<Map<String, Object>>> groupsMap = getUserGroupsBatch(ids, "");
+                Map<UUID, List<Map<String, Object>>> groupsMap = getUserGroupsBatch(workspaceId, ids, "");
 
                 List<ScimUser> matched = new ArrayList<>();
                 for (ScimUser u : wsUsers) {
@@ -225,13 +226,14 @@ class NaComplianceUnitTest {
                 asyncEventRepository, objectMapper, asyncEventService);
 
         BearerTokenAuthFilter authFilter = new BearerTokenAuthFilter(tokenRepository, workspaceRepository, objectMapper);
+        PayloadSizeLimitFilter payloadSizeLimitFilter = new PayloadSizeLimitFilter(objectMapper);
         RequestResponseLoggingFilter loggingFilter = new RequestResponseLoggingFilter(
                 requestLogRepository, workspaceRepository);
 
         mockMvc = MockMvcBuilders.standaloneSetup(
                         userController, groupController, bulkController, discoveryController, asyncEventController)
                 .setControllerAdvice(new ScimExceptionHandler())
-                .addFilters(authFilter, loggingFilter)
+                .addFilters(authFilter, payloadSizeLimitFilter, loggingFilter)
                 .build();
 
         workspaceA = seedWorkspace("tenant-alpha");
@@ -1238,11 +1240,15 @@ class NaComplianceUnitTest {
             return null;
         }).when(groupRepository).delete(any(ScimGroup.class));
 
-        when(membershipRepository.findByMemberValue(any(UUID.class)))
+        when(membershipRepository.findByMemberValueAndWorkspaceId(any(UUID.class), any(UUID.class)))
                 .thenAnswer(inv -> {
                     UUID memberId = inv.getArgument(0);
+                    UUID wsId = inv.getArgument(1);
                     List<ScimGroupMembership> found = new ArrayList<>();
                     for (ScimGroup g : groups.values()) {
+                        if (g.getWorkspace() == null || !wsId.equals(g.getWorkspace().getId())) {
+                            continue;
+                        }
                         for (ScimGroupMembership m : g.getMembers()) {
                             if (memberId.equals(m.getMemberValue())) {
                                 found.add(m);
@@ -1251,12 +1257,16 @@ class NaComplianceUnitTest {
                     }
                     return found;
                 });
-        when(membershipRepository.findByMemberValueIn(any(List.class)))
+        when(membershipRepository.findByMemberValueInAndWorkspaceId(any(List.class), any(UUID.class)))
                 .thenAnswer(inv -> {
                     @SuppressWarnings("unchecked")
                     List<UUID> memberIds = inv.getArgument(0);
+                    UUID wsId = inv.getArgument(1);
                     List<ScimGroupMembership> found = new ArrayList<>();
                     for (ScimGroup g : groups.values()) {
+                        if (g.getWorkspace() == null || !wsId.equals(g.getWorkspace().getId())) {
+                            continue;
+                        }
                         for (ScimGroupMembership m : g.getMembers()) {
                             if (memberIds.contains(m.getMemberValue())) {
                                 found.add(m);
@@ -1265,11 +1275,15 @@ class NaComplianceUnitTest {
                     }
                     return found;
                 });
-        when(membershipRepository.deleteByMemberValue(any(UUID.class)))
+        when(membershipRepository.deleteByMemberValueAndWorkspaceId(any(UUID.class), any(UUID.class)))
                 .thenAnswer(inv -> {
                     UUID memberId = inv.getArgument(0);
+                    UUID wsId = inv.getArgument(1);
                     long removed = 0;
                     for (ScimGroup g : groups.values()) {
+                        if (g.getWorkspace() == null || !wsId.equals(g.getWorkspace().getId())) {
+                            continue;
+                        }
                         int before = g.getMembers().size();
                         g.getMembers().removeIf(m -> memberId.equals(m.getMemberValue()));
                         removed += (before - g.getMembers().size());

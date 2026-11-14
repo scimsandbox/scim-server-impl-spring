@@ -6,8 +6,12 @@ import org.hibernate.annotations.OnDeleteAction;
 import java.util.UUID;
 
 @Entity
-@Table(name = "scim_group_memberships", indexes = {
-    @Index(name = "idx_group_memberships_workspace_group_id", columnList = "workspace_id, group_id"),
+@Table(name = "scim_group_memberships", uniqueConstraints = {
+    @UniqueConstraint(
+        name = "uk_scim_group_memberships_workspace_group_member",
+        columnNames = {"workspace_id", "group_id", "member_value"}
+    )
+}, indexes = {
     @Index(name = "idx_group_memberships_workspace_member_value", columnList = "workspace_id, member_value"),
     @Index(name = "idx_membership_member_value", columnList = "member_value"),
     @Index(name = "idx_membership_group_id", columnList = "group_id")

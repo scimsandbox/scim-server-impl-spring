@@ -2,6 +2,8 @@ package de.palsoftware.scim.server.impl.controller;
 
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -14,11 +16,13 @@ import java.util.Map;
 
 /**
  * Custom ErrorController that ensures any servlet-level or unhandled container errors
- * forwarded to /error produce a SCIM 2.0 compliant error representation (RFC 7644 §3.12).
+ * forwarded to /error produce a SCIM 2.0 compliant error representation (RFC 7644 §3.12)
+ * without leaking internal exception messages.
  */
 @RestController
 public class ScimErrorController implements ErrorController {
 
+    private static final Logger log = LoggerFactory.getLogger(ScimErrorController.class);
     private static final String ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error";
     private static final MediaType SCIM_JSON = MediaType.parseMediaType("application/scim+json;charset=UTF-8");
 
@@ -29,24 +33,30 @@ public class ScimErrorController implements ErrorController {
             statusCode = 500;
         }
 
-        String message = (String) request.getAttribute(RequestDispatcher.ERROR_MESSAGE);
         Throwable throwable = (Throwable) request.getAttribute(RequestDispatcher.ERROR_EXCEPTION);
+        String errorUri = (String) request.getAttribute(RequestDispatcher.ERROR_REQUEST_URI);
 
         String detail;
-        if (message != null && !message.isBlank()) {
-            detail = message;
-        } else if (throwable != null && throwable.getMessage() != null && !throwable.getMessage().isBlank()) {
-            detail = throwable.getMessage();
-        } else if (statusCode == 404) {
-            detail = "Resource not found";
-        } else if (statusCode == 405) {
-            detail = "Method not allowed";
-        } else if (statusCode == 415) {
-            detail = "Unsupported Media Type";
-        } else if (statusCode == 406) {
-            detail = "Not Acceptable";
+        if (statusCode >= 500) {
+            if (throwable != null) {
+                log.error("Unhandled server error (status={}) on URI={}", statusCode, errorUri, throwable);
+            } else {
+                log.error("Unhandled server error (status={}) on URI={}", statusCode, errorUri);
+            }
+            detail = "An unexpected internal error occurred.";
         } else {
-            detail = "Server error";
+            detail = switch (statusCode) {
+                case 400 -> "Bad request";
+                case 401 -> "Unauthorized";
+                case 403 -> "Forbidden";
+                case 404 -> "Resource not found";
+                case 405 -> "Method not allowed";
+                case 406 -> "Not Acceptable";
+                case 413 -> "Payload Too Large";
+                case 415 -> "Unsupported Media Type";
+                case 429 -> "Too Many Requests";
+                default -> "Request error";
+            };
         }
 
         Map<String, Object> body = new LinkedHashMap<>();

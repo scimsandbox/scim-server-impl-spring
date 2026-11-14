@@ -35,6 +35,7 @@ public final class ScimCursorCodec {
 
     private static final int HMAC_TAG_BYTES = 16;
     private static final String HMAC_ALGO = "HmacSHA256";
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final byte[] EPHEMERAL_FALLBACK_KEY = generateEphemeralKey();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static volatile byte[] hmacSecret = initHmacSecret();
@@ -51,7 +52,7 @@ public final class ScimCursorCodec {
 
     private static byte[] generateEphemeralKey() {
         byte[] bytes = new byte[32];
-        new SecureRandom().nextBytes(bytes);
+        SECURE_RANDOM.nextBytes(bytes);
         return bytes;
     }
 

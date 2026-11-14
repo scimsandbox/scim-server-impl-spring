@@ -926,6 +926,9 @@ public class ScimGroupService {
     }
 
     private String validateAndResolveExplicitMemberType(ScimGroup group, UUID workspaceId, UUID memberId, String rawType) {
+        if (group.getId() != null && Objects.equals(group.getId(), memberId)) {
+            throw new ScimException(400, "invalidValue", "Group cannot include itself as a member");
+        }
         String trimmedType = rawType.trim();
         if (RESOURCE_TYPE_USER.equalsIgnoreCase(trimmedType)) {
             userRepository.findByIdAndWorkspaceId(memberId, workspaceId)
@@ -934,11 +937,9 @@ public class ScimGroupService {
             return RESOURCE_TYPE_USER;
         }
         if (RESOURCE_TYPE_GROUP.equalsIgnoreCase(trimmedType)) {
-            Optional<ScimGroup> grpOpt = groupRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-            if ((grpOpt == null || grpOpt.isEmpty()) && !Objects.equals(group.getId(), memberId)) {
-                throw new ScimException(404, "invalidValue",
-                        RESOURCE_TYPE_GROUP + " not found: " + memberId);
-            }
+            groupRepository.findByIdAndWorkspaceId(memberId, workspaceId)
+                    .orElseThrow(() -> new ScimException(404, "invalidValue",
+                            RESOURCE_TYPE_GROUP + " not found: " + memberId));
             return RESOURCE_TYPE_GROUP;
         }
         throw new ScimException(400, "invalidValue", "Invalid member type: " + rawType);
@@ -1023,7 +1024,7 @@ public class ScimGroupService {
     public void deleteGroup(UUID workspaceId, UUID groupId, String ifMatch) {
         ScimGroup group = getGroup(workspaceId, groupId);
         validateIfMatch(ifMatch, group.getVersion());
-        membershipRepository.deleteByMemberValue(groupId);
+        membershipRepository.deleteByMemberValueAndWorkspaceId(groupId, workspaceId);
         groupRepository.delete(group);
         workspaceActivityService.touchWorkspace(workspaceId);
     }
@@ -1031,6 +1032,10 @@ public class ScimGroupService {
     private void addMember(ScimGroup group, UUID workspaceId, Map<String, Object> memberMap) {
         ResolvedMemberInput resolved = resolveMemberInput(memberMap);
         UUID memberId = resolved.memberId();
+
+        if (group.getId() != null && Objects.equals(group.getId(), memberId)) {
+            throw new ScimException(400, "invalidValue", "Group cannot include itself as a member");
+        }
 
         // Check existing/duplicate member AFTER full input validation so conflicting duplicates fail with 400
         ScimGroupMembership existing = group.getMembers().stream()
@@ -1070,7 +1075,7 @@ public class ScimGroupService {
                         : resolvedUser.getUserName();
             } else {
                 memberType = RESOURCE_TYPE_GROUP;
-                ScimGroup resolvedGroup = findGroupOrSelf(group, workspaceId, memberId)
+                ScimGroup resolvedGroup = groupRepository.findByIdAndWorkspaceId(memberId, workspaceId)
                         .orElseThrow(() -> new ScimException(404, "invalidValue",
                                 RESOURCE_TYPE_GROUP + " not found: " + memberId));
                 resolvedDisplay = resolvedGroup.getDisplayName();
@@ -1078,13 +1083,13 @@ public class ScimGroupService {
         } else if (resolved.inferredType() != null) {
             if (RESOURCE_TYPE_USER.equalsIgnoreCase(resolved.inferredType())) {
                 Optional<ScimUser> userOpt = userRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-                if (userOpt != null && userOpt.isPresent()) {
+                if (userOpt.isPresent()) {
                     memberType = RESOURCE_TYPE_USER;
                     ScimUser resolvedUser = userOpt.get();
                     resolvedDisplay = resolvedUser.getDisplayName() != null
                             ? resolvedUser.getDisplayName()
                             : resolvedUser.getUserName();
-                } else if (findGroupOrSelf(group, workspaceId, memberId).isPresent()) {
+                } else if (groupRepository.findByIdAndWorkspaceId(memberId, workspaceId).isPresent()) {
                     throw new ScimException(400, "invalidValue",
                             "Member '$ref' points to Users/" + memberId + " but target resource is a Group");
                 } else {
@@ -1092,13 +1097,13 @@ public class ScimGroupService {
                             RESOURCE_TYPE_USER + " not found: " + memberId);
                 }
             } else {
-                Optional<ScimGroup> grpOpt = findGroupOrSelf(group, workspaceId, memberId);
+                Optional<ScimGroup> grpOpt = groupRepository.findByIdAndWorkspaceId(memberId, workspaceId);
                 if (grpOpt.isPresent()) {
                     memberType = RESOURCE_TYPE_GROUP;
                     resolvedDisplay = grpOpt.get().getDisplayName();
                 } else {
                     Optional<ScimUser> userOpt = userRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-                    if (userOpt != null && userOpt.isPresent()) {
+                    if (userOpt.isPresent()) {
                         throw new ScimException(400, "invalidValue",
                                 "Member '$ref' points to Groups/" + memberId + " but target resource is a User");
                     }
@@ -1109,14 +1114,14 @@ public class ScimGroupService {
         } else {
             // When both 'type' and '$ref' are omitted, check User first, then Group within the same workspace
             Optional<ScimUser> userOpt = userRepository.findByIdAndWorkspaceId(memberId, workspaceId);
-            if (userOpt != null && userOpt.isPresent()) {
+            if (userOpt.isPresent()) {
                 memberType = RESOURCE_TYPE_USER;
                 ScimUser resolvedUser = userOpt.get();
                 resolvedDisplay = resolvedUser.getDisplayName() != null
                         ? resolvedUser.getDisplayName()
                         : resolvedUser.getUserName();
             } else {
-                Optional<ScimGroup> grpOpt = findGroupOrSelf(group, workspaceId, memberId);
+                Optional<ScimGroup> grpOpt = groupRepository.findByIdAndWorkspaceId(memberId, workspaceId);
                 if (grpOpt.isPresent()) {
                     memberType = RESOURCE_TYPE_GROUP;
                     resolvedDisplay = grpOpt.get().getDisplayName();
@@ -1134,17 +1139,6 @@ public class ScimGroupService {
         membership.setDisplay(resolved.display() != null ? resolved.display() : resolvedDisplay);
 
         group.getMembers().add(membership);
-    }
-
-    private Optional<ScimGroup> findGroupOrSelf(ScimGroup currentGroup, UUID workspaceId, UUID candidateId) {
-        Optional<ScimGroup> grpOpt = groupRepository.findByIdAndWorkspaceId(candidateId, workspaceId);
-        if (grpOpt != null && grpOpt.isPresent()) {
-            return grpOpt;
-        }
-        if (Objects.equals(currentGroup.getId(), candidateId)) {
-            return Optional.of(currentGroup);
-        }
-        return Optional.empty();
     }
 
     private static String normalizeGroupPath(String rawPath) {
