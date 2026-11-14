@@ -88,13 +88,60 @@ class ScimPatchEngineTest {
     }
 
     @Test
-    void testPatchAlreadyHashedPasswordNotRehashed() {
-        String preHashed = "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr";
-        List<Map<String, Object>> ops = List.of(
-            Map.of("op", "replace", "path", "password", "value", preHashed)
-        );
-        ScimPatchEngine.applyPatchOperations(user, ops);
-        assertEquals(preHashed, user.getPassword());
+    void testPatchBcryptPrefixedAndEmptyOrNullPassword() {
+        var encoder = new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder();
+        for (String rawInput : List.of(
+                "$2a$hello",
+                "$2a$10$abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqr")) {
+            List<Map<String, Object>> ops = List.of(
+                Map.of("op", "replace", "path", "password", "value", rawInput)
+            );
+            ScimPatchEngine.applyPatchOperations(user, ops);
+            assertNotNull(user.getPassword());
+            assertNotEquals(rawInput, user.getPassword());
+            assertTrue(encoder.matches(rawInput, user.getPassword()));
+        }
+
+        // Empty password "" and mixed valid/invalid case-variants rejected across add, replace, URN path, and pathless value map
+        for (Map<String, Object> badOp : List.<Map<String, Object>>of(
+                Map.<String, Object>of("op", "add", "path", "password", "value", ""),
+                Map.<String, Object>of("op", "replace", "path", "password", "value", ""),
+                Map.<String, Object>of("op", "replace", "path", "Password", "value", ""),
+                Map.<String, Object>of("op", "replace", "path", "urn:ietf:params:scim:schemas:core:2.0:User:password", "value", ""),
+                Map.<String, Object>of("op", "replace", "path", "urn:ietf:params:scim:schemas:core:2.0:User:Password", "value", ""),
+                Map.<String, Object>of("op", "replace", "value", Map.of("password", "")),
+                Map.<String, Object>of("op", "replace", "value", Map.of("Password", "")),
+                Map.<String, Object>of("op", "replace", "value", Map.of("urn:ietf:params:scim:schemas:core:2.0:User:Password", "")),
+                Map.<String, Object>of("op", "replace", "value", Map.of(
+                        "urn:ietf:params:scim:schemas:core:2.0:User", Map.of("Password", ""))),
+                Map.<String, Object>of("op", "replace", "value", Map.of(
+                        "password", "Valid!1",
+                        "Password", "")),
+                Map.<String, Object>of("op", "replace", "value", Map.of(
+                        "urn:ietf:params:scim:schemas:core:2.0:User:password", "",
+                        "password", "Valid!1")),
+                Map.<String, Object>of("op", "replace", "value", Map.of(
+                        "urn:ietf:params:scim:schemas:core:2.0:User", Map.of("Password", ""),
+                        "password", "Valid!1")))) {
+            ScimException ex = assertThrows(ScimException.class,
+                    () -> ScimPatchEngine.applyPatchOperations(user, List.of(badOp)));
+            assertEquals(400, ex.getHttpStatus());
+            assertEquals("invalidValue", ex.getScimType());
+        }
+
+        // Valid case-variant and nested Core User URN map in pathless PATCH BCrypt-hash the password
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "replace", "value", Map.of("Password", "ValidSecret!1"))));
+        assertTrue(encoder.matches("ValidSecret!1", user.getPassword()));
+
+        ScimPatchEngine.applyPatchOperations(user, List.of(
+                Map.of("op", "replace", "value", Map.of(
+                        "urn:ietf:params:scim:schemas:core:2.0:User", Map.of("Password", "NestedSecret!2")))));
+        assertTrue(encoder.matches("NestedSecret!2", user.getPassword()));
+
+        // PATCH remove password clears to null
+        ScimPatchEngine.applyPatchOperations(user, List.of(Map.of("op", "remove", "path", "password")));
+        assertNull(user.getPassword());
     }
 
     @Test
