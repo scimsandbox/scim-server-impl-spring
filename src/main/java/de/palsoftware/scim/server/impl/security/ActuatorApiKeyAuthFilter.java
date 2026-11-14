@@ -51,12 +51,6 @@ public class ActuatorApiKeyAuthFilter extends OncePerRequestFilter {
 
     public ActuatorApiKeyAuthFilter(String configuredApiKey,
                                     int configuredManagementPort,
-                                    ObjectMapper objectMapper) {
-        this(configuredApiKey, configuredManagementPort, -1, objectMapper);
-    }
-
-    public ActuatorApiKeyAuthFilter(String configuredApiKey,
-                                    int configuredManagementPort,
                                     int configuredServerPort,
                                     ObjectMapper objectMapper) {
         this.expectedKeyDigest = StringUtils.hasText(configuredApiKey)
@@ -80,8 +74,7 @@ public class ActuatorApiKeyAuthFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String uri = request.getRequestURI();
-        return uri == null || (!"/actuator".equals(uri) && !uri.startsWith("/actuator/"));
+        return !RequestPaths.isActuatorPath(request);
     }
 
     @Override

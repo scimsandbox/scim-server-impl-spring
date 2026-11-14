@@ -8,6 +8,7 @@ import de.palsoftware.scim.server.impl.controller.ScimDiscoveryController;
 import de.palsoftware.scim.server.impl.controller.ScimGroupController;
 import de.palsoftware.scim.server.impl.controller.ScimUserController;
 import de.palsoftware.scim.server.impl.entity.ScimAsyncEvent;
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
 import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimGroupMembership;
@@ -225,13 +226,14 @@ class NaComplianceUnitTest {
                 asyncEventRepository, objectMapper, asyncEventService);
 
         BearerTokenAuthFilter authFilter = new BearerTokenAuthFilter(tokenRepository, workspaceRepository, objectMapper);
+        PayloadSizeLimitFilter payloadSizeLimitFilter = new PayloadSizeLimitFilter(objectMapper);
         RequestResponseLoggingFilter loggingFilter = new RequestResponseLoggingFilter(
                 requestLogRepository, workspaceRepository);
 
         mockMvc = MockMvcBuilders.standaloneSetup(
                         userController, groupController, bulkController, discoveryController, asyncEventController)
                 .setControllerAdvice(new ScimExceptionHandler())
-                .addFilters(authFilter, loggingFilter)
+                .addFilters(authFilter, payloadSizeLimitFilter, loggingFilter)
                 .build();
 
         workspaceA = seedWorkspace("tenant-alpha");

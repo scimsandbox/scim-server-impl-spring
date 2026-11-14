@@ -1,5 +1,6 @@
 package de.palsoftware.scim.server.impl.metrics;
 
+import de.palsoftware.scim.server.impl.security.RequestPaths;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Timer;
@@ -38,8 +39,7 @@ public class ScimOperationMetricsFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI();
-        return path == null || !path.startsWith("/ws/") || !path.contains("/scim/v2");
+        return !RequestPaths.isScimPath(request);
     }
 
     @Override

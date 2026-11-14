@@ -699,22 +699,45 @@ class ScimFilterParserTest {
         assertEquals(400, vpEx.getHttpStatus());
         assertEquals("invalidFilter", vpEx.getScimType());
 
-        // 5. Filter exceeding max length (4096 chars) throws 400 invalidFilter
-        String oversizedFilter = "userName eq \"" + "a".repeat(4100) + "\"";
+        // 5. 51-term and 100-term 'id eq "<uuid>"' OR filters succeed in both parseAst and parseUserFilter
+        String orFilter51 = buildIdOrFilter(51);
+        assertNotNull(ScimFilterParser.parseAst(orFilter51, true));
+        assertNotNull(ScimFilterParser.parseUserFilter(orFilter51, workspaceId));
+
+        String orFilter100 = buildIdOrFilter(100);
+        assertNotNull(ScimFilterParser.parseAst(orFilter100, true));
+        assertNotNull(ScimFilterParser.parseUserFilter(orFilter100, workspaceId));
+
+        // 6. Filter exceeding max length (16,384 chars) throws 400 invalidFilter
+        String oversizedFilter = "userName eq \"" + "a".repeat(ScimFilterParser.MAX_FILTER_LENGTH) + "\"";
         ScimException lenEx = assertThrows(ScimException.class,
                 () -> ScimFilterParser.parseAst(oversizedFilter, true));
         assertEquals(400, lenEx.getHttpStatus());
         assertEquals("invalidFilter", lenEx.getScimType());
+        assertTrue(lenEx.getMessage().contains(String.valueOf(ScimFilterParser.MAX_FILTER_LENGTH)));
 
-        // 6. Filter exceeding max tokens (200 tokens) throws 400 invalidFilter
-        StringBuilder manyTokens = new StringBuilder("userName pr");
-        for (int i = 0; i < 80; i++) {
-            manyTokens.append(" or userName pr"); // +3 tokens per iteration -> 242 tokens total
+        // 7. Filter exceeding max tokens (2,000 tokens, while well under 16,384 chars) throws 400 invalidFilter
+        StringBuilder manyTokens = new StringBuilder("id pr");
+        for (int i = 0; i < 670; i++) {
+            manyTokens.append(" or id pr"); // +3 tokens per iteration -> 2,012 tokens total (~6,035 chars)
         }
         String manyTokensStr = manyTokens.toString();
+        assertTrue(manyTokensStr.length() < ScimFilterParser.MAX_FILTER_LENGTH);
         ScimException tokEx = assertThrows(ScimException.class,
                 () -> ScimFilterParser.parseAst(manyTokensStr, true));
         assertEquals(400, tokEx.getHttpStatus());
         assertEquals("invalidFilter", tokEx.getScimType());
+        assertTrue(tokEx.getMessage().contains(String.valueOf(ScimFilterParser.MAX_FILTER_TOKENS)));
+    }
+
+    private static String buildIdOrFilter(int termCount) {
+        StringBuilder sb = new StringBuilder(termCount * 48);
+        for (int i = 0; i < termCount; i++) {
+            if (i > 0) {
+                sb.append(" or ");
+            }
+            sb.append("id eq \"").append(UUID.randomUUID()).append('"');
+        }
+        return sb.toString();
     }
 }

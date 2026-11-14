@@ -21,6 +21,10 @@
       "type": "java.lang.Object"
     },
     {
+      "name": "app.rate-limit",
+      "type": "java.lang.Object"
+    },
+    {
       "name": "app.security",
       "type": "java.lang.Object"
     },
@@ -30,6 +34,26 @@
     }
   ],
   "properties": [
+    {
+      "name": "app.rate-limit.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enables per-workspace SCIM API rate limiting."
+    },
+    {
+      "name": "app.rate-limit.requests-per-second",
+      "type": "java.lang.Double",
+      "description": "Sustained token refill rate per second for each workspace."
+    },
+    {
+      "name": "app.rate-limit.burst",
+      "type": "java.lang.Integer",
+      "description": "Optional burst token capacity per workspace (defaults to ceil(requests-per-second), capped at 1000, when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.wait-timeout",
+      "type": "java.time.Duration",
+      "description": "Maximum wait duration to acquire a rate-limit token before returning HTTP 429."
+    },
     {
       "name": "app.security.actuator.api-key",
       "type": "java.lang.String",

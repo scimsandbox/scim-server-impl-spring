@@ -24,8 +24,8 @@ import java.util.regex.Pattern;
  */
 public class ScimFilterParser {
 
-    public static final int MAX_FILTER_LENGTH = 4096;
-    public static final int MAX_FILTER_TOKENS = 200;
+    public static final int MAX_FILTER_LENGTH = 16_384;
+    public static final int MAX_FILTER_TOKENS = 2_000;
     public static final int MAX_FILTER_DEPTH = 20;
 
     private ScimFilterParser() {

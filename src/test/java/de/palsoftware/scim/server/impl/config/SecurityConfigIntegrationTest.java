@@ -1,27 +1,29 @@
 package de.palsoftware.scim.server.impl.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.util.concurrent.RateLimiter;
 import de.palsoftware.scim.server.impl.PostgresIntegrationTestSupport;
 import de.palsoftware.scim.server.impl.ScimServerApplication;
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.filter.ThrottlingFilter;
-import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
 import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.model.WorkspaceToken;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import de.palsoftware.scim.server.impl.security.TokenSecurityUtil;
+import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.persistence.EntityManagerFactory;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Primary;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -37,7 +39,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.UUID;
@@ -53,7 +54,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ActiveProfiles("test")
 @TestPropertySource(properties = {
         "ACTUATOR_API_KEY=test-key",
-        "management.server.port=0"
+        "management.server.port=0",
+        "app.rate-limit.requests-per-second=0.2",
+        "app.rate-limit.burst=10",
+        "app.rate-limit.wait-timeout=0s",
+        "spring.jpa.properties.hibernate.generate_statistics=true"
 })
 class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
 
@@ -62,13 +67,15 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
         static final AtomicInteger PERMIT_ACQUISITIONS = new AtomicInteger();
 
         @Bean
-        @Primary
-        ThrottlingFilter countingThrottlingFilter(ObjectMapper objectMapper) {
-            RateLimiter delegate = RateLimiter.create(500.0);
-            return new ThrottlingFilter(timeout -> {
+        ThrottlingFilter.KeyedPermitLimiter countingPermitLimiter(
+                @Value("${app.rate-limit.requests-per-second}") double requestsPerSecond,
+                @Value("${app.rate-limit.burst:0}") int configuredBurst) {
+            ThrottlingFilter.KeyedPermitLimiter delegate =
+                    ThrottlingFilter.createPerWorkspaceLimiter(requestsPerSecond, configuredBurst);
+            return (key, timeout) -> {
                 PERMIT_ACQUISITIONS.incrementAndGet();
-                return delegate.tryAcquire(1);
-            }, Duration.ZERO, objectMapper);
+                return delegate.tryAcquire(key, timeout);
+            };
         }
     }
 
@@ -77,6 +84,9 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
 
     @LocalManagementPort
     private int managementPort;
+
+    @Autowired
+    private ApplicationContext applicationContext;
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -88,7 +98,10 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
     private WorkspaceTokenRepository tokenRepository;
 
     @Autowired
-    private FilterRegistrationBean<ThrottlingFilter> disableThrottlingFilterServletRegistration;
+    private MeterRegistry meterRegistry;
+
+    @Autowired
+    private EntityManagerFactory entityManagerFactory;
 
     private record WorkspaceAuth(Workspace workspace, String rawToken) {}
 
@@ -176,7 +189,7 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
 
     @Test
     void throttlingFilter_ExecutesExactlyOncePerScimRequest() {
-        assertThat(disableThrottlingFilterServletRegistration.isEnabled()).isFalse();
+        assertThat(applicationContext.getBeansOfType(ThrottlingFilter.class)).hasSize(1);
 
         WorkspaceAuth auth = createAuthenticatedWorkspace();
         HttpHeaders headers = new HttpHeaders();
@@ -194,14 +207,72 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
     }
 
     @Test
+    void perWorkspaceThrottling_IsolatesWorkspacesAndStopsInvalidTokenFloodBeforeDbLookup() {
+        WorkspaceAuth workspaceA = createAuthenticatedWorkspace();
+        WorkspaceAuth workspaceB = createAuthenticatedWorkspace();
+
+        HttpHeaders invalidHeaders = new HttpHeaders();
+        invalidHeaders.set("Authorization", "Bearer invalid-flood-token");
+        HttpEntity<?> invalidEntity = new HttpEntity<>(invalidHeaders);
+
+        // Drain Workspace A's 10-token burst using invalid bearer tokens (401s)
+        for (int i = 0; i < 10; i++) {
+            ResponseEntity<String> unauthResp = restTemplate.exchange(
+                    "/ws/" + workspaceA.workspace().getId() + "/scim/v2/Users",
+                    HttpMethod.GET,
+                    invalidEntity,
+                    String.class);
+            assertThat(unauthResp.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        }
+
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        statistics.clear();
+        double throttledYesBefore = meterRegistry.counter("scim.operation.throttled", "state", "yes").count();
+        double authUnknownBefore = meterRegistry.counter("scim.operation.authentication", "state", "unknown").count();
+        double authFailedBefore = meterRegistry.counter("scim.operation.authentication", "state", "failed").count();
+
+        // Subsequent invalid-token flood on Workspace A is rejected at ThrottlingFilter (429) with 0 DB queries
+        for (int i = 0; i < 3; i++) {
+            ResponseEntity<String> throttledResp = restTemplate.exchange(
+                    "/ws/" + workspaceA.workspace().getId() + "/scim/v2/Users",
+                    HttpMethod.GET,
+                    invalidEntity,
+                    String.class);
+            assertThat(throttledResp.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+            assertThat(throttledResp.getHeaders().getFirst("Retry-After")).isEqualTo("1");
+            assertThat(throttledResp.getBody())
+                    .contains("urn:ietf:params:scim:api:messages:2.0:Error")
+                    .contains("\"status\":\"429\"");
+        }
+
+        assertThat(statistics.getPrepareStatementCount()).isZero();
+        assertThat(meterRegistry.counter("scim.operation.throttled", "state", "yes").count() - throttledYesBefore)
+                .isEqualTo(3.0);
+        assertThat(meterRegistry.counter("scim.operation.authentication", "state", "unknown").count() - authUnknownBefore)
+                .isEqualTo(3.0);
+        assertThat(meterRegistry.counter("scim.operation.authentication", "state", "failed").count() - authFailedBefore)
+                .isZero();
+
+        // Workspace B remains unaffected and succeeds with 200 OK
+        HttpHeaders validHeadersB = new HttpHeaders();
+        validHeadersB.set("Authorization", "Bearer " + workspaceB.rawToken());
+        ResponseEntity<String> respB = restTemplate.exchange(
+                "/ws/" + workspaceB.workspace().getId() + "/scim/v2/Users",
+                HttpMethod.GET,
+                new HttpEntity<>(validHeadersB),
+                String.class);
+        assertThat(respB.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
     void nonBulk1MiBCap_RejectsFixedAndChunkedPayloadsWith413_WhileValidBulkWorks() throws Exception {
         WorkspaceAuth auth = createAuthenticatedWorkspace();
         UUID wsId = auth.workspace().getId();
 
         String oversizedJson = "{\"userName\":\""
-                + "a".repeat(RequestResponseLoggingFilter.MAX_NON_BULK_PAYLOAD_SIZE + 512)
+                + "a".repeat(PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 512)
                 + "\"}";
-        byte[] oversized = oversizedJson.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] oversized = oversizedJson.getBytes(StandardCharsets.UTF_8);
 
         HttpClient httpClient = HttpClient.newHttpClient();
 

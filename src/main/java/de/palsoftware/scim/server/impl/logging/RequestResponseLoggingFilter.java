@@ -5,29 +5,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
-import de.palsoftware.scim.server.impl.controller.ScimBulkController;
 import de.palsoftware.scim.server.impl.model.ScimRequestLog;
 import de.palsoftware.scim.server.impl.repository.ScimRequestLogRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.scim.error.ScimException;
+import de.palsoftware.scim.server.impl.security.RequestPaths;
 import jakarta.servlet.FilterChain;
-import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
-import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,11 +33,8 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
 @Component
 public class RequestResponseLoggingFilter extends OncePerRequestFilter {
 
-    public static final int MAX_NON_BULK_PAYLOAD_SIZE = 1_048_576; // 1 MiB
-
     private static final String REDACTED = "[REDACTED]";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final Pattern WORKSPACE_PATH = Pattern.compile("/ws/([0-9a-fA-F-]+)/scim/v2(?:/.*)?");
     private static final int MAX_BODY_CHARS = 20000;
 
     // Linear-time possessive regex fallbacks for malformed or truncated JSON payloads containing passwords or auth tokens
@@ -67,171 +57,35 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI();
-        return path == null
-                || !path.startsWith("/ws/")
-                || (!path.endsWith("/scim/v2") && !path.contains("/scim/v2/"));
+        return !RequestPaths.isScimPath(request);
     }
 
     @Override
+    @SuppressWarnings("java:S1181") // Rethrows Error immediately after recording failure status in finally
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
         ContentCachingRequestWrapper requestWrapper = new ContentCachingRequestWrapper(request, MAX_BODY_CHARS);
         ContentCachingResponseWrapper responseWrapper = new ContentCachingResponseWrapper(response);
-
-        boolean bulkPost = isBulkPostRequest(request);
-        int maxPayloadBytes = bulkPost ? ScimBulkController.MAX_PAYLOAD_SIZE : MAX_NON_BULK_PAYLOAD_SIZE;
-        String payloadLimitDetail = bulkPost
-                ? "Bulk request payload size exceeds maxPayloadSize of " + maxPayloadBytes + " bytes"
-                : "Request payload size exceeds maximum allowed size of " + maxPayloadBytes + " bytes";
+        Throwable failure = null;
 
         try {
-            if (request.getContentLengthLong() > maxPayloadBytes) {
-                writeScimErrorResponse(responseWrapper, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                        null, payloadLimitDetail);
-                return;
-            }
-
-            HttpServletRequest boundedRequest = new BoundedPayloadRequestWrapper(
-                    requestWrapper, maxPayloadBytes, payloadLimitDetail);
-            try {
-                filterChain.doFilter(boundedRequest, responseWrapper);
-            } catch (Exception ex) {
-                ScimException payloadEx = findScimExceptionByStatus(ex, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
-                if (payloadEx != null && !responseWrapper.isCommitted()) {
-                    responseWrapper.resetBuffer();
-                    writeScimErrorResponse(responseWrapper, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                            payloadEx.getScimType(), payloadEx.getMessage());
-                    return;
-                }
-                throw ex;
-            }
+            filterChain.doFilter(requestWrapper, responseWrapper);
+        } catch (ServletException | IOException | RuntimeException | Error ex) {
+            failure = ex;
+            throw ex;
         } finally {
             try {
-                saveLog(requestWrapper, responseWrapper);
+                saveLog(requestWrapper, responseWrapper, failure);
             } finally {
                 responseWrapper.copyBodyToResponse();
             }
         }
     }
 
-    private static boolean isBulkPostRequest(HttpServletRequest request) {
-        if (request == null || !"POST".equalsIgnoreCase(request.getMethod())) {
-            return false;
-        }
-        String uri = request.getRequestURI();
-        return uri != null && (uri.endsWith("/Bulk") || uri.endsWith("/Bulk/"));
-    }
-
-    private static ScimException findScimExceptionByStatus(Throwable ex, int status) {
-        Throwable cur = ex;
-        while (cur != null) {
-            if (cur instanceof ScimException scimEx && scimEx.getHttpStatus() == status) {
-                return scimEx;
-            }
-            cur = cur.getCause() != cur ? cur.getCause() : null;
-        }
-        return null;
-    }
-
-    private static void writeScimErrorResponse(HttpServletResponse response, int status, String scimType, String detail)
-            throws IOException {
-        response.setStatus(status);
-        response.setCharacterEncoding("UTF-8");
-        response.setContentType("application/scim+json;charset=UTF-8");
-        Map<String, Object> error = new LinkedHashMap<>();
-        error.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:Error"));
-        error.put("status", String.valueOf(status));
-        if (scimType != null) {
-            error.put("scimType", scimType);
-        }
-        error.put("detail", detail);
-        response.getWriter().write(OBJECT_MAPPER.writeValueAsString(error));
-        response.getWriter().flush();
-    }
-
-    private static final class BoundedPayloadRequestWrapper extends HttpServletRequestWrapper {
-        private final int maxBytes;
-        private final String errorDetail;
-        private ServletInputStream boundedInputStream;
-        private BufferedReader boundedReader;
-
-        BoundedPayloadRequestWrapper(HttpServletRequest request, int maxBytes, String errorDetail) {
-            super(request);
-            this.maxBytes = maxBytes;
-            this.errorDetail = errorDetail;
-        }
-
-        @Override
-        public ServletInputStream getInputStream() throws IOException {
-            if (boundedInputStream == null) {
-                ServletInputStream delegate = super.getInputStream();
-                boundedInputStream = new ServletInputStream() {
-                    private long bytesRead = 0;
-
-                    private void addBytes(int count) {
-                        if (count > 0) {
-                            bytesRead += count;
-                            if (bytesRead > maxBytes) {
-                                throw new ScimException(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                                        null, errorDetail);
-                            }
-                        }
-                    }
-
-                    @Override
-                    public int read() throws IOException {
-                        int b = delegate.read();
-                        if (b != -1) {
-                            addBytes(1);
-                        }
-                        return b;
-                    }
-
-                    @Override
-                    public int read(byte[] b, int off, int len) throws IOException {
-                        int n = delegate.read(b, off, len);
-                        addBytes(n);
-                        return n;
-                    }
-
-                    @Override
-                    public boolean isFinished() {
-                        return delegate.isFinished();
-                    }
-
-                    @Override
-                    public boolean isReady() {
-                        return delegate.isReady();
-                    }
-
-                    @Override
-                    public void setReadListener(ReadListener readListener) {
-                        delegate.setReadListener(readListener);
-                    }
-
-                    @Override
-                    public void close() throws IOException {
-                        delegate.close();
-                    }
-                };
-            }
-            return boundedInputStream;
-        }
-
-        @Override
-        public BufferedReader getReader() throws IOException {
-            if (boundedReader == null) {
-                String enc = getCharacterEncoding();
-                Charset cs = StringUtils.hasText(enc) ? Charset.forName(enc) : StandardCharsets.UTF_8;
-                boundedReader = new BufferedReader(new InputStreamReader(getInputStream(), cs));
-            }
-            return boundedReader;
-        }
-    }
-
-    private void saveLog(ContentCachingRequestWrapper request, ContentCachingResponseWrapper response) {
-        UUID workspaceId = extractWorkspaceId(request.getRequestURI());
+    private void saveLog(ContentCachingRequestWrapper request,
+                         ContentCachingResponseWrapper response,
+                         Throwable failure) {
+        UUID workspaceId = RequestPaths.extractWorkspaceId(request.getRequestURI());
         if (workspaceId == null) {
             return;
         }
@@ -240,10 +94,24 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         log.setWorkspace(workspaceRepository.getReferenceById(workspaceId));
         log.setMethod(request.getMethod());
         log.setPath(request.getRequestURI());
-        log.setStatus(response.getStatus());
+        log.setStatus(resolveStatus(response.getStatus(), failure));
         log.setRequestBody(truncate(redactPasswords(readBody(request.getContentAsByteArray(), request.getCharacterEncoding()))));
         log.setResponseBody(truncate(redactPasswords(readBody(response.getContentAsByteArray(), response.getCharacterEncoding()))));
         logRepository.save(log);
+    }
+
+    private static int resolveStatus(int responseStatus, Throwable failure) {
+        if (failure != null && responseStatus < HttpServletResponse.SC_BAD_REQUEST) {
+            Throwable cur = failure;
+            while (cur != null) {
+                if (cur instanceof ScimException scimEx) {
+                    return scimEx.getHttpStatus();
+                }
+                cur = cur.getCause() != cur ? cur.getCause() : null;
+            }
+            return HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+        }
+        return responseStatus;
     }
 
     static String redactPasswords(String body) {
@@ -373,19 +241,6 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         }
         segMatcher.appendTail(sb);
         return sb.toString();
-    }
-
-    private UUID extractWorkspaceId(String path) {
-        Matcher matcher = WORKSPACE_PATH.matcher(path);
-        if (!matcher.matches()) {
-            return null;
-        }
-        String workspaceId = matcher.group(1);
-        try {
-            return UUID.fromString(workspaceId);
-        } catch (IllegalArgumentException _) {
-            return null;
-        }
     }
 
     private String readBody(byte[] body, String encoding) {

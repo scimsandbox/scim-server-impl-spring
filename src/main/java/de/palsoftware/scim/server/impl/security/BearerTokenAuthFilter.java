@@ -46,24 +46,14 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
 
         // Only filter SCIM API paths: /ws/{workspaceId}/scim/v2/**
-        if (!path.startsWith("/ws/") || !path.contains("/scim/v2")) {
+        if (!RequestPaths.isScimUri(path)) {
             filterChain.doFilter(request, response);
             return;
         }
 
         // Extract workspace ID from path. SCIM routes accept UUID workspace IDs only.
-        String[] segments = path.split("/");
-        if (segments.length < 3) {
-            request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
-            sendScimError(response, 404, null, "Invalid workspace path");
-            return;
-        }
-
-        String workspaceIdStr = segments[2]; // /ws/{workspaceId}/...
-        UUID workspaceId;
-        try {
-            workspaceId = UUID.fromString(workspaceIdStr);
-        } catch (IllegalArgumentException _) {
+        UUID workspaceId = RequestPaths.extractWorkspaceId(path);
+        if (workspaceId == null) {
             request.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_FAILED);
             sendScimError(response, 404, null, "Invalid workspace ID");
             return;

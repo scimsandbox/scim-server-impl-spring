@@ -15,7 +15,6 @@ import de.palsoftware.scim.server.impl.model.ScimUserX509Certificate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.nio.charset.StandardCharsets;
-import java.text.Normalizer;
 import java.util.*;
 
 /**
@@ -601,7 +600,7 @@ public class ScimUserMapper {
             return;
         }
         if (managerObj instanceof String managerValue) {
-            String normalized = Normalizer.normalize(managerValue.trim(), Normalizer.Form.NFC);
+            String normalized = ScimCanonicalizer.normalizeNfc(managerValue.trim());
             if (normalized.isEmpty()) {
                 user.setEnterpriseManagerValue(null);
                 user.setEnterpriseManagerRef(null);

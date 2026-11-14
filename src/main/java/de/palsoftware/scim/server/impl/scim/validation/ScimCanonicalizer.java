@@ -78,7 +78,7 @@ public final class ScimCanonicalizer {
         if (raw == null) {
             return null;
         }
-        String trimmed = Normalizer.normalize(raw.trim(), Normalizer.Form.NFC);
+        String trimmed = normalizeNfc(raw.trim());
         int atIdx = trimmed.lastIndexOf('@');
         if (atIdx > 0 && atIdx < trimmed.length() - 1) {
             String local = trimmed.substring(0, atIdx);
@@ -100,7 +100,7 @@ public final class ScimCanonicalizer {
         if (raw == null) {
             return null;
         }
-        String trimmed = Normalizer.normalize(raw.trim(), Normalizer.Form.NFC);
+        String trimmed = normalizeNfc(raw.trim());
         if (trimmed.isEmpty()) {
             return trimmed;
         }
@@ -143,7 +143,7 @@ public final class ScimCanonicalizer {
         if (raw == null) {
             return null;
         }
-        return Normalizer.normalize(raw, Normalizer.Form.NFC).replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+        return normalizeNfc(raw).replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -155,7 +155,7 @@ public final class ScimCanonicalizer {
         if (ref == null || ref.isBlank()) {
             return null;
         }
-        String cleaned = Normalizer.normalize(ref.trim(), Normalizer.Form.NFC);
+        String cleaned = normalizeNfc(ref.trim());
         int qIdx = cleaned.indexOf('?');
         if (qIdx >= 0) {
             cleaned = cleaned.substring(0, qIdx);
@@ -195,8 +195,8 @@ public final class ScimCanonicalizer {
         if (refA == null || refB == null) {
             return false;
         }
-        String normA = Normalizer.normalize(refA, Normalizer.Form.NFC);
-        String normB = Normalizer.normalize(refB, Normalizer.Form.NFC);
+        String normA = normalizeNfc(refA);
+        String normB = normalizeNfc(refB);
         if (normA.equals(normB)) {
             return true;
         }

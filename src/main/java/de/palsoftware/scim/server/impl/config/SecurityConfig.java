@@ -1,6 +1,7 @@
 package de.palsoftware.scim.server.impl.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.filter.ThrottlingFilter;
 import de.palsoftware.scim.server.impl.logging.RequestResponseLoggingFilter;
 import de.palsoftware.scim.server.impl.metrics.ScimOperationMetricsFilter;
@@ -8,11 +9,10 @@ import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import de.palsoftware.scim.server.impl.security.ActuatorApiKeyAuthFilter;
 import de.palsoftware.scim.server.impl.security.BearerTokenAuthFilter;
+import de.palsoftware.scim.server.impl.security.RequestPaths;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.web.context.WebServerInitializedEvent;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.event.EventListener;
@@ -27,24 +27,15 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
 @EnableWebSecurity
 public class SecurityConfig {
 
-    private final RequestResponseLoggingFilter loggingFilter;
-    private final ThrottlingFilter throttlingFilter;
-    private final ScimOperationMetricsFilter scimOperationMetricsFilter;
     private final BearerTokenAuthFilter bearerTokenAuthFilter;
     private final ActuatorApiKeyAuthFilter actuatorApiKeyAuthFilter;
 
     public SecurityConfig(WorkspaceTokenRepository tokenRepository,
                           WorkspaceRepository workspaceRepository,
                           ObjectMapper objectMapper,
-                          RequestResponseLoggingFilter loggingFilter,
-                          ObjectProvider<ThrottlingFilter> throttlingFilterProvider,
-                          ScimOperationMetricsFilter scimOperationMetricsFilter,
                           @Value("${app.security.actuator.api-key:}") String actuatorApiKey,
                           @Value("${management.server.port:-1}") int managementPort,
                           @Value("${server.port:8080}") int serverPort) {
-        this.loggingFilter = loggingFilter;
-        this.throttlingFilter = throttlingFilterProvider.getIfAvailable();
-        this.scimOperationMetricsFilter = scimOperationMetricsFilter;
         this.bearerTokenAuthFilter = new BearerTokenAuthFilter(tokenRepository, workspaceRepository, objectMapper);
         this.actuatorApiKeyAuthFilter = new ActuatorApiKeyAuthFilter(
                 actuatorApiKey, managementPort, serverPort, objectMapper);
@@ -58,17 +49,11 @@ public class SecurityConfig {
     }
 
     private static RequestMatcher scimPaths() {
-        return request -> {
-            String uri = request.getRequestURI();
-            return uri != null && uri.startsWith("/ws/") && uri.contains("/scim/v2");
-        };
+        return RequestPaths::isScimPath;
     }
 
     private static RequestMatcher actuatorPaths() {
-        return request -> {
-            String uri = request.getRequestURI();
-            return uri != null && ("/actuator".equals(uri) || uri.startsWith("/actuator/"));
-        };
+        return RequestPaths::isActuatorPath;
     }
 
     private static RequestMatcher errorPaths() {
@@ -80,53 +65,36 @@ public class SecurityConfig {
 
     @Bean
     @SuppressWarnings("java:S4502") // Stateless REST API authenticated via Bearer/API-key headers without session cookies
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain securityFilterChain(HttpSecurity http,
+                                                   ScimOperationMetricsFilter scimOperationMetricsFilter,
+                                                   ObjectProvider<ThrottlingFilter> throttlingFilterProvider,
+                                                   PayloadSizeLimitFilter payloadSizeLimitFilter,
+                                                   RequestResponseLoggingFilter loggingFilter) throws Exception {
+        ThrottlingFilter throttlingFilter = throttlingFilterProvider.getIfAvailable();
+
         http
             .csrf(csrf -> csrf.ignoringRequestMatchers(scimPaths(), actuatorPaths(), errorPaths()))
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
-                .requestMatchers("/actuator/**").authenticated()
+                .requestMatchers(actuatorPaths()).authenticated()
                 .requestMatchers(scimPaths()).permitAll() // Auth enforced by BearerTokenAuthFilter
                 .requestMatchers(errorPaths()).permitAll()
                 .anyRequest().denyAll()
             )
             .addFilterBefore(scimOperationMetricsFilter, UsernamePasswordAuthenticationFilter.class)
-            .addFilterAfter(actuatorApiKeyAuthFilter, ScimOperationMetricsFilter.class)
-            .addFilterAfter(bearerTokenAuthFilter, ActuatorApiKeyAuthFilter.class);
+            .addFilterAfter(actuatorApiKeyAuthFilter, ScimOperationMetricsFilter.class);
 
         if (throttlingFilter != null) {
-            http.addFilterAfter(throttlingFilter, BearerTokenAuthFilter.class)
-                .addFilterAfter(loggingFilter, ThrottlingFilter.class);
+            http.addFilterAfter(throttlingFilter, ActuatorApiKeyAuthFilter.class)
+                .addFilterAfter(bearerTokenAuthFilter, ThrottlingFilter.class);
         } else {
-            http.addFilterAfter(loggingFilter, BearerTokenAuthFilter.class);
+            http.addFilterAfter(bearerTokenAuthFilter, ActuatorApiKeyAuthFilter.class);
         }
 
+        http.addFilterAfter(payloadSizeLimitFilter, BearerTokenAuthFilter.class)
+            .addFilterAfter(loggingFilter, PayloadSizeLimitFilter.class);
+
         return http.build();
-    }
-
-    @Bean
-    @ConditionalOnBean(ThrottlingFilter.class)
-    public FilterRegistrationBean<ThrottlingFilter> disableThrottlingFilterServletRegistration(
-            ThrottlingFilter filter) {
-        FilterRegistrationBean<ThrottlingFilter> registration = new FilterRegistrationBean<>(filter);
-        registration.setEnabled(false);
-        return registration;
-    }
-
-    @Bean
-    public FilterRegistrationBean<ScimOperationMetricsFilter> disableMetricsFilterServletRegistration(
-            ScimOperationMetricsFilter filter) {
-        FilterRegistrationBean<ScimOperationMetricsFilter> registration = new FilterRegistrationBean<>(filter);
-        registration.setEnabled(false);
-        return registration;
-    }
-
-    @Bean
-    public FilterRegistrationBean<RequestResponseLoggingFilter> disableLoggingFilterServletRegistration(
-            RequestResponseLoggingFilter filter) {
-        FilterRegistrationBean<RequestResponseLoggingFilter> registration = new FilterRegistrationBean<>(filter);
-        registration.setEnabled(false);
-        return registration;
     }
 }
