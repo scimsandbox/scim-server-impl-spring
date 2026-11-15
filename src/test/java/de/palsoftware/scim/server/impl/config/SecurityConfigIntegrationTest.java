@@ -16,6 +16,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManagerFactory;
 import org.hibernate.SessionFactory;
 import org.hibernate.stat.Statistics;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,11 +44,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -64,6 +67,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "app.rate-limit.burst=200",
         "app.rate-limit.per-ip-requests-per-second=0.2",
         "app.rate-limit.per-ip-burst=6",
+        "app.rate-limit.unauthenticated-requests-per-second=0.05",
+        "app.rate-limit.unauthenticated-burst=24",
         "app.rate-limit.per-workspace-requests-per-second=0.2",
         "app.rate-limit.per-workspace-burst=6",
         "app.rate-limit.wait-timeout=0s",
@@ -74,6 +79,8 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
     @TestConfiguration
     static class CountingThrottlingConfig {
         static final AtomicInteger PERMIT_ACQUISITIONS = new AtomicInteger();
+        static final AtomicReference<ThrottlingFilter.UnauthenticatedLookupLimiter> UNAUTH_LOOKUP_DELEGATE =
+                new AtomicReference<>(ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP);
 
         @Bean
         ThrottlingFilter.KeyedPermitLimiter countingPermitLimiter(
@@ -89,6 +96,48 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
                 return delegate.tryAcquire(key, timeout);
             };
         }
+
+        @Bean
+        ThrottlingFilter.UnauthenticatedLookupLimiter delegatingUnauthenticatedLookupLimiter(
+                @Value("${app.rate-limit.requests-per-second}") double globalRequestsPerSecond,
+                @Value("${app.rate-limit.burst:0}") int globalBurst,
+                @Value("${app.rate-limit.unauthenticated-requests-per-second:0}") double unauthenticatedRequestsPerSecond,
+                @Value("${app.rate-limit.unauthenticated-burst:0}") int unauthenticatedBurst,
+                @Value("${app.rate-limit.wait-timeout:0s}") Duration waitTimeout) {
+            UNAUTH_LOOKUP_DELEGATE.set(ThrottlingFilter.createUnauthenticatedLookupLimiter(
+                    globalRequestsPerSecond,
+                    globalBurst,
+                    unauthenticatedRequestsPerSecond,
+                    unauthenticatedBurst,
+                    waitTimeout));
+            return new ThrottlingFilter.UnauthenticatedLookupLimiter() {
+                @Override
+                public boolean isKnownActiveToken(String tokenCacheKey) {
+                    return UNAUTH_LOOKUP_DELEGATE.get().isKnownActiveToken(tokenCacheKey);
+                }
+
+                @Override
+                public ThrottlingFilter.AcquireResult tryAcquireLookupPermit() {
+                    return UNAUTH_LOOKUP_DELEGATE.get().tryAcquireLookupPermit();
+                }
+
+                @Override
+                public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+                    UNAUTH_LOOKUP_DELEGATE.get().onValidTokenLookup(tokenCacheKey, refundLookupPermit);
+                }
+
+                @Override
+                public void evictToken(String tokenCacheKey) {
+                    UNAUTH_LOOKUP_DELEGATE.get().evictToken(tokenCacheKey);
+                }
+            };
+        }
+    }
+
+    @BeforeEach
+    void resetUnauthenticatedLookupLimiter() {
+        CountingThrottlingConfig.UNAUTH_LOOKUP_DELEGATE.set(
+                ThrottlingFilter.createUnauthenticatedLookupLimiter(1.0, 200, 0.05, 24, Duration.ZERO));
     }
 
     @LocalServerPort
@@ -339,23 +388,39 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
                 String.class);
         assertThat(respB.getStatusCode()).isEqualTo(HttpStatus.OK);
 
-        // 5. Distributed 401 flood across 40 distinct IPs x 5 invalid-token requests (= 200 requests == global burst!)
-        //    consumes 0 post-auth global/workspace permits, so authenticated Workspace B STILL gets 200 OK immediately!
-        for (int ipIdx = 1; ipIdx <= 40; ipIdx++) {
+        // 5. Distributed invalid-token flood across 10 distinct IPs (198.18.0.1..198.18.0.10 x 4 = 40 requests,
+        //    each IP under per-ip-burst=6):
+        //    With 12 of 24 unauthenticated lookup permits already used in Steps 1 & 3 (and workspaceA + workspaceB
+        //    warmed in Steps 2 & 4 with their cold-miss permits refunded), the first 12 distributed requests
+        //    return 401 and the remaining 28 return 429 with 0 SQL statements prepared!
+        int distributedAttempt = 0;
+        for (int ipIdx = 1; ipIdx <= 10; ipIdx++) {
             HttpHeaders distributedInvalidHeaders = new HttpHeaders();
             distributedInvalidHeaders.set("Authorization", "Bearer distributed-bad-" + ipIdx);
             distributedInvalidHeaders.set("X-Forwarded-For", "198.18.0." + ipIdx);
             HttpEntity<?> distributedInvalidEntity = new HttpEntity<>(distributedInvalidHeaders);
-            for (int reqIdx = 0; reqIdx < 5; reqIdx++) {
-                ResponseEntity<String> unauth = restTemplate.exchange(
+            for (int reqIdx = 0; reqIdx < 4; reqIdx++) {
+                distributedAttempt++;
+                if (distributedAttempt == 13) {
+                    statistics.clear();
+                }
+                ResponseEntity<String> distResp = restTemplate.exchange(
                         "/ws/" + workspaceB.workspace().getId() + "/scim/v2/Users",
                         HttpMethod.GET,
                         distributedInvalidEntity,
                         String.class);
-                assertThat(unauth.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+                if (distributedAttempt <= 12) {
+                    assertThat(distResp.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+                } else {
+                    assertThat(distResp.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+                    // 0.05 RPS (1 token per 20s) yields Retry-After=20s at 0ms elapsed (immune to multi-second CI stalls)
+                    assertThat(Integer.parseInt(distResp.getHeaders().getFirst("Retry-After"))).isBetween(10, 20);
+                }
             }
         }
+        assertThat(statistics.getPrepareStatementCount()).isZero();
 
+        // Warm Workspace B STILL bypasses the exhausted unauthenticated lookup bucket and gets 200 OK!
         HttpHeaders postFloodHeadersB = new HttpHeaders();
         postFloodHeadersB.set("Authorization", "Bearer " + workspaceB.rawToken());
         postFloodHeadersB.set("X-Forwarded-For", "198.51.100.45");
@@ -365,6 +430,34 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
                 new HttpEntity<>(postFloodHeadersB),
                 String.class);
         assertThat(postFloodRespB.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        // Revoking Workspace B's token in PostgreSQL takes effect on the VERY NEXT request (401, 0 ms stale window)
+        // AND evicts Workspace B's token from verifiedTokenHashes so the subsequent request gets 429 with 0 SQL!
+        WorkspaceToken tokenEntityB = tokenRepository
+                .findByTokenHashAndNotRevoked(TokenSecurityUtil.sha256Hex(workspaceB.rawToken()))
+                .orElseThrow();
+        tokenEntityB.setRevoked(true);
+        tokenRepository.saveAndFlush(tokenEntityB);
+
+        HttpHeaders revokedHeadersB = new HttpHeaders();
+        revokedHeadersB.set("Authorization", "Bearer " + workspaceB.rawToken());
+        revokedHeadersB.set("X-Forwarded-For", "198.51.100.46");
+        ResponseEntity<String> firstRevokedRespB = restTemplate.exchange(
+                "/ws/" + workspaceB.workspace().getId() + "/scim/v2/Users",
+                HttpMethod.GET,
+                new HttpEntity<>(revokedHeadersB),
+                String.class);
+        assertThat(firstRevokedRespB.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+
+        statistics.clear();
+        ResponseEntity<String> secondRevokedRespB = restTemplate.exchange(
+                "/ws/" + workspaceB.workspace().getId() + "/scim/v2/Users",
+                HttpMethod.GET,
+                new HttpEntity<>(revokedHeadersB),
+                String.class);
+        assertThat(secondRevokedRespB.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(Integer.parseInt(secondRevokedRespB.getHeaders().getFirst("Retry-After"))).isBetween(10, 20);
+        assertThat(statistics.getPrepareStatementCount()).isZero();
     }
 
     @Test

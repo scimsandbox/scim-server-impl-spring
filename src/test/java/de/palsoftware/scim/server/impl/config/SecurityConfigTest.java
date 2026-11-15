@@ -61,6 +61,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class SecurityConfigTest {
@@ -214,6 +215,108 @@ class SecurityConfigTest {
                     when(event.getApplicationContext()).thenReturn(wsContext);
 
                     securityConfig.onWebServerInitialized(event);
+                });
+    }
+
+    @Test
+    void securityFilterChain_UnauthenticatedLookupLimiterHonorsDefaultPropertiesAndCustomBeanOverride() {
+        UUID wsId = UUID.randomUUID();
+        String usersPath = "/ws/" + wsId + "/scim/v2/Users";
+
+        // (a) Default SecurityConfig property wiring: unauthenticated-burst=2, unauthenticated-requests-per-second=0.5
+        contextRunner
+                .withPropertyValues(
+                        "spring.mvc.formcontent.filter.enabled=false",
+                        "app.rate-limit.enabled=true",
+                        "app.rate-limit.requests-per-second=200",
+                        "app.rate-limit.unauthenticated-requests-per-second=0.5",
+                        "app.rate-limit.unauthenticated-burst=2",
+                        "app.rate-limit.wait-timeout=0s")
+                .run(context -> {
+                    WorkspaceTokenRepository tokenRepo = context.getBean(WorkspaceTokenRepository.class);
+                    when(tokenRepo.findByTokenHashAndNotRevoked(any())).thenReturn(Optional.empty());
+
+                    ServletPayloadStreamGuardFilter streamGuard = context.getBean(ServletPayloadStreamGuardFilter.class);
+                    Filter springSecurityFilterChain = context.getBean("springSecurityFilterChain", Filter.class);
+                    MockMvc mockMvc = MockMvcBuilders.webAppContextSetup(context)
+                            .addFilters(streamGuard, springSecurityFilterChain)
+                            .build();
+
+                    for (int idx = 1; idx <= 2; idx++) {
+                        final String remoteIp = "198.51.100." + idx;
+                        mockMvc.perform(get(usersPath)
+                                        .with(req -> {
+                                            req.setRemoteAddr(remoteIp);
+                                            return req;
+                                        })
+                                        .header("Authorization", "Bearer bad-" + idx))
+                                .andExpect(status().isUnauthorized());
+                    }
+                    verify(tokenRepo, times(2)).findByTokenHashAndNotRevoked(any());
+
+                    mockMvc.perform(get(usersPath)
+                                    .with(req -> {
+                                        req.setRemoteAddr("198.51.100.3");
+                                        return req;
+                                    })
+                                    .header("Authorization", "Bearer bad-3"))
+                            .andExpect(status().isTooManyRequests())
+                            .andExpect(header().string("Retry-After", "2"));
+                    verify(tokenRepo, times(2)).findByTokenHashAndNotRevoked(any());
+                });
+
+        // (b) Custom UnauthenticatedLookupLimiter @Bean registered in context is honored via ObjectProvider
+        AtomicInteger customAcquisitions = new AtomicInteger();
+        ThrottlingFilter.UnauthenticatedLookupLimiter customLimiter =
+                new ThrottlingFilter.UnauthenticatedLookupLimiter() {
+                    @Override
+                    public boolean isKnownActiveToken(String tokenCacheKey) {
+                        return false;
+                    }
+
+                    @Override
+                    public ThrottlingFilter.AcquireResult tryAcquireLookupPermit() {
+                        customAcquisitions.incrementAndGet();
+                        return ThrottlingFilter.AcquireResult.rejected(7L);
+                    }
+
+                    @Override
+                    public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+                        // Not reached when rejected
+                    }
+
+                    @Override
+                    public void evictToken(String tokenCacheKey) {
+                        // Not reached when rejected
+                    }
+                };
+
+        contextRunner
+                .withBean(ThrottlingFilter.UnauthenticatedLookupLimiter.class, () -> customLimiter)
+                .withPropertyValues(
+                        "spring.mvc.formcontent.filter.enabled=false",
+                        "app.rate-limit.enabled=true",
+                        "app.rate-limit.requests-per-second=200",
+                        "app.rate-limit.wait-timeout=0s")
+                .run(context -> {
+                    WorkspaceTokenRepository tokenRepo = context.getBean(WorkspaceTokenRepository.class);
+                    ServletPayloadStreamGuardFilter streamGuard = context.getBean(ServletPayloadStreamGuardFilter.class);
+                    Filter springSecurityFilterChain = context.getBean("springSecurityFilterChain", Filter.class);
+                    MockMvc mockMvc = MockMvcBuilders.webAppContextSetup(context)
+                            .addFilters(streamGuard, springSecurityFilterChain)
+                            .build();
+
+                    mockMvc.perform(get(usersPath)
+                                    .with(req -> {
+                                        req.setRemoteAddr("198.51.100.9");
+                                        return req;
+                                    })
+                                    .header("Authorization", "Bearer bad-custom"))
+                            .andExpect(status().isTooManyRequests())
+                            .andExpect(header().string("Retry-After", "7"));
+
+                    assertThat(customAcquisitions.get()).isEqualTo(1);
+                    verify(tokenRepo, never()).findByTokenHashAndNotRevoked(any());
                 });
     }
 

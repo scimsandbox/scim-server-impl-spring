@@ -1,6 +1,7 @@
 package de.palsoftware.scim.server.impl.filter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import de.palsoftware.scim.server.impl.metrics.ScimRequestMetricAttributes;
@@ -20,7 +21,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -42,12 +42,14 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     static final Duration DEFAULT_WAIT_TIMEOUT = Duration.ZERO;
     static final Duration MAX_WAIT_TIMEOUT = Duration.ofSeconds(5);
     static final int MAX_DEFAULT_BURST = 1_000;
-    static final double DEFAULT_SUB_RPS = 250.0;
-    static final int DEFAULT_SUB_MAX_BURST = 250;
+    static final double DEFAULT_SUB_DIVISOR = 4.0;
     static final long MAX_CACHED_KEYS = 10_000L;
     static final Duration BUCKET_IDLE_EXPIRATION = Duration.ofMinutes(15);
     static final String GLOBAL_FALLBACK_KEY = "global";
-    static final String CAPACITY_ERROR_DETAIL = "Too many requests. Try again later.";
+    public static final String CAPACITY_ERROR_DETAIL = "Too many requests. Try again later.";
+
+    private static final String NANO_CLOCK_NULL_MSG = "nanoClock must not be null";
+    private static final String SLEEPER_NULL_MSG = "sleeper must not be null";
 
     private final KeyedPermitLimiter permitLimiter;
     private final List<IpAddressMatcher> trustedProxies;
@@ -69,8 +71,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         this(
                 permitLimiterProvider.getIfAvailable(() -> createPreAuthLimiter(
                         globalRequestsPerSecond, globalBurst, perIpRequestsPerSecond, perIpBurst)),
-                parseTrustedProxies(configuredTrustedProxies),
-                parseTrustedProxies(configuredTrustedCloudflareProxies),
+                ClientIpResolver.parseTrustedProxies(configuredTrustedProxies),
+                ClientIpResolver.parseTrustedProxies(configuredTrustedCloudflareProxies),
                 waitTimeout,
                 objectMapper
         );
@@ -176,8 +178,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
                                                     NanoSleeper sleeper) {
         SubRateLimit wsLimit = resolveSubRateLimit(
                 globalRequestsPerSecond, globalBurst, perWorkspaceRequestsPerSecond, perWorkspaceBurst);
-        Objects.requireNonNull(nanoClock, "nanoClock must not be null");
-        Objects.requireNonNull(sleeper, "sleeper must not be null");
+        Objects.requireNonNull(nanoClock, NANO_CLOCK_NULL_MSG);
+        Objects.requireNonNull(sleeper, SLEEPER_NULL_MSG);
 
         int resolvedGlobalBurst = resolveBurst(globalRequestsPerSecond, globalBurst);
         TokenBucket globalBucket = new TokenBucket(globalRequestsPerSecond, resolvedGlobalBurst, nanoClock, sleeper);
@@ -205,6 +207,61 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         };
     }
 
+    public static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(
+            double globalRequestsPerSecond,
+            int globalBurst,
+            double unauthenticatedRequestsPerSecond,
+            int unauthenticatedBurst,
+            Duration waitTimeout) {
+        return createUnauthenticatedLookupLimiter(
+                globalRequestsPerSecond,
+                globalBurst,
+                unauthenticatedRequestsPerSecond,
+                unauthenticatedBurst,
+                waitTimeout,
+                System::nanoTime,
+                TimeUnit.NANOSECONDS::sleep);
+    }
+
+    static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(
+            double globalRequestsPerSecond,
+            int globalBurst,
+            double unauthenticatedRequestsPerSecond,
+            int unauthenticatedBurst,
+            Duration waitTimeout,
+            LongSupplier nanoClock) {
+        return createUnauthenticatedLookupLimiter(
+                globalRequestsPerSecond,
+                globalBurst,
+                unauthenticatedRequestsPerSecond,
+                unauthenticatedBurst,
+                waitTimeout,
+                nanoClock,
+                TimeUnit.NANOSECONDS::sleep);
+    }
+
+    static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(
+            double globalRequestsPerSecond,
+            int globalBurst,
+            double unauthenticatedRequestsPerSecond,
+            int unauthenticatedBurst,
+            Duration waitTimeout,
+            LongSupplier nanoClock,
+            NanoSleeper sleeper) {
+        SubRateLimit limit = resolveSubRateLimit(
+                globalRequestsPerSecond, globalBurst, unauthenticatedRequestsPerSecond, unauthenticatedBurst);
+        Objects.requireNonNull(nanoClock, NANO_CLOCK_NULL_MSG);
+        Objects.requireNonNull(sleeper, SLEEPER_NULL_MSG);
+
+        Duration effectiveWaitTimeout = resolveWaitTimeout(waitTimeout);
+        TokenBucket lookupBucket = new TokenBucket(limit.requestsPerSecond(), limit.burst(), nanoClock, sleeper);
+        Cache<String, Boolean> verifiedTokenHashes = Caffeine.newBuilder()
+                .maximumSize(MAX_CACHED_KEYS)
+                .expireAfterAccess(BUCKET_IDLE_EXPIRATION)
+                .build();
+        return new DefaultUnauthenticatedLookupLimiter(lookupBucket, verifiedTokenHashes, effectiveWaitTimeout);
+    }
+
     public static KeyedPermitLimiter createKeyedLimiter(double requestsPerSecond, int configuredBurst) {
         return createKeyedLimiter(requestsPerSecond, configuredBurst, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
     }
@@ -220,8 +277,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
                                                  LongSupplier nanoClock,
                                                  NanoSleeper sleeper) {
         validatePositiveFiniteRate(requestsPerSecond, "requestsPerSecond");
-        Objects.requireNonNull(nanoClock, "nanoClock must not be null");
-        Objects.requireNonNull(sleeper, "sleeper must not be null");
+        Objects.requireNonNull(nanoClock, NANO_CLOCK_NULL_MSG);
+        Objects.requireNonNull(sleeper, SLEEPER_NULL_MSG);
 
         int resolvedBurst = resolveBurst(requestsPerSecond, configuredBurst);
         LoadingCache<String, TokenBucket> buckets = Caffeine.newBuilder()
@@ -263,7 +320,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         boolean hasExplicitSubRps = subRequestsPerSecond > 0.0;
         double effectiveRps = hasExplicitSubRps
                 ? subRequestsPerSecond
-                : Math.min(globalRequestsPerSecond, DEFAULT_SUB_RPS);
+                : (globalRequestsPerSecond / DEFAULT_SUB_DIVISOR);
 
         int effectiveBurst;
         if (subBurst > 0) {
@@ -271,7 +328,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         } else if (hasExplicitSubRps) {
             effectiveBurst = resolveBurst(effectiveRps, 0);
         } else {
-            effectiveBurst = Math.max(1, Math.min(resolvedGlobalBurst, DEFAULT_SUB_MAX_BURST));
+            effectiveBurst = Math.max(1, (int) Math.ceil(resolvedGlobalBurst / DEFAULT_SUB_DIVISOR));
         }
         return new SubRateLimit(effectiveRps, effectiveBurst);
     }
@@ -291,24 +348,6 @@ public class ThrottlingFilter extends OncePerRequestFilter {
             return MAX_WAIT_TIMEOUT;
         }
         return configuredWaitTimeout;
-    }
-
-    public static List<IpAddressMatcher> parseTrustedProxies(String raw) {
-        return ClientIpResolver.parseTrustedProxies(raw);
-    }
-
-    static String extractClientIpKey(HttpServletRequest request, List<IpAddressMatcher> trustedProxies) {
-        return ClientIpResolver.extractClientIpKey(request, trustedProxies, List.of());
-    }
-
-    static String extractClientIpKey(HttpServletRequest request,
-                                     List<IpAddressMatcher> trustedProxies,
-                                     List<IpAddressMatcher> trustedCloudflareProxies) {
-        return ClientIpResolver.extractClientIpKey(request, trustedProxies, trustedCloudflareProxies);
-    }
-
-    static InetAddress parseIpLiteral(String raw) {
-        return ClientIpResolver.parseIpLiteral(raw);
     }
 
     @Override
@@ -355,6 +394,71 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     @FunctionalInterface
     public interface KeyedPermitLimiter {
         AcquireResult tryAcquire(String key, Duration timeout);
+    }
+
+    public interface UnauthenticatedLookupLimiter {
+        UnauthenticatedLookupLimiter NOOP = new UnauthenticatedLookupLimiter() {
+            @Override
+            public boolean isKnownActiveToken(String tokenCacheKey) {
+                return false;
+            }
+
+            @Override
+            public AcquireResult tryAcquireLookupPermit() {
+                return AcquireResult.ALLOWED;
+            }
+
+            @Override
+            public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+                // No-op when rate limiting is disabled
+            }
+
+            @Override
+            public void evictToken(String tokenCacheKey) {
+                // No-op when rate limiting is disabled
+            }
+        };
+
+        boolean isKnownActiveToken(String tokenCacheKey);
+
+        AcquireResult tryAcquireLookupPermit();
+
+        void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit);
+
+        void evictToken(String tokenCacheKey);
+    }
+
+    private record DefaultUnauthenticatedLookupLimiter(
+            TokenBucket lookupBucket,
+            Cache<String, Boolean> verifiedTokenHashes,
+            Duration waitTimeout) implements UnauthenticatedLookupLimiter {
+
+        @Override
+        public boolean isKnownActiveToken(String tokenCacheKey) {
+            return tokenCacheKey != null && verifiedTokenHashes.getIfPresent(tokenCacheKey) != null;
+        }
+
+        @Override
+        public AcquireResult tryAcquireLookupPermit() {
+            return lookupBucket.tryAcquire(waitTimeout);
+        }
+
+        @Override
+        public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+            if (tokenCacheKey != null) {
+                verifiedTokenHashes.put(tokenCacheKey, Boolean.TRUE);
+            }
+            if (refundLookupPermit) {
+                lookupBucket.refund();
+            }
+        }
+
+        @Override
+        public void evictToken(String tokenCacheKey) {
+            if (tokenCacheKey != null) {
+                verifiedTokenHashes.invalidate(tokenCacheKey);
+            }
+        }
     }
 
     @FunctionalInterface

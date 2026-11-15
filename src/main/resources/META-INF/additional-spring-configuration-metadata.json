@@ -37,12 +37,12 @@
     {
       "name": "app.rate-limit.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enables three-tier SCIM API rate limiting (Tier 1 pre-auth per-IP, Tier 2 post-auth per-workspace, and Tier 3 post-auth pod-wide global cap)."
+      "description": "Enables SCIM API rate limiting (pre-auth per-IP, pod-wide unauthenticated lookup cap, post-auth per-workspace, and post-auth pod-wide global cap)."
     },
     {
       "name": "app.rate-limit.requests-per-second",
       "type": "java.lang.Double",
-      "description": "Post-authentication pod-wide global sustained token refill rate per second across all verified workspaces (also used to derive default per-IP and per-workspace sub-limits)."
+      "description": "Post-authentication pod-wide global sustained token refill rate per second across all verified workspaces (also used to derive default per-IP, unauthenticated-lookup, and per-workspace sub-limits at requests-per-second / 4)."
     },
     {
       "name": "app.rate-limit.burst",
@@ -54,25 +54,37 @@
       "name": "app.rate-limit.per-ip-requests-per-second",
       "type": "java.lang.Double",
       "defaultValue": 0,
-      "description": "Pre-authentication sustained token refill rate per second for each client IP (defaults to min(requests-per-second, 250.0) when <= 0)."
+      "description": "Pre-authentication sustained token refill rate per second for each client IP or IPv6 /64 prefix (defaults to requests-per-second / 4 when <= 0)."
     },
     {
       "name": "app.rate-limit.per-ip-burst",
       "type": "java.lang.Integer",
       "defaultValue": 0,
-      "description": "Pre-authentication burst capacity per client IP (defaults to ceil(per-ip-requests-per-second) when explicit, else min(globalBurst, 250))."
+      "description": "Pre-authentication burst capacity per client IP or IPv6 /64 prefix (defaults to ceil(per-ip-requests-per-second), capped at 1000, when explicit, else ceil(globalBurst / 4))."
+    },
+    {
+      "name": "app.rate-limit.unauthenticated-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Pod-wide sustained token refill rate per second for unauthenticated and cold-token-miss database lookups (defaults to requests-per-second / 4 when <= 0; active tokens refund their cold-miss permit)."
+    },
+    {
+      "name": "app.rate-limit.unauthenticated-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Pod-wide burst capacity for unauthenticated and cold-token-miss database lookups (defaults to ceil(unauthenticated-requests-per-second), capped at 1000, when explicit, else ceil(globalBurst / 4))."
     },
     {
       "name": "app.rate-limit.per-workspace-requests-per-second",
       "type": "java.lang.Double",
       "defaultValue": 0,
-      "description": "Post-authentication sustained token refill rate per second for each verified workspace (defaults to min(requests-per-second, 250.0) when <= 0)."
+      "description": "Post-authentication sustained token refill rate per second for each verified workspace (defaults to requests-per-second / 4 when <= 0)."
     },
     {
       "name": "app.rate-limit.per-workspace-burst",
       "type": "java.lang.Integer",
       "defaultValue": 0,
-      "description": "Post-authentication burst capacity per verified workspace (defaults to ceil(per-workspace-requests-per-second) when explicit, else min(globalBurst, 250))."
+      "description": "Post-authentication burst capacity per verified workspace (defaults to ceil(per-workspace-requests-per-second), capped at 1000, when explicit, else ceil(globalBurst / 4))."
     },
     {
       "name": "app.rate-limit.trusted-proxies",

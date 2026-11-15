@@ -24,6 +24,8 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.util.matcher.RequestMatcher;
 
+import java.time.Duration;
+
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
@@ -31,13 +33,31 @@ public class SecurityConfig {
     private final BearerTokenAuthFilter bearerTokenAuthFilter;
     private final ActuatorApiKeyAuthFilter actuatorApiKeyAuthFilter;
 
-    public SecurityConfig(WorkspaceTokenRepository tokenRepository,
-                          WorkspaceRepository workspaceRepository,
-                          ObjectMapper objectMapper,
-                          @Value("${app.security.actuator.api-key:}") String actuatorApiKey,
-                          @Value("${management.server.port:-1}") int managementPort,
-                          @Value("${server.port:8080}") int serverPort) {
-        this.bearerTokenAuthFilter = new BearerTokenAuthFilter(tokenRepository, workspaceRepository, objectMapper);
+    public SecurityConfig(
+            WorkspaceTokenRepository tokenRepository,
+            WorkspaceRepository workspaceRepository,
+            ObjectMapper objectMapper,
+            @Value("${app.security.actuator.api-key:}") String actuatorApiKey,
+            @Value("${management.server.port:-1}") int managementPort,
+            @Value("${server.port:8080}") int serverPort,
+            @Value("${app.rate-limit.enabled:false}") boolean rateLimitEnabled,
+            @Value("${app.rate-limit.requests-per-second:200}") double globalRequestsPerSecond,
+            @Value("${app.rate-limit.burst:0}") int globalBurst,
+            @Value("${app.rate-limit.unauthenticated-requests-per-second:0}") double unauthenticatedRequestsPerSecond,
+            @Value("${app.rate-limit.unauthenticated-burst:0}") int unauthenticatedBurst,
+            @Value("${app.rate-limit.wait-timeout:0s}") Duration waitTimeout,
+            ObjectProvider<ThrottlingFilter.UnauthenticatedLookupLimiter> unauthenticatedLookupLimiterProvider) {
+        ThrottlingFilter.UnauthenticatedLookupLimiter lookupLimiter = rateLimitEnabled
+                ? unauthenticatedLookupLimiterProvider.getIfAvailable(() ->
+                        ThrottlingFilter.createUnauthenticatedLookupLimiter(
+                                globalRequestsPerSecond,
+                                globalBurst,
+                                unauthenticatedRequestsPerSecond,
+                                unauthenticatedBurst,
+                                waitTimeout))
+                : ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP;
+        this.bearerTokenAuthFilter = new BearerTokenAuthFilter(
+                tokenRepository, workspaceRepository, objectMapper, lookupLimiter);
         this.actuatorApiKeyAuthFilter = new ActuatorApiKeyAuthFilter(
                 actuatorApiKey, managementPort, serverPort, objectMapper);
     }

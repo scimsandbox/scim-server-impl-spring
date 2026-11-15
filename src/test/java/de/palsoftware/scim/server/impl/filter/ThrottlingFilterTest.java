@@ -5,6 +5,7 @@ import de.palsoftware.scim.server.impl.metrics.ScimOperationMetricsFilter;
 import de.palsoftware.scim.server.impl.metrics.ScimRequestMetricAttributes;
 import de.palsoftware.scim.server.impl.model.Workspace;
 import de.palsoftware.scim.server.impl.model.WorkspaceToken;
+import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import de.palsoftware.scim.server.impl.security.BearerTokenAuthFilter;
 import de.palsoftware.scim.server.impl.security.TokenSecurityUtil;
@@ -164,11 +165,15 @@ class ThrottlingFilterTest {
         ScimOperationMetricsFilter metricsFilter = new ScimOperationMetricsFilter(meterRegistry);
         AtomicLong fakeNanos = new AtomicLong(0L);
 
-        // Post-auth Global: 100 RPS burst ONLY 3; Pre-auth Per-IP: 10 RPS burst 2; Post-auth Per-Workspace: 10 RPS burst 3
+        // Post-auth Global: 100 RPS burst ONLY 3; Pre-auth Per-IP: 10 RPS burst 2;
+        // Unauthenticated lookup limiter: 0.5 RPS (Retry-After = 2s), burst 10; Post-auth Per-Workspace: 10 RPS burst 3
         ThrottlingFilter preAuthFilter = new ThrottlingFilter(
                 ThrottlingFilter.createPreAuthLimiter(100.0, 3, 10.0, 2, fakeNanos::get),
                 Duration.ZERO,
                 objectMapper);
+        ThrottlingFilter.UnauthenticatedLookupLimiter unauthLookupLimiter =
+                ThrottlingFilter.createUnauthenticatedLookupLimiter(
+                        100.0, 3, 0.5, 10, Duration.ZERO, fakeNanos::get);
         WorkspaceRateLimitFilter postAuthWsFilter = new WorkspaceRateLimitFilter(
                 ThrottlingFilter.createPostAuthLimiter(100.0, 3, 10.0, 3, fakeNanos::get),
                 Duration.ZERO,
@@ -186,19 +191,37 @@ class ThrottlingFilterTest {
         tokenEntityA.setTokenHash(validHashA);
         tokenEntityA.setExpiresAt(Instant.now().plus(1, ChronoUnit.DAYS));
 
+        AtomicBoolean tokenRevoked = new AtomicBoolean(false);
         WorkspaceTokenRepository tokenRepository = Mockito.mock(WorkspaceTokenRepository.class);
         when(tokenRepository.findByTokenHashAndNotRevoked(anyString())).thenAnswer(inv -> {
             String hash = inv.getArgument(0);
-            return validHashA.equals(hash) ? Optional.of(tokenEntityA) : Optional.empty();
+            return (!tokenRevoked.get() && validHashA.equals(hash)) ? Optional.of(tokenEntityA) : Optional.empty();
         });
-        BearerTokenAuthFilter bearerFilter = new BearerTokenAuthFilter(tokenRepository, objectMapper);
+        WorkspaceRepository workspaceRepository = Mockito.mock(WorkspaceRepository.class);
+        when(workspaceRepository.existsById(workspaceA)).thenReturn(true);
+
+        BearerTokenAuthFilter bearerFilter = new BearerTokenAuthFilter(
+                tokenRepository, workspaceRepository, objectMapper, unauthLookupLimiter);
 
         FilterChain fullChain = (req, res) -> preAuthFilter.doFilter(
                 req, res, (r2, s2) -> bearerFilter.doFilter(
                         r2, s2, (r3, s3) -> postAuthWsFilter.doFilter(r3, s3, filterChain)));
 
+        // 0. Warm active Workspace A BEFORE the attack:
+        //    Cold-miss lookup permit is refunded (net 0 lookup permits used, 10/10 remain!),
+        //    then advance clock 1s so Workspace A's post-auth 3-token burst is back to full 3/3.
+        MockHttpServletRequest warmReq = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
+        warmReq.setRemoteAddr("198.51.100.9");
+        warmReq.addHeader("Authorization", "Bearer " + rawValidTokenA);
+        MockHttpServletResponse warmResp = new MockHttpServletResponse();
+        metricsFilter.doFilter(warmReq, warmResp, fullChain);
+        assertThat(warmResp.getStatus()).isEqualTo(200);
+        assertThat(unauthLookupLimiter.isKnownActiveToken(workspaceA + ":" + validHashA)).isTrue();
+        fakeNanos.addAndGet(Duration.ofSeconds(1).toNanos());
+
         // 1. Attacker IP 203.0.113.66 floods Workspace A with invalid tokens:
-        //    First 2 hit 401; next 5 hit 429 in pre-auth ThrottlingFilter with 0 DB queries!
+        //    First 2 hit 401 (consuming 2/10 unauth lookup permits -> 8 remain);
+        //    next 5 hit 429 in pre-auth ThrottlingFilter with 0 DB queries!
         for (int i = 0; i < 2; i++) {
             MockHttpServletRequest req = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
             req.setRemoteAddr("203.0.113.66");
@@ -231,10 +254,12 @@ class ThrottlingFilterTest {
         }
         verifyNoInteractions(tokenRepository);
 
-        // 3. Distributed unauthenticated 401 flood across 50 distinct IPs & IPv6 /64 prefixes
-        //    (plus anonymous discovery requests) when post-auth global burst is ONLY 3:
-        //    consumes 0 global tokens and 0 workspace tokens!
-        for (int idx = 1; idx <= 25; idx++) {
+        // 3. Distributed unauthenticated botnet flood across 50 distinct IPs & IPv6 /48 prefixes
+        //    plus 10 anonymous ServiceProviderConfig discovery requests:
+        //    Capped at the remaining 8 of 10 pod-wide unauthenticated lookup permits, after which
+        //    all remaining botnet + anonymous requests get 429 (Retry-After: 2, throttled=yes,
+        //    authentication=unknown) with 0 DB queries!
+        for (int idx = 1; idx <= 3; idx++) {
             MockHttpServletRequest v4Unauth = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
             v4Unauth.setRemoteAddr("203.0.114." + idx);
             v4Unauth.addHeader("Authorization", "Bearer botnet-v4-" + idx);
@@ -249,16 +274,61 @@ class ThrottlingFilterTest {
             metricsFilter.doFilter(v6Unauth, v6Resp, fullChain);
             assertThat(v6Resp.getStatus()).isEqualTo(401);
         }
-        for (int idx = 1; idx <= 10; idx++) {
-            MockHttpServletRequest anonDiscovery = new MockHttpServletRequest(
+        for (int idx = 1; idx <= 2; idx++) {
+            MockHttpServletRequest anonOk = new MockHttpServletRequest(
                     "GET", "/ws/" + workspaceA + "/scim/v2/ServiceProviderConfig");
-            anonDiscovery.setRemoteAddr("198.18.0." + idx);
+            anonOk.setRemoteAddr("198.18.0." + idx);
             MockHttpServletResponse anonResp = new MockHttpServletResponse();
-            metricsFilter.doFilter(anonDiscovery, anonResp, fullChain);
+            metricsFilter.doFilter(anonOk, anonResp, fullChain);
             assertThat(anonResp.getStatus()).isEqualTo(200);
         }
 
-        // 4. Legitimate Workspace A client STILL has ALL 3 post-auth global + workspace permits!
+        // All 10/10 pod-wide unauthenticated lookup permits are now exhausted:
+        // Remaining 44 botnet invalid-token requests + 8 anonymous discovery requests get 429 with 0 DB queries!
+        Mockito.clearInvocations(tokenRepository);
+        Mockito.clearInvocations(workspaceRepository);
+        double throttledYesBefore = meterRegistry.counter("scim.operation.throttled", "state", "yes").count();
+        double authUnknownBefore = meterRegistry.counter("scim.operation.authentication", "state", "unknown").count();
+        double authFailedBefore = meterRegistry.counter("scim.operation.authentication", "state", "failed").count();
+
+        for (int idx = 4; idx <= 25; idx++) {
+            MockHttpServletRequest v4Bot = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
+            v4Bot.setRemoteAddr("203.0.114." + idx);
+            v4Bot.addHeader("Authorization", "Bearer botnet-v4-" + idx);
+            MockHttpServletResponse v4Resp = new MockHttpServletResponse();
+            metricsFilter.doFilter(v4Bot, v4Resp, fullChain);
+            assertThat(v4Resp.getStatus()).isEqualTo(429);
+            assertThat(v4Resp.getHeader("Retry-After")).isEqualTo("2");
+
+            MockHttpServletRequest v6Bot = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
+            v6Bot.setRemoteAddr("2001:db8:bad:" + Integer.toHexString(idx) + "::1");
+            v6Bot.addHeader("Authorization", "Bearer botnet-v6-" + idx);
+            MockHttpServletResponse v6Resp = new MockHttpServletResponse();
+            metricsFilter.doFilter(v6Bot, v6Resp, fullChain);
+            assertThat(v6Resp.getStatus()).isEqualTo(429);
+            assertThat(v6Resp.getHeader("Retry-After")).isEqualTo("2");
+        }
+        for (int idx = 3; idx <= 10; idx++) {
+            MockHttpServletRequest anonFlood = new MockHttpServletRequest(
+                    "GET", "/ws/" + workspaceA + "/scim/v2/ServiceProviderConfig");
+            anonFlood.setRemoteAddr("198.18.0." + idx);
+            MockHttpServletResponse anonResp = new MockHttpServletResponse();
+            metricsFilter.doFilter(anonFlood, anonResp, fullChain);
+            assertThat(anonResp.getStatus()).isEqualTo(429);
+            assertThat(anonResp.getHeader("Retry-After")).isEqualTo("2");
+        }
+
+        verifyNoInteractions(tokenRepository, workspaceRepository);
+        assertThat(meterRegistry.counter("scim.operation.throttled", "state", "yes").count() - throttledYesBefore)
+                .isEqualTo(52.0);
+        assertThat(meterRegistry.counter("scim.operation.authentication", "state", "unknown").count() - authUnknownBefore)
+                .isEqualTo(52.0);
+        assertThat(meterRegistry.counter("scim.operation.authentication", "state", "failed").count() - authFailedBefore)
+                .isZero();
+
+        // 4. Legitimate Workspace A client (warm in verifiedTokenHashes) bypasses the exhausted
+        //    UnauthenticatedLookupLimiter, still verifies against tokenRepository on every request,
+        //    and STILL has ALL 3 post-auth global + workspace permits!
         for (String legitIp : List.of("198.51.100.10", "198.51.100.10", "198.51.100.11")) {
             MockHttpServletRequest legitReq = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
             legitReq.setRemoteAddr(legitIp);
@@ -267,6 +337,7 @@ class ThrottlingFilterTest {
             metricsFilter.doFilter(legitReq, legitResp, fullChain);
             assertThat(legitResp.getStatus()).isEqualTo(200);
         }
+        verify(tokenRepository, times(3)).findByTokenHashAndNotRevoked(validHashA);
 
         // 5. 4th authenticated request on Workspace A (even from fresh IP 198.51.100.11) hits post-auth cap (429)!
         MockHttpServletRequest overWsCap = new MockHttpServletRequest("GET", "/ws/" + workspaceA + "/scim/v2/Users");
@@ -275,6 +346,33 @@ class ThrottlingFilterTest {
         MockHttpServletResponse overWsResp = new MockHttpServletResponse();
         metricsFilter.doFilter(overWsCap, overWsResp, fullChain);
         assertThat(overWsResp.getStatus()).isEqualTo(429);
+
+        // 6. Instantaneous revocation (0 ms stale window) + immediate cache eviction:
+        //    Advance 100ms (refills 1.0 post-auth token at 10 RPS, while unauthLookupLimiter at 0.5 RPS
+        //    only refills 0.05 tokens and remains exhausted!).
+        fakeNanos.addAndGet(Duration.ofMillis(100).toNanos());
+        tokenRevoked.set(true);
+
+        MockHttpServletRequest firstAfterRevoke = new MockHttpServletRequest(
+                "GET", "/ws/" + workspaceA + "/scim/v2/Users");
+        firstAfterRevoke.setRemoteAddr("198.51.100.12");
+        firstAfterRevoke.addHeader("Authorization", "Bearer " + rawValidTokenA);
+        MockHttpServletResponse firstRevokeResp = new MockHttpServletResponse();
+        metricsFilter.doFilter(firstAfterRevoke, firstRevokeResp, fullChain);
+        assertThat(firstRevokeResp.getStatus()).isEqualTo(401);
+        assertThat(unauthLookupLimiter.isKnownActiveToken(workspaceA + ":" + validHashA)).isFalse();
+
+        // Subsequent request with the now-evicted revoked token hits exhausted unauthLookupLimiter -> 429 with 0 DB queries!
+        Mockito.clearInvocations(tokenRepository);
+        MockHttpServletRequest secondAfterRevoke = new MockHttpServletRequest(
+                "GET", "/ws/" + workspaceA + "/scim/v2/Users");
+        secondAfterRevoke.setRemoteAddr("198.51.100.12");
+        secondAfterRevoke.addHeader("Authorization", "Bearer " + rawValidTokenA);
+        MockHttpServletResponse secondRevokeResp = new MockHttpServletResponse();
+        metricsFilter.doFilter(secondAfterRevoke, secondRevokeResp, fullChain);
+        assertThat(secondRevokeResp.getStatus()).isEqualTo(429);
+        assertThat(secondRevokeResp.getHeader("Retry-After")).isEqualTo("2");
+        verifyNoInteractions(tokenRepository);
     }
 
     @Test
@@ -407,162 +505,19 @@ class ThrottlingFilterTest {
     }
 
     @Test
-    void trustedProxyClientIpExtraction_GatesCfConnectingIpWalksXffRightToLeftAndMasksIpv6To64() throws Exception {
-        assertThat(ThrottlingFilter.extractClientIpKey(null, List.of()))
-                .isEqualTo(ThrottlingFilter.GLOBAL_FALLBACK_KEY);
+    void throttlingFilter_TrustedProxyConstructorsAndIpv6Slash64BucketingEnforcedOnDoFilter() throws Exception {
+        String scimPath = "/ws/" + UUID.randomUUID() + "/scim/v2/Users";
+        List<IpAddressMatcher> explicitProxies = ClientIpResolver.parseTrustedProxies(
+                "172.16.0.0/12, 198.51.100.128/25");
 
-        MockHttpServletRequest blankRemote = new MockHttpServletRequest();
-        blankRemote.setRemoteAddr("   ");
-        assertThat(ThrottlingFilter.extractClientIpKey(blankRemote, List.of()))
-                .isEqualTo(ThrottlingFilter.GLOBAL_FALLBACK_KEY);
+        MockHttpServletRequest matchingSlash12 = new MockHttpServletRequest("GET", scimPath);
+        matchingSlash12.setRemoteAddr("172.31.255.254");
+        matchingSlash12.addHeader("X-Forwarded-For", "203.0.113.9");
 
-        // 1. Public peer MUST ignore spoofed CF-Connecting-IP and X-Forwarded-For when trustedProxies is empty
-        MockHttpServletRequest publicPeer = new MockHttpServletRequest();
+        MockHttpServletRequest publicPeer = new MockHttpServletRequest("GET", scimPath);
         publicPeer.setRemoteAddr("198.51.100.99:54321");
         publicPeer.addHeader("CF-Connecting-IP", "203.0.113.1");
         publicPeer.addHeader("X-Forwarded-For", "203.0.113.2");
-        assertThat(ThrottlingFilter.extractClientIpKey(publicPeer, List.of()))
-                .isEqualTo("ip:198.51.100.99");
-
-        // Public IPv6 peer ignores forwarded headers and keys by /64 prefix
-        MockHttpServletRequest publicV6Peer = new MockHttpServletRequest();
-        publicV6Peer.setRemoteAddr("[2001:db8:1111:2222:aaaa:bbbb:cccc:5]:8443");
-        publicV6Peer.addHeader("X-Forwarded-For", "203.0.113.2");
-        assertThat(ThrottlingFilter.extractClientIpKey(publicV6Peer, List.of()))
-                .isEqualTo("ip:2001:db8:1111:2222:0:0:0:0/64");
-
-        // IPv4-mapped IPv6 literal unmaps to /32 IPv4 key (never /64 IPv6!)
-        MockHttpServletRequest mappedV4Peer = new MockHttpServletRequest();
-        mappedV4Peer.setRemoteAddr("::ffff:192.0.2.5");
-        assertThat(ThrottlingFilter.extractClientIpKey(mappedV4Peer, List.of()))
-                .isEqualTo("ip:192.0.2.5");
-
-        // 2. Default empty trustedProxies trusts loopback, RFC1918, IPv6 ULA (fc00::/7), and link-local for XFF
-        for (String trustedPeer : List.of("127.0.0.1", "::1", "10.1.2.3", "172.16.5.4", "192.168.1.1",
-                "fd12:3456:789a::1", "fc00::1", "169.254.10.20", "fe80::1%en0")) {
-            MockHttpServletRequest proxyReq = new MockHttpServletRequest();
-            proxyReq.setRemoteAddr(trustedPeer);
-            proxyReq.addHeader("X-Forwarded-For", "198.51.100.50, 203.0.113.77");
-            assertThat(ThrottlingFilter.extractClientIpKey(proxyReq, List.of()))
-                    .as("Peer %s should resolve rightmost untrusted XFF hop", trustedPeer)
-                    .isEqualTo("ip:203.0.113.77");
-        }
-
-        // 3. CF-Connecting-IP MUST be ignored when trusted-cloudflare-proxies is empty (prevents Nginx/ALB bypass!)
-        MockHttpServletRequest spoofedCfBehindAlb = new MockHttpServletRequest();
-        spoofedCfBehindAlb.setRemoteAddr("10.0.0.2");
-        spoofedCfBehindAlb.addHeader("CF-Connecting-IP", "203.0.113.88");
-        spoofedCfBehindAlb.addHeader("X-Forwarded-For", "198.51.100.1");
-        assertThat(ThrottlingFilter.extractClientIpKey(spoofedCfBehindAlb, List.of(), List.of()))
-                .isEqualTo("ip:198.51.100.1");
-
-        // When peer matches trusted-cloudflare-proxies, valid single CF-Connecting-IP is used;
-        // duplicate or comma-separated CF-Connecting-IP falls back to X-Forwarded-For
-        List<IpAddressMatcher> cfProxies = ThrottlingFilter.parseTrustedProxies("173.245.48.0/20, 2400:cb00::/32");
-        MockHttpServletRequest validCfReq = new MockHttpServletRequest();
-        validCfReq.setRemoteAddr("173.245.48.12");
-        validCfReq.addHeader("CF-Connecting-IP", "203.0.113.88");
-        validCfReq.addHeader("X-Forwarded-For", "198.51.100.1");
-        assertThat(ThrottlingFilter.extractClientIpKey(validCfReq, List.of(), cfProxies))
-                .isEqualTo("ip:203.0.113.88");
-
-        MockHttpServletRequest multiCfReq = new MockHttpServletRequest();
-        multiCfReq.setRemoteAddr("173.245.48.12");
-        multiCfReq.addHeader("CF-Connecting-IP", "203.0.113.1");
-        multiCfReq.addHeader("CF-Connecting-IP", "203.0.113.2");
-        multiCfReq.addHeader("X-Forwarded-For", "198.51.100.44");
-        assertThat(ThrottlingFilter.extractClientIpKey(multiCfReq, List.of(), cfProxies))
-                .isEqualTo("ip:198.51.100.44");
-
-        MockHttpServletRequest commaCfReq = new MockHttpServletRequest();
-        commaCfReq.setRemoteAddr("173.245.48.12");
-        commaCfReq.addHeader("CF-Connecting-IP", "203.0.113.1, 203.0.113.2");
-        commaCfReq.addHeader("X-Forwarded-For", "198.51.100.45");
-        assertThat(ThrottlingFilter.extractClientIpKey(commaCfReq, List.of(), cfProxies))
-                .isEqualTo("ip:198.51.100.45");
-
-        MockHttpServletRequest noCfHeaderReq = new MockHttpServletRequest();
-        noCfHeaderReq.setRemoteAddr("[2400:cb00::1]");
-        noCfHeaderReq.addHeader("X-Forwarded-For", "198.51.100.46");
-        assertThat(ThrottlingFilter.extractClientIpKey(noCfHeaderReq, List.of(), cfProxies))
-                .isEqualTo("ip:198.51.100.46");
-
-        // 4. Right-to-left multi-hop X-Forwarded-For walking across multi-tier proxies, trailing blanks, and spoofed hops
-        MockHttpServletRequest twoTierProxy = new MockHttpServletRequest();
-        twoTierProxy.setRemoteAddr("10.0.2.4"); // K8s Ingress
-        twoTierProxy.addHeader("X-Forwarded-For", "spoofed.by.client, 198.51.100.55");
-        twoTierProxy.addHeader("X-Forwarded-For", "10.0.1.9,   "); // ALB + trailing blank
-        twoTierProxy.addHeader("X-Forwarded-For", "   "); // trailing blank header
-        assertThat(ThrottlingFilter.extractClientIpKey(twoTierProxy, List.of(), List.of()))
-                .isEqualTo("ip:198.51.100.55");
-
-        // Malformed hop stops walking immediately and returns lastTrustedHop (never trusting entries further left!)
-        MockHttpServletRequest malformedMiddleHop = new MockHttpServletRequest();
-        malformedMiddleHop.setRemoteAddr("10.0.2.4");
-        malformedMiddleHop.addHeader("X-Forwarded-For", "203.0.113.1, bogus-hop, 10.0.1.9");
-        assertThat(ThrottlingFilter.extractClientIpKey(malformedMiddleHop, List.of(), List.of()))
-                .isEqualTo("ip:10.0.1.9");
-
-        // Malformed rightmost hop with no trusted hop yet falls back to peerAddr
-        MockHttpServletRequest malformedRightmostHop = new MockHttpServletRequest();
-        malformedRightmostHop.setRemoteAddr("10.0.2.4");
-        malformedRightmostHop.addHeader("X-Forwarded-For", "203.0.113.1, bogus-hop");
-        assertThat(ThrottlingFilter.extractClientIpKey(malformedRightmostHop, List.of(), List.of()))
-                .isEqualTo("ip:10.0.2.4");
-
-        // All-trusted XFF chain returns leftmost trusted hop
-        MockHttpServletRequest allTrustedHops = new MockHttpServletRequest();
-        allTrustedHops.setRemoteAddr("10.0.2.4");
-        allTrustedHops.addHeader("X-Forwarded-For", "10.0.1.1, 10.0.1.2");
-        assertThat(ThrottlingFilter.extractClientIpKey(allTrustedHops, List.of(), List.of()))
-                .isEqualTo("ip:10.0.1.1");
-
-        // 5. Explicit trusted-proxies CIDR list (including non-byte-aligned /12, /25, /57 CIDRs)
-        List<IpAddressMatcher> explicitProxies = ThrottlingFilter.parseTrustedProxies(
-                "172.16.0.0/12, 198.51.100.128/25, 2001:db8:abcd:ef80::/57, ::ffff:192.0.2.0/120, 203.0.113.250");
-        MockHttpServletRequest untrustedPrivate = new MockHttpServletRequest();
-        untrustedPrivate.setRemoteAddr("10.0.0.2");
-        untrustedPrivate.addHeader("X-Forwarded-For", "203.0.113.9");
-        assertThat(ThrottlingFilter.extractClientIpKey(untrustedPrivate, explicitProxies))
-                .isEqualTo("ip:10.0.0.2");
-
-        // Non-byte-aligned /12: 172.31.255.254 matches, 172.32.0.1 does not
-        MockHttpServletRequest matchingSlash12 = new MockHttpServletRequest();
-        matchingSlash12.setRemoteAddr("172.31.255.254");
-        matchingSlash12.addHeader("X-Forwarded-For", "203.0.113.9");
-        assertThat(ThrottlingFilter.extractClientIpKey(matchingSlash12, explicitProxies))
-                .isEqualTo("ip:203.0.113.9");
-
-        MockHttpServletRequest outsideSlash12 = new MockHttpServletRequest();
-        outsideSlash12.setRemoteAddr("172.32.0.1");
-        outsideSlash12.addHeader("X-Forwarded-For", "203.0.113.9");
-        assertThat(ThrottlingFilter.extractClientIpKey(outsideSlash12, explicitProxies))
-                .isEqualTo("ip:172.32.0.1");
-
-        // Non-byte-aligned /25: .129 matches, .127 and 198.51.101.129 do not
-        MockHttpServletRequest matchingSlash25 = new MockHttpServletRequest();
-        matchingSlash25.setRemoteAddr("198.51.100.129");
-        matchingSlash25.addHeader("X-Forwarded-For", "203.0.113.10");
-        assertThat(ThrottlingFilter.extractClientIpKey(matchingSlash25, explicitProxies))
-                .isEqualTo("ip:203.0.113.10");
-
-        MockHttpServletRequest outsideSlash25Low = new MockHttpServletRequest();
-        outsideSlash25Low.setRemoteAddr("198.51.100.127");
-        outsideSlash25Low.addHeader("X-Forwarded-For", "203.0.113.10");
-        assertThat(ThrottlingFilter.extractClientIpKey(outsideSlash25Low, explicitProxies))
-                .isEqualTo("ip:198.51.100.127");
-
-        // Non-byte-aligned IPv6 /57 + Cloudflare IPv6 /64 client key
-        MockHttpServletRequest matchingSlash57V6 = new MockHttpServletRequest();
-        matchingSlash57V6.setRemoteAddr("2001:db8:abcd:efff::9");
-        matchingSlash57V6.addHeader("X-Forwarded-For", "2001:0db8:0001:0002:aaaa:bbbb:cccc:0001");
-        assertThat(ThrottlingFilter.extractClientIpKey(matchingSlash57V6, explicitProxies))
-                .isEqualTo("ip:2001:db8:1:2:0:0:0:0/64");
-        assertThat(ClientIpResolver.matchesAny(null, explicitProxies)).isFalse();
-        assertThat(ClientIpResolver.matchesAny(ThrottlingFilter.parseIpLiteral("10.0.0.1"), null)).isFalse();
-        assertThat(ClientIpResolver.matchesAny(ThrottlingFilter.parseIpLiteral("10.0.0.1"), List.of())).isFalse();
-        assertThat(ClientIpResolver.isTrustedProxyPeer(null, explicitProxies)).isFalse();
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("")).isEmpty();
 
         ThrottlingFilter explicitProxyFilter = new ThrottlingFilter(
                 ThrottlingFilter.createKeyedLimiter(10.0, 2),
@@ -578,13 +533,12 @@ class ThrottlingFilterTest {
         explicitProxyFilter.doFilter(matchingSlash12, new MockHttpServletResponse(), filterChain);
         nullProxyListsFilter.doFilter(publicPeer, new MockHttpServletResponse(), filterChain);
 
-        // 6. IPv6 /64 bucketing prevents interface-ID rotation bypass while isolating distinct /64 prefixes
+        // IPv6 /64 bucketing prevents interface-ID rotation bypass while isolating distinct /64 prefixes
         AtomicLong v6Clock = new AtomicLong(0L);
         ThrottlingFilter ipv6Filter = new ThrottlingFilter(
                 ThrottlingFilter.createPreAuthLimiter(100.0, 20, 10.0, 1, v6Clock::get),
                 Duration.ZERO,
                 objectMapper);
-        String scimPath = "/ws/" + UUID.randomUUID() + "/scim/v2/Users";
 
         MockHttpServletRequest v6FirstHost = new MockHttpServletRequest("GET", scimPath);
         v6FirstHost.setRemoteAddr("2001:db8:cafe:42::1");
@@ -605,45 +559,6 @@ class ThrottlingFilterTest {
         MockHttpServletResponse v6OtherResp = new MockHttpServletResponse();
         ipv6Filter.doFilter(v6Other64, v6OtherResp, filterChain);
         assertThat(v6OtherResp.getStatus()).isEqualTo(200);
-
-        // 7. Non-numeric hostnames, malformed zone IDs, and ambiguous IPv4 forms never trigger DNS lookups
-        MockHttpServletRequest hostnamePeer = new MockHttpServletRequest();
-        hostnamePeer.setRemoteAddr("nonexistent-host.invalid");
-        assertThat(ThrottlingFilter.extractClientIpKey(hostnamePeer, List.of()))
-                .isEqualTo("ip:nonexistent-host.invalid");
-        assertThat(ThrottlingFilter.parseIpLiteral(null)).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("   ")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("010.0.0.1")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("127.1")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("192.168.1.abc")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("256.0.0.1")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("2001:db8:::1")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("[2001:db8::1]")).isNotNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("%en0")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("127.0.0.1%:1")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("fe80::1%")).isNull();
-        assertThat(ThrottlingFilter.parseIpLiteral("[127.0.0.1]")).isNull();
-
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("[2001:db8::1]")).isEqualTo("2001:db8::1");
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("[]")).isEqualTo("[]");
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("[2001:db8::1]:")).isEqualTo("[2001:db8::1]:");
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("[2001:db8::1]:abc")).isEqualTo("[2001:db8::1]:abc");
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("[2001:db8::1]:70000")).isEqualTo("[2001:db8::1]:70000");
-        assertThat(ClientIpResolver.splitHostFromRemoteAddr("198.51.100.1:0")).isEqualTo("198.51.100.1:0");
-        assertThat(ThrottlingFilter.parseTrustedProxies("10.0.0.0/8, , ")).hasSize(1);
-
-        assertThatThrownBy(() -> ThrottlingFilter.parseTrustedProxies("not-an-ip"))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> ThrottlingFilter.parseTrustedProxies("not-an-ip/24"))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> ThrottlingFilter.parseTrustedProxies("10.0.0.0/-1"))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> ThrottlingFilter.parseTrustedProxies("10.0.0.0/33"))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> ThrottlingFilter.parseTrustedProxies("10.0.0.0/abc"))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> ThrottlingFilter.parseTrustedProxies("10.0.0.0/8/16"))
-                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -726,19 +641,21 @@ class ThrottlingFilterTest {
         assertThat(ThrottlingFilter.resolveBurst(5000.0, 0)).isEqualTo(ThrottlingFilter.MAX_DEFAULT_BURST);
         assertThat(ThrottlingFilter.resolveBurst(200.0, 25)).isEqualTo(25);
 
-        // Sub-rate-limit defaults: min(globalRPS, 250.0) and min(resolvedGlobalBurst, 250)
+        // Sub-rate-limit defaults: globalRPS / 4.0 and ceil(resolvedGlobalBurst / 4.0)
         assertThat(ThrottlingFilter.resolveSubRateLimit(100.0, 0, 0.0, 0))
-                .isEqualTo(new ThrottlingFilter.SubRateLimit(100.0, 100));
-        assertThat(ThrottlingFilter.resolveSubRateLimit(800.0, 0, 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(25.0, 25));
+        assertThat(ThrottlingFilter.resolveSubRateLimit(1000.0, 0, 0.0, 0))
                 .isEqualTo(new ThrottlingFilter.SubRateLimit(250.0, 250));
+        assertThat(ThrottlingFilter.resolveSubRateLimit(10000.0, 0, 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(2500.0, 250));
         assertThat(ThrottlingFilter.resolveSubRateLimit(0.2, 10, 0.0, 0))
-                .isEqualTo(new ThrottlingFilter.SubRateLimit(0.2, 10));
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(0.05, 3));
         // Explicit subRPS > 0 with subBurst = 0 uses resolveBurst(subRPS, 0)
         assertThat(ThrottlingFilter.resolveSubRateLimit(200.0, 200, 15.2, 0))
                 .isEqualTo(new ThrottlingFilter.SubRateLimit(15.2, 16));
-        // Explicit subBurst > 0 overrides
+        // Explicit subBurst > 0 overrides while keeping default globalRPS / 4.0
         assertThat(ThrottlingFilter.resolveSubRateLimit(200.0, 200, 0.0, 42))
-                .isEqualTo(new ThrottlingFilter.SubRateLimit(200.0, 42));
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(50.0, 42));
 
         assertThatThrownBy(() -> ThrottlingFilter.createPreAuthLimiter(0.0, 10, 0.0, 0))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -748,6 +665,19 @@ class ThrottlingFilterTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ThrottlingFilter.createPreAuthLimiter(10.0, 10, Double.POSITIVE_INFINITY, 0))
                 .isInstanceOf(IllegalArgumentException.class);
+
+        // Verify UnauthenticatedLookupLimiter.NOOP and public factory + null-key safety
+        assertThat(ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP.isKnownActiveToken("ws:hash")).isFalse();
+        assertThat(ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP.tryAcquireLookupPermit().allowed()).isTrue();
+        ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP.onValidTokenLookup("ws:hash", true);
+        ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP.evictToken("ws:hash");
+
+        ThrottlingFilter.UnauthenticatedLookupLimiter defaultLookupLimiter =
+                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 0, 0.0, 0, Duration.ZERO);
+        assertThat(defaultLookupLimiter.isKnownActiveToken(null)).isFalse();
+        assertThat(defaultLookupLimiter.tryAcquireLookupPermit().allowed()).isTrue();
+        defaultLookupLimiter.onValidTokenLookup(null, false);
+        defaultLookupLimiter.evictToken(null);
 
         ObjectProvider<ThrottlingFilter.KeyedPermitLimiter> emptyProvider = emptyObjectProvider();
         ThrottlingFilter defaultSpringFilter = new ThrottlingFilter(
