@@ -1,8 +1,6 @@
 package de.palsoftware.scim.server.impl.filter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import de.palsoftware.scim.server.impl.scim.error.ScimException;
-import de.palsoftware.scim.server.impl.scim.error.ScimFilterErrorWriter;
 import de.palsoftware.scim.server.impl.security.RequestPaths;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -50,28 +48,6 @@ public class ServletPayloadStreamGuardFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        HttpServletRequest guardedRequest = PayloadSizeLimitFilter.BoundedPayloadRequestWrapper.isBounded(request)
-                ? request
-                : new PayloadSizeLimitFilter.BoundedPayloadRequestWrapper(
-                        request,
-                        PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES,
-                        PayloadSizeLimitFilter.resolvePayloadLimitDetail(request));
-        try {
-            filterChain.doFilter(guardedRequest, response);
-        } catch (ServletException | IOException | RuntimeException ex) {
-            ScimException payloadEx = ScimFilterErrorWriter.findScimException(
-                    ex, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
-            if (payloadEx != null && !response.isCommitted()) {
-                response.resetBuffer();
-                ScimFilterErrorWriter.writeScimError(
-                        response,
-                        objectMapper,
-                        HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                        payloadEx.getScimType(),
-                        payloadEx.getMessage());
-                return;
-            }
-            throw ex;
-        }
+        PayloadSizeLimitFilter.filterWithBoundedStream(request, response, filterChain, objectMapper);
     }
 }

@@ -112,13 +112,16 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
             return body;
         }
         boolean directSensitive = hasDirectSensitiveToken(body);
-        if (!directSensitive && !mayHaveTruncatedPatchValue(body)) {
-            return body;
+        if (!directSensitive) {
+            if (!mayHaveTruncatedPatchValue(body) || isStructurallyCompleteJson(body)) {
+                return body;
+            }
+            return redactMalformedJsonFallback(body);
         }
         try {
             JsonNode root = OBJECT_MAPPER.readTree(body);
             if (root != null && (root.isObject() || root.isArray())) {
-                if (directSensitive && redactJsonNode(root)) {
+                if (redactJsonNode(root)) {
                     return OBJECT_MAPPER.writeValueAsString(root);
                 }
                 return body;
@@ -137,10 +140,104 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     }
 
     private static boolean mayHaveTruncatedPatchValue(String rawBody) {
-        return containsKeywordIgnoreCase(rawBody, "value")
-                && (containsKeywordIgnoreCase(rawBody, "path")
-                || containsKeywordIgnoreCase(rawBody, "op")
-                || containsKeywordIgnoreCase(rawBody, "operations"));
+        return containsKeywordIgnoreCase(rawBody, "\"value\"")
+                && (containsKeywordIgnoreCase(rawBody, "\"path\"")
+                || containsKeywordIgnoreCase(rawBody, "\"op\"")
+                || containsKeywordIgnoreCase(rawBody, "\"operations\""));
+    }
+
+    static boolean isStructurallyCompleteJson(String s) {
+        if (s == null) {
+            return false;
+        }
+        int n = s.length();
+        int start = skipWhitespace(s, 0);
+        if (start >= n || !isContainerOpen(s.charAt(start))) {
+            return false;
+        }
+        int endAfterRoot = scanBalancedContainer(s, start);
+        return endAfterRoot > 0 && skipWhitespace(s, endAfterRoot) == n;
+    }
+
+    private static boolean isContainerOpen(char c) {
+        return c == '{' || c == '[';
+    }
+
+    private static int scanBalancedContainer(String s, int start) {
+        int n = s.length();
+        long arrayMask = 0L;
+        int depth = 0;
+        int i = start;
+        while (i < n) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                i = skipCompleteJsonString(s, i + 1);
+                if (i < 0) {
+                    return -1;
+                }
+                continue;
+            }
+            int nextDepth = updateContainerDepth(c, depth, arrayMask);
+            if (nextDepth < 0) {
+                return -1;
+            }
+            if (nextDepth > depth) {
+                arrayMask = setContainerBit(arrayMask, depth, c == '[');
+            }
+            depth = nextDepth;
+            i++;
+            if (depth == 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int updateContainerDepth(char c, int depth, long arrayMask) {
+        if (c == '{' || c == '[') {
+            return depth < 64 ? depth + 1 : -1;
+        }
+        if (c == '}' || c == ']') {
+            boolean expectedArray = ((arrayMask >>> (depth - 1)) & 1L) != 0L;
+            return expectedArray == (c == ']') ? depth - 1 : -1;
+        }
+        return depth;
+    }
+
+    private static long setContainerBit(long arrayMask, int depth, boolean isArray) {
+        long bit = 1L << depth;
+        return isArray ? (arrayMask | bit) : (arrayMask & ~bit);
+    }
+
+    private static int skipCompleteJsonString(String s, int afterOpenQuote) {
+        int n = s.length();
+        int i = afterOpenQuote;
+        while (i < n) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                return i + 1;
+            }
+            if (c == '\\') {
+                i = skipJsonEscape(s, i + 1);
+                if (i < 0) {
+                    return -1;
+                }
+            } else {
+                i++;
+            }
+        }
+        return -1;
+    }
+
+    private static int skipJsonEscape(String s, int escIdx) {
+        if (escIdx >= s.length()) {
+            return -1;
+        }
+        return switch (s.charAt(escIdx)) {
+            case '"', '\\', '/', 'b', 'f', 'n', 'r', 't' -> escIdx + 1;
+            case 'u' -> (escIdx + 4 < s.length() && parseFourHexDigits(s, escIdx + 1) >= 0) ? escIdx + 5 : -1;
+            default -> -1;
+        };
     }
 
     private static boolean containsKeywordIgnoreCase(String rawBody, String keyword) {
@@ -315,8 +412,40 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         }
     }
 
+    private static final class FrameStack {
+        private final Deque<ContainerFrame> frames = new ArrayDeque<>();
+        private int openObjects;
+
+        void push(ContainerFrame frame) {
+            frames.addLast(frame);
+            if (frame.kind == ContainerKind.OBJECT) {
+                openObjects++;
+            }
+        }
+
+        ContainerFrame pop() {
+            ContainerFrame removed = frames.removeLast();
+            if (removed.kind == ContainerKind.OBJECT) {
+                openObjects--;
+            }
+            return removed;
+        }
+
+        ContainerFrame peek() {
+            return frames.peekLast();
+        }
+
+        boolean isEmpty() {
+            return frames.isEmpty();
+        }
+
+        boolean hasEnclosingObject() {
+            return openObjects > 0;
+        }
+    }
+
     private static List<Span> scanMalformedJson(String s) {
-        Deque<ContainerFrame> stack = new ArrayDeque<>();
+        FrameStack stack = new FrameStack();
         List<Span> spans = new ArrayList<>();
         int n = s.length();
         int i = 0;
@@ -326,7 +455,7 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
             if (i >= n) {
                 break;
             }
-            ContainerFrame top = stack.peekLast();
+            ContainerFrame top = stack.peek();
             if (top == null) {
                 i = stepTopLevel(s, i, stack);
             } else if (top.kind == ContainerKind.ARRAY) {
@@ -342,14 +471,14 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         return spans;
     }
 
-    private static int stepTopLevel(String s, int i, Deque<ContainerFrame> stack) {
+    private static int stepTopLevel(String s, int i, FrameStack stack) {
         char c = s.charAt(i);
         if (c == '{') {
-            stack.addLast(ContainerFrame.objectFrame(i, KeyKind.NONE, false));
+            stack.push(ContainerFrame.objectFrame(i, KeyKind.NONE, false));
             return i + 1;
         }
         if (c == '[') {
-            stack.addLast(ContainerFrame.arrayFrame(i, KeyKind.NONE, false));
+            stack.push(ContainerFrame.arrayFrame(i, KeyKind.NONE, false));
             return i + 1;
         }
         if (c == '"') {
@@ -359,7 +488,7 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
                 ContainerFrame synthetic = ContainerFrame.objectFrame(i, KeyKind.NONE, false);
                 applyObservedKey(synthetic, classifyKey(tok.decoded()));
                 synthetic.expectingValue = true;
-                stack.addLast(synthetic);
+                stack.push(synthetic);
                 return afterKey + 1;
             }
             return tok.end();
@@ -370,28 +499,28 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     private static int stepArray(String s,
                                  int i,
                                  ContainerFrame top,
-                                 Deque<ContainerFrame> stack,
+                                 FrameStack stack,
                                  List<Span> spans) {
         char c = s.charAt(i);
         if (c == ']') {
-            stack.removeLast();
-            finishCompositeValue(stack.peekLast(), top.boundKeyInParent, top.valStart, i + 1, spans);
+            stack.pop();
+            finishCompositeValue(stack.peek(), top.boundKeyInParent, top.valStart, i + 1, spans);
             return i + 1;
         }
         if (c == '{') {
-            stack.addLast(ContainerFrame.objectFrame(i, KeyKind.NONE, top.isOperationsArray));
+            stack.push(ContainerFrame.objectFrame(i, KeyKind.NONE, top.isOperationsArray));
             return i + 1;
         }
         if (c == '[') {
-            stack.addLast(ContainerFrame.arrayFrame(i, KeyKind.NONE, false));
+            stack.push(ContainerFrame.arrayFrame(i, KeyKind.NONE, false));
             return i + 1;
         }
         if (c == '"') {
             return scanQuotedString(s, i).end();
         }
-        if (c == '}' && hasEnclosingObject(stack)) {
-            stack.removeLast();
-            finishCompositeValue(stack.peekLast(), top.boundKeyInParent, top.valStart, i, spans);
+        if (c == '}' && stack.hasEnclosingObject()) {
+            stack.pop();
+            finishCompositeValue(stack.peek(), top.boundKeyInParent, top.valStart, i, spans);
             return i;
         }
         if (c == ',') {
@@ -400,25 +529,16 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         return Math.max(i + 1, scanBareToken(s, i));
     }
 
-    private static boolean hasEnclosingObject(Deque<ContainerFrame> stack) {
-        for (ContainerFrame frame : stack) {
-            if (frame.kind == ContainerKind.OBJECT) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static int stepObjectKeyOrEnd(String s,
                                           int i,
                                           ContainerFrame frame,
-                                          Deque<ContainerFrame> stack,
+                                          FrameStack stack,
                                           List<Span> spans) {
         char c = s.charAt(i);
         if (c == '}') {
-            stack.removeLast();
+            stack.pop();
             finalizeObjectFrame(frame, true, spans);
-            finishCompositeValue(stack.peekLast(), frame.boundKeyInParent, frame.valStart, i + 1, spans);
+            finishCompositeValue(stack.peek(), frame.boundKeyInParent, frame.valStart, i + 1, spans);
             return i + 1;
         }
         if (c == '"') {
@@ -432,11 +552,11 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
             return keyTok.end();
         }
         if (c == '{') {
-            stack.addLast(ContainerFrame.objectFrame(i, KeyKind.NONE, false));
+            stack.push(ContainerFrame.objectFrame(i, KeyKind.NONE, false));
             return i + 1;
         }
         if (c == '[') {
-            stack.addLast(ContainerFrame.arrayFrame(i, KeyKind.NONE, false));
+            stack.push(ContainerFrame.arrayFrame(i, KeyKind.NONE, false));
             return i + 1;
         }
         return i + 1;
@@ -452,7 +572,7 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
     private static int stepObjectValue(String s,
                                        int i,
                                        ContainerFrame frame,
-                                       Deque<ContainerFrame> stack,
+                                       FrameStack stack,
                                        List<Span> spans) {
         char c = s.charAt(i);
         KeyKind keyKind = frame.currentKey;
@@ -465,11 +585,11 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
             return valTok.end();
         }
         if (c == '{') {
-            stack.addLast(ContainerFrame.objectFrame(i, keyKind, false));
+            stack.push(ContainerFrame.objectFrame(i, keyKind, false));
             return i + 1;
         }
         if (c == '[') {
-            stack.addLast(ContainerFrame.arrayFrame(i, keyKind, keyKind == KeyKind.OPERATIONS));
+            stack.push(ContainerFrame.arrayFrame(i, keyKind, keyKind == KeyKind.OPERATIONS));
             return i + 1;
         }
         if (c == ',' || c == '}' || c == ']') {
@@ -558,13 +678,13 @@ public class RequestResponseLoggingFilter extends OncePerRequestFilter {
         }
     }
 
-    private static void unwindUnclosedFrames(Deque<ContainerFrame> stack, int eofIdx, List<Span> spans) {
+    private static void unwindUnclosedFrames(FrameStack stack, int eofIdx, List<Span> spans) {
         while (!stack.isEmpty()) {
-            ContainerFrame frame = stack.removeLast();
+            ContainerFrame frame = stack.pop();
             if (frame.kind == ContainerKind.OBJECT) {
                 finalizeObjectFrame(frame, false, spans);
             }
-            finishCompositeValue(stack.peekLast(), frame.boundKeyInParent, frame.valStart, eofIdx, spans);
+            finishCompositeValue(stack.peek(), frame.boundKeyInParent, frame.valStart, eofIdx, spans);
         }
     }
 

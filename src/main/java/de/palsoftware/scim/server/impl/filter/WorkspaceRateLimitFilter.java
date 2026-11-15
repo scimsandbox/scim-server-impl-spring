@@ -22,11 +22,17 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Tier 3 post-authentication per-workspace SCIM rate-limiting filter.
- * <p>
+ * Post-authentication SCIM rate-limiting filter enforcing:
+ * <ol>
+ *   <li><b>Tier 2 (Per-Workspace Cap)</b>: Isolates noisy tenants so a single workspace cannot
+ *       monopolize pod capacity.</li>
+ *   <li><b>Tier 3 (Pod-Wide Global Cap)</b>: Bounds aggregate authenticated RPS across all
+ *       workspaces (refunding the workspace token if pod-wide capacity rejects).</li>
+ * </ol>
  * Runs strictly AFTER {@link BearerTokenAuthFilter} and consumes permits ONLY when
  * {@link BearerTokenAuthFilter#AUTHENTICATED_WORKSPACE_ID} has been verified, preventing
- * unauthenticated or invalid-token callers from draining a tenant's workspace bucket.
+ * unauthenticated {@code 401} floods or anonymous discovery calls from draining any workspace
+ * bucket or the pod-wide global budget.
  */
 @Component
 @ConditionalOnProperty(prefix = "app.rate-limit", name = "enabled", havingValue = "true", matchIfMissing = false)
@@ -44,7 +50,7 @@ public class WorkspaceRateLimitFilter extends OncePerRequestFilter {
             @Value("${app.rate-limit.per-workspace-burst:0}") int perWorkspaceBurst,
             @Value("${app.rate-limit.wait-timeout:0s}") Duration waitTimeout,
             ObjectMapper objectMapper) {
-        this(createDefaultWorkspaceLimiter(
+        this(ThrottlingFilter.createPostAuthLimiter(
                 globalRequestsPerSecond, globalBurst, perWorkspaceRequestsPerSecond, perWorkspaceBurst),
                 waitTimeout,
                 objectMapper);
@@ -56,16 +62,6 @@ public class WorkspaceRateLimitFilter extends OncePerRequestFilter {
         this.permitLimiter = Objects.requireNonNull(permitLimiter, "permitLimiter must not be null");
         this.waitTimeout = ThrottlingFilter.resolveWaitTimeout(waitTimeout);
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
-    }
-
-    private static ThrottlingFilter.KeyedPermitLimiter createDefaultWorkspaceLimiter(
-            double globalRequestsPerSecond,
-            int globalBurst,
-            double perWorkspaceRequestsPerSecond,
-            int perWorkspaceBurst) {
-        ThrottlingFilter.SubRateLimit wsLimit = ThrottlingFilter.resolveSubRateLimit(
-                globalRequestsPerSecond, globalBurst, perWorkspaceRequestsPerSecond, perWorkspaceBurst);
-        return ThrottlingFilter.createKeyedLimiter(wsLimit.requestsPerSecond(), wsLimit.burst());
     }
 
     @Override

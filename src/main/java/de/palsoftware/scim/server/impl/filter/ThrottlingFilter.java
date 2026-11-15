@@ -15,30 +15,25 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.web.util.matcher.IpAddressMatcher;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.net.Inet4Address;
-import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * Pre-authentication SCIM rate-limiting filter enforcing:
- * <ol>
- *   <li><b>Tier 1 (Per-Client-IP)</b>: Protects {@code WorkspaceTokenRepository} against
- *       unauthenticated random-UUID or invalid-token floods from a single client IP without
- *       letting unauthenticated callers exhaust any workspace's bucket.</li>
- *   <li><b>Tier 2 (Server-Wide Global Cap)</b>: Bounds aggregate RPS across all IPs and workspaces.</li>
- * </ol>
+ * Tier 1 pre-authentication SCIM rate-limiting filter enforcing per-client-IP (and IPv6 {@code /64}
+ * prefix) token buckets.
+ * <p>
+ * Protects {@code WorkspaceTokenRepository} against unauthenticated random-UUID or invalid-token
+ * floods from any client IP without consuming permits from any workspace bucket or the pod-wide
+ * global cap (which are enforced strictly post-authentication in {@link WorkspaceRateLimitFilter}).
  */
 @Component
 @ConditionalOnProperty(prefix = "app.rate-limit", name = "enabled", havingValue = "true", matchIfMissing = false)
@@ -55,8 +50,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     static final String CAPACITY_ERROR_DETAIL = "Too many requests. Try again later.";
 
     private final KeyedPermitLimiter permitLimiter;
-    private final List<CidrBlock> trustedProxies;
-    private final List<CidrBlock> trustedCloudflareProxies;
+    private final List<IpAddressMatcher> trustedProxies;
+    private final List<IpAddressMatcher> trustedCloudflareProxies;
     private final Duration waitTimeout;
     private final ObjectMapper objectMapper;
 
@@ -88,15 +83,15 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     }
 
     public ThrottlingFilter(KeyedPermitLimiter permitLimiter,
-                            List<CidrBlock> trustedProxies,
+                            List<IpAddressMatcher> trustedProxies,
                             Duration waitTimeout,
                             ObjectMapper objectMapper) {
         this(permitLimiter, trustedProxies, List.of(), waitTimeout, objectMapper);
     }
 
     public ThrottlingFilter(KeyedPermitLimiter permitLimiter,
-                            List<CidrBlock> trustedProxies,
-                            List<CidrBlock> trustedCloudflareProxies,
+                            List<IpAddressMatcher> trustedProxies,
+                            List<IpAddressMatcher> trustedCloudflareProxies,
                             Duration waitTimeout,
                             ObjectMapper objectMapper) {
         this.permitLimiter = Objects.requireNonNull(permitLimiter, "permitLimiter must not be null");
@@ -143,29 +138,67 @@ public class ThrottlingFilter extends OncePerRequestFilter {
                                                    NanoSleeper sleeper) {
         SubRateLimit ipLimit = resolveSubRateLimit(
                 globalRequestsPerSecond, globalBurst, perIpRequestsPerSecond, perIpBurst);
+        return createKeyedLimiter(ipLimit.requestsPerSecond(), ipLimit.burst(), nanoClock, sleeper);
+    }
+
+    public static KeyedPermitLimiter createPostAuthLimiter(double globalRequestsPerSecond,
+                                                           int globalBurst,
+                                                           double perWorkspaceRequestsPerSecond,
+                                                           int perWorkspaceBurst) {
+        return createPostAuthLimiter(
+                globalRequestsPerSecond,
+                globalBurst,
+                perWorkspaceRequestsPerSecond,
+                perWorkspaceBurst,
+                System::nanoTime,
+                TimeUnit.NANOSECONDS::sleep);
+    }
+
+    static KeyedPermitLimiter createPostAuthLimiter(double globalRequestsPerSecond,
+                                                    int globalBurst,
+                                                    double perWorkspaceRequestsPerSecond,
+                                                    int perWorkspaceBurst,
+                                                    LongSupplier nanoClock) {
+        return createPostAuthLimiter(
+                globalRequestsPerSecond,
+                globalBurst,
+                perWorkspaceRequestsPerSecond,
+                perWorkspaceBurst,
+                nanoClock,
+                TimeUnit.NANOSECONDS::sleep);
+    }
+
+    static KeyedPermitLimiter createPostAuthLimiter(double globalRequestsPerSecond,
+                                                    int globalBurst,
+                                                    double perWorkspaceRequestsPerSecond,
+                                                    int perWorkspaceBurst,
+                                                    LongSupplier nanoClock,
+                                                    NanoSleeper sleeper) {
+        SubRateLimit wsLimit = resolveSubRateLimit(
+                globalRequestsPerSecond, globalBurst, perWorkspaceRequestsPerSecond, perWorkspaceBurst);
         Objects.requireNonNull(nanoClock, "nanoClock must not be null");
         Objects.requireNonNull(sleeper, "sleeper must not be null");
 
         int resolvedGlobalBurst = resolveBurst(globalRequestsPerSecond, globalBurst);
         TokenBucket globalBucket = new TokenBucket(globalRequestsPerSecond, resolvedGlobalBurst, nanoClock, sleeper);
-        LoadingCache<String, TokenBucket> ipBuckets = Caffeine.newBuilder()
+        LoadingCache<String, TokenBucket> wsBuckets = Caffeine.newBuilder()
                 .maximumSize(MAX_CACHED_KEYS)
                 .expireAfterAccess(BUCKET_IDLE_EXPIRATION)
-                .build(_ -> new TokenBucket(ipLimit.requestsPerSecond(), ipLimit.burst(), nanoClock, sleeper));
+                .build(_ -> new TokenBucket(wsLimit.requestsPerSecond(), wsLimit.burst(), nanoClock, sleeper));
 
         return (key, timeout) -> {
             long startNanos = nanoClock.getAsLong();
             String bucketKey = (key != null && !key.isEmpty()) ? key : GLOBAL_FALLBACK_KEY;
-            TokenBucket ipBucket = Objects.requireNonNull(ipBuckets.get(bucketKey));
-            AcquireResult ipResult = ipBucket.tryAcquire(timeout);
-            if (!ipResult.allowed()) {
-                return ipResult;
+            TokenBucket wsBucket = Objects.requireNonNull(wsBuckets.get(bucketKey));
+            AcquireResult wsResult = wsBucket.tryAcquire(timeout);
+            if (!wsResult.allowed()) {
+                return wsResult;
             }
 
             Duration remainingTimeout = remainingTimeout(timeout, startNanos, nanoClock);
             AcquireResult globalResult = globalBucket.tryAcquire(remainingTimeout);
             if (!globalResult.allowed()) {
-                ipBucket.refund();
+                wsBucket.refund();
                 return globalResult;
             }
             return AcquireResult.ALLOWED;
@@ -260,341 +293,22 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         return configuredWaitTimeout;
     }
 
-    public static List<CidrBlock> parseTrustedProxies(String raw) {
-        if (!StringUtils.hasText(raw)) {
-            return List.of();
-        }
-        String[] parts = raw.split(",");
-        List<CidrBlock> blocks = new ArrayList<>(parts.length);
-        for (String part : parts) {
-            String item = part.trim();
-            if (!item.isEmpty()) {
-                blocks.add(parseTrustedProxyEntry(item));
-            }
-        }
-        return List.copyOf(blocks);
+    public static List<IpAddressMatcher> parseTrustedProxies(String raw) {
+        return ClientIpResolver.parseTrustedProxies(raw);
     }
 
-    private static CidrBlock parseTrustedProxyEntry(String item) {
-        int slashIdx = item.indexOf('/');
-        if (slashIdx < 0) {
-            InetAddress addr = parseIpLiteral(item);
-            if (addr == null) {
-                throw new IllegalArgumentException("Invalid trusted proxy IP: " + item);
-            }
-            byte[] addrBytes = addr.getAddress();
-            return new CidrBlock(addrBytes, addrBytes.length * 8);
-        }
-        if (item.indexOf('/', slashIdx + 1) >= 0) {
-            throw new IllegalArgumentException("Invalid trusted proxy CIDR: " + item);
-        }
-        String ipPart = item.substring(0, slashIdx).trim();
-        InetAddress addr = parseIpLiteral(ipPart);
-        if (addr == null) {
-            throw new IllegalArgumentException("Invalid trusted proxy CIDR address: " + item);
-        }
-        int prefixBits = parseCidrPrefixLength(item, item.substring(slashIdx + 1).trim(), ipPart, addr);
-        return new CidrBlock(addr.getAddress(), prefixBits);
-    }
-
-    private static int parseCidrPrefixLength(String fullItem, String prefixPart, String ipPart, InetAddress addr) {
-        int prefixBits;
-        try {
-            prefixBits = Integer.parseInt(prefixPart);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("Invalid trusted proxy CIDR prefix: " + fullItem, e);
-        }
-        // Unmap IPv4-mapped IPv6 CIDR (e.g. ::ffff:192.0.2.0/120 -> 192.0.2.0/24)
-        if (ipPart.indexOf(':') >= 0 && addr instanceof Inet4Address && prefixBits >= 96 && prefixBits <= 128) {
-            prefixBits -= 96;
-        }
-        int totalBits = addr.getAddress().length * 8;
-        if (prefixBits < 0 || prefixBits > totalBits) {
-            throw new IllegalArgumentException("Invalid trusted proxy CIDR prefix length: " + fullItem);
-        }
-        return prefixBits;
-    }
-
-    static String extractClientIpKey(HttpServletRequest request, List<CidrBlock> trustedProxies) {
-        return extractClientIpKey(request, trustedProxies, List.of());
+    static String extractClientIpKey(HttpServletRequest request, List<IpAddressMatcher> trustedProxies) {
+        return ClientIpResolver.extractClientIpKey(request, trustedProxies, List.of());
     }
 
     static String extractClientIpKey(HttpServletRequest request,
-                                     List<CidrBlock> trustedProxies,
-                                     List<CidrBlock> trustedCloudflareProxies) {
-        if (request == null) {
-            return GLOBAL_FALLBACK_KEY;
-        }
-        String remoteAddr = request.getRemoteAddr();
-        if (!StringUtils.hasText(remoteAddr)) {
-            return GLOBAL_FALLBACK_KEY;
-        }
-        String rawHost = splitHostFromRemoteAddr(remoteAddr.trim());
-        if (rawHost.isEmpty()) {
-            return GLOBAL_FALLBACK_KEY;
-        }
-
-        InetAddress peerAddr = parseIpLiteral(rawHost);
-        if (peerAddr == null) {
-            return "ip:" + rawHost;
-        }
-
-        boolean cfTrusted = matchesAnyCidr(peerAddr, trustedCloudflareProxies);
-        if (cfTrusted) {
-            InetAddress cfAddr = extractSingleCfConnectingIp(request);
-            if (cfAddr != null) {
-                return formatClientIpKey(cfAddr);
-            }
-        }
-
-        if (cfTrusted || isTrustedProxyPeer(peerAddr, trustedProxies)) {
-            InetAddress resolved = resolveClientFromXForwardedFor(
-                    request, peerAddr, trustedProxies, trustedCloudflareProxies);
-            return formatClientIpKey(resolved);
-        }
-
-        return formatClientIpKey(peerAddr);
+                                     List<IpAddressMatcher> trustedProxies,
+                                     List<IpAddressMatcher> trustedCloudflareProxies) {
+        return ClientIpResolver.extractClientIpKey(request, trustedProxies, trustedCloudflareProxies);
     }
 
-    static String formatClientIpKey(InetAddress addr) {
-        if (addr instanceof Inet4Address) {
-            return "ip:" + addr.getHostAddress();
-        }
-        byte[] bytes = addr.getAddress();
-        if (bytes.length == 16) {
-            byte[] masked64 = new byte[16];
-            System.arraycopy(bytes, 0, masked64, 0, 8);
-            try {
-                return "ip:" + InetAddress.getByAddress(masked64).getHostAddress() + "/64";
-            } catch (java.net.UnknownHostException e) {
-                throw new IllegalStateException("Unexpected 16-byte IPv6 address length error", e);
-            }
-        }
-        return "ip:" + addr.getHostAddress();
-    }
-
-    private static InetAddress extractSingleCfConnectingIp(HttpServletRequest request) {
-        Enumeration<String> values = request.getHeaders("CF-Connecting-IP");
-        if (values == null || !values.hasMoreElements()) {
-            return null;
-        }
-        String first = values.nextElement();
-        if (values.hasMoreElements() || first == null || first.indexOf(',') >= 0) {
-            return null;
-        }
-        return parseIpLiteral(first);
-    }
-
-    private static InetAddress resolveClientFromXForwardedFor(HttpServletRequest request,
-                                                              InetAddress peerAddr,
-                                                              List<CidrBlock> trustedProxies,
-                                                              List<CidrBlock> trustedCloudflareProxies) {
-        InetAddress lastTrustedHop = null;
-        for (String token : collectXffTokensRightToLeft(request)) {
-            InetAddress hopAddr = parseIpLiteral(token);
-            if (hopAddr == null) {
-                break;
-            }
-            if (!isTrustedProxyHop(hopAddr, trustedProxies, trustedCloudflareProxies)) {
-                return hopAddr;
-            }
-            lastTrustedHop = hopAddr;
-        }
-        return lastTrustedHop != null ? lastTrustedHop : peerAddr;
-    }
-
-    private static List<String> collectXffTokensRightToLeft(HttpServletRequest request) {
-        Enumeration<String> values = request.getHeaders("X-Forwarded-For");
-        if (values == null || !values.hasMoreElements()) {
-            return List.of();
-        }
-        List<String> headers = new ArrayList<>(2);
-        while (values.hasMoreElements()) {
-            String h = values.nextElement();
-            if (h != null) {
-                headers.add(h);
-            }
-        }
-        List<String> tokens = new ArrayList<>(4);
-        for (int h = headers.size() - 1; h >= 0; h--) {
-            appendCommaTokensRightToLeft(headers.get(h), tokens);
-        }
-        return tokens;
-    }
-
-    private static void appendCommaTokensRightToLeft(String header, List<String> out) {
-        int end = header.length();
-        while (end > 0) {
-            int commaIdx = header.lastIndexOf(',', end - 1);
-            String token = header.substring(commaIdx + 1, end).trim();
-            if (!token.isEmpty()) {
-                out.add(token);
-            }
-            end = commaIdx;
-        }
-    }
-
-    private static boolean isTrustedProxyHop(InetAddress hopAddr,
-                                             List<CidrBlock> trustedProxies,
-                                             List<CidrBlock> trustedCloudflareProxies) {
-        return matchesAnyCidr(hopAddr, trustedCloudflareProxies) || isTrustedProxyPeer(hopAddr, trustedProxies);
-    }
-
-    private static boolean matchesAnyCidr(InetAddress addr, List<CidrBlock> blocks) {
-        if (addr == null || blocks == null || blocks.isEmpty()) {
-            return false;
-        }
-        for (CidrBlock block : blocks) {
-            if (block.contains(addr)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    static boolean isTrustedProxyPeer(InetAddress peerAddr, List<CidrBlock> trustedProxies) {
-        if (peerAddr == null) {
-            return false;
-        }
-        if (trustedProxies != null && !trustedProxies.isEmpty()) {
-            return matchesAnyCidr(peerAddr, trustedProxies);
-        }
-        return peerAddr.isLoopbackAddress()
-                || peerAddr.isSiteLocalAddress()
-                || peerAddr.isLinkLocalAddress()
-                || isIpv6UniqueLocal(peerAddr);
-    }
-
-    private static boolean isIpv6UniqueLocal(InetAddress addr) {
-        if (addr instanceof Inet6Address) {
-            byte[] bytes = addr.getAddress();
-            return bytes.length == 16 && (bytes[0] & 0xFE) == 0xFC;
-        }
-        return false;
-    }
-
-    static String splitHostFromRemoteAddr(String addr) {
-        if (addr.isEmpty()) {
-            return "";
-        }
-        if (addr.charAt(0) == '[') {
-            int closeIdx = addr.indexOf(']');
-            if (closeIdx > 1) {
-                if (closeIdx == addr.length() - 1) {
-                    return addr.substring(1, closeIdx);
-                }
-                if (addr.charAt(closeIdx + 1) == ':' && isValidPort(addr, closeIdx + 2)) {
-                    return addr.substring(1, closeIdx);
-                }
-            }
-            return addr;
-        }
-        int firstColon = addr.indexOf(':');
-        if (firstColon > 0 && addr.indexOf(':', firstColon + 1) < 0 && isValidPort(addr, firstColon + 1)) {
-            return addr.substring(0, firstColon);
-        }
-        return addr;
-    }
-
-    private static boolean isValidPort(String s, int startIdx) {
-        int len = s.length() - startIdx;
-        if (len <= 0 || len > 5) {
-            return false;
-        }
-        int port = 0;
-        for (int i = startIdx; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c < '0' || c > '9') {
-                return false;
-            }
-            port = port * 10 + (c - '0');
-        }
-        return port >= 1 && port <= 65535;
-    }
-
-    /**
-     * Parses numeric IPv4 and IPv6 literals using {@link InetAddress#ofLiteral(String)}
-     * with strict dotted-quad validation and zero DNS lookups.
-     */
     static InetAddress parseIpLiteral(String raw) {
-        String s = normalizeIpLiteralInput(raw);
-        if (s == null || !hasValidIpv4SegmentIfPresent(s)) {
-            return null;
-        }
-        try {
-            return InetAddress.ofLiteral(s);
-        } catch (IllegalArgumentException _) {
-            return null;
-        }
-    }
-
-    private static String normalizeIpLiteralInput(String raw) {
-        if (raw == null) {
-            return null;
-        }
-        String s = raw.trim();
-        if (s.isEmpty()) {
-            return null;
-        }
-        if (s.charAt(0) == '[' && s.charAt(s.length() - 1) == ']' && s.length() > 2) {
-            String inner = s.substring(1, s.length() - 1);
-            if (inner.indexOf(':') < 0) {
-                return null;
-            }
-            s = inner;
-        }
-        int pctIdx = s.indexOf('%');
-        if (pctIdx >= 0) {
-            if (pctIdx == 0 || pctIdx == s.length() - 1) {
-                return null;
-            }
-            int colonIdx = s.indexOf(':');
-            return (colonIdx >= 0 && colonIdx < pctIdx) ? s.substring(0, pctIdx) : null;
-        }
-        return s;
-    }
-
-    private static boolean hasValidIpv4SegmentIfPresent(String s) {
-        int lastColon = s.lastIndexOf(':');
-        if (lastColon < 0) {
-            return isStrictIpv4Literal(s);
-        }
-        if (s.indexOf('.', lastColon + 1) >= 0) {
-            return isStrictIpv4Literal(s.substring(lastColon + 1));
-        }
-        return true;
-    }
-
-    private static boolean isStrictIpv4Literal(String s) {
-        int len = s.length();
-        if (len < 7 || len > 15) {
-            return false;
-        }
-        int start = 0;
-        for (int octet = 0; octet < 3; octet++) {
-            int dot = s.indexOf('.', start);
-            if (dot <= start || !isValidDecimalOctet(s, start, dot)) {
-                return false;
-            }
-            start = dot + 1;
-        }
-        return s.indexOf('.', start) < 0 && isValidDecimalOctet(s, start, len);
-    }
-
-    private static boolean isValidDecimalOctet(String s, int start, int end) {
-        int digitCount = end - start;
-        if (digitCount <= 0 || digitCount > 3 || (digitCount > 1 && s.charAt(start) == '0')) {
-            return false;
-        }
-        int val = 0;
-        for (int i = start; i < end; i++) {
-            char c = s.charAt(i);
-            if (c < '0' || c > '9') {
-                return false;
-            }
-            val = val * 10 + (c - '0');
-        }
-        return val <= 255;
+        return ClientIpResolver.parseIpLiteral(raw);
     }
 
     @Override
@@ -608,7 +322,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
                                     FilterChain chain) throws IOException, ServletException {
         request.setAttribute(ScimRequestMetricAttributes.THROTTLED, ScimRequestMetricAttributes.THROTTLED_NO);
 
-        String clientIpKey = extractClientIpKey(request, trustedProxies, trustedCloudflareProxies);
+        String clientIpKey = ClientIpResolver.extractClientIpKey(
+                request, trustedProxies, trustedCloudflareProxies);
         AcquireResult result = permitLimiter.tryAcquire(clientIpKey, waitTimeout);
         if (!result.allowed()) {
             request.setAttribute(ScimRequestMetricAttributes.THROTTLED, ScimRequestMetricAttributes.THROTTLED_YES);
@@ -635,48 +350,6 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     }
 
     record SubRateLimit(double requestsPerSecond, int burst) {
-    }
-
-    public static final class CidrBlock {
-        private final byte[] maskedNetwork;
-        private final int prefixBits;
-
-        CidrBlock(byte[] rawAddress, int prefixBits) {
-            this.maskedNetwork = rawAddress.clone();
-            this.prefixBits = prefixBits;
-            int fullBytes = prefixBits / 8;
-            int remBits = prefixBits % 8;
-            if (remBits > 0 && fullBytes < maskedNetwork.length) {
-                int mask = (0xFF << (8 - remBits)) & 0xFF;
-                maskedNetwork[fullBytes] = (byte) (maskedNetwork[fullBytes] & mask);
-                fullBytes++;
-            }
-            for (int i = fullBytes; i < maskedNetwork.length; i++) {
-                maskedNetwork[i] = 0;
-            }
-        }
-
-        public boolean contains(InetAddress candidate) {
-            if (candidate == null) {
-                return false;
-            }
-            byte[] candBytes = candidate.getAddress();
-            if (candBytes.length != maskedNetwork.length) {
-                return false;
-            }
-            int fullBytes = prefixBits / 8;
-            for (int i = 0; i < fullBytes; i++) {
-                if (candBytes[i] != maskedNetwork[i]) {
-                    return false;
-                }
-            }
-            int remBits = prefixBits % 8;
-            if (remBits > 0) {
-                int mask = (0xFF << (8 - remBits)) & 0xFF;
-                return (candBytes[fullBytes] & mask) == (maskedNetwork[fullBytes] & 0xFF);
-            }
-            return true;
-        }
     }
 
     @FunctionalInterface

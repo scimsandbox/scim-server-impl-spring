@@ -60,7 +60,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestPropertySource(properties = {
         "ACTUATOR_API_KEY=test-key",
         "management.server.port=0",
-        "app.rate-limit.requests-per-second=100",
+        "app.rate-limit.requests-per-second=1",
         "app.rate-limit.burst=200",
         "app.rate-limit.per-ip-requests-per-second=0.2",
         "app.rate-limit.per-ip-burst=6",
@@ -338,6 +338,33 @@ class SecurityConfigIntegrationTest extends PostgresIntegrationTestSupport {
                 new HttpEntity<>(validHeadersB),
                 String.class);
         assertThat(respB.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        // 5. Distributed 401 flood across 40 distinct IPs x 5 invalid-token requests (= 200 requests == global burst!)
+        //    consumes 0 post-auth global/workspace permits, so authenticated Workspace B STILL gets 200 OK immediately!
+        for (int ipIdx = 1; ipIdx <= 40; ipIdx++) {
+            HttpHeaders distributedInvalidHeaders = new HttpHeaders();
+            distributedInvalidHeaders.set("Authorization", "Bearer distributed-bad-" + ipIdx);
+            distributedInvalidHeaders.set("X-Forwarded-For", "198.18.0." + ipIdx);
+            HttpEntity<?> distributedInvalidEntity = new HttpEntity<>(distributedInvalidHeaders);
+            for (int reqIdx = 0; reqIdx < 5; reqIdx++) {
+                ResponseEntity<String> unauth = restTemplate.exchange(
+                        "/ws/" + workspaceB.workspace().getId() + "/scim/v2/Users",
+                        HttpMethod.GET,
+                        distributedInvalidEntity,
+                        String.class);
+                assertThat(unauth.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+            }
+        }
+
+        HttpHeaders postFloodHeadersB = new HttpHeaders();
+        postFloodHeadersB.set("Authorization", "Bearer " + workspaceB.rawToken());
+        postFloodHeadersB.set("X-Forwarded-For", "198.51.100.45");
+        ResponseEntity<String> postFloodRespB = restTemplate.exchange(
+                "/ws/" + workspaceB.workspace().getId() + "/scim/v2/Users",
+                HttpMethod.GET,
+                new HttpEntity<>(postFloodHeadersB),
+                String.class);
+        assertThat(postFloodRespB.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
     @Test

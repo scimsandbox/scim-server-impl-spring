@@ -21,6 +21,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -416,9 +417,143 @@ class RequestResponseLoggingFilterTest {
         assertFalse(redactedDot.contains("DotSecret8!"));
         assertTrue(redactedDot.contains("\"SafeDisplay\""));
 
-        // 6. Complete valid non-sensitive PATCH fast-paths cleanly without mutating
+        // 6. Trailing backslash at EOF and illegal escape sequence inside PATCH path still redact secrets
+        String trailingBackslash = "{\"Operations\":[{\"op\":\"replace\",\"value\":\"BackslashSecret9!\",\"path\":\"\\";
+        String redactedBackslash = RequestResponseLoggingFilter.redactPasswords(trailingBackslash);
+        assertFalse(redactedBackslash.contains("BackslashSecret9!"));
+        assertTrue(redactedBackslash.contains("\"[REDACTED]\""));
+
+        String illegalEscapePatch = "{\"Operations\":[{\"op\":\"replace\",\"value\":\"IllegalEscSecret10!\",\"path\":\"pass\\word\"}]}";
+        String redactedIllegalEsc = RequestResponseLoggingFilter.redactPasswords(illegalEscapePatch);
+        assertFalse(redactedIllegalEsc.contains("IllegalEscSecret10!"));
+        assertTrue(redactedIllegalEsc.contains("\"[REDACTED]\""));
+
+        // 7. Complete valid non-sensitive PATCH fast-paths cleanly without mutating
         String safeCompletePatch = "{\"Operations\":[{\"op\":\"replace\",\"path\":\"displayName\",\"value\":\"Alice\"}]}";
-        assertEquals(safeCompletePatch, RequestResponseLoggingFilter.redactPasswords(safeCompletePatch));
+        assertSame(safeCompletePatch, RequestResponseLoggingFilter.redactPasswords(safeCompletePatch));
+    }
+
+    @Test
+    void fallbackScanner_DeepArrayMismatchedCloseBraces_RunsInLinearTimeWithAndWithoutEnclosingObject() {
+        String warmNoObj = "\"password\"" + "[".repeat(1_500) + "}".repeat(1_500);
+        String warmWithObj = "{\"password\":\"s\",\"arr\":" + "[".repeat(1_500) + "}".repeat(1_500);
+        for (int w = 0; w < 5; w++) {
+            RequestResponseLoggingFilter.redactPasswords(warmNoObj);
+            RequestResponseLoggingFilter.redactPasswords(warmWithObj);
+        }
+
+        // 1. Without enclosing object: "\"password\"" + "[".repeat(N) + "}".repeat(N)
+        String noObj5k = "\"password\"" + "[".repeat(5_000) + "}".repeat(5_000);
+        String noObj10k = "\"password\"" + "[".repeat(10_000) + "}".repeat(10_000);
+        long noObj5kNanos = bestOfThreeNanos(() -> assertEquals(
+                noObj5k, RequestResponseLoggingFilter.redactPasswords(noObj5k)));
+        long noObj10kNanos = bestOfThreeNanos(() -> assertEquals(
+                noObj10k, RequestResponseLoggingFilter.redactPasswords(noObj10k)));
+        assertTrue(noObj10kNanos < 150_000_000L,
+                "Expected <150ms on 10k deep array+brace without object, took " + (noObj10kNanos / 1_000_000) + "ms");
+        assertTrue(noObj10kNanos <= Math.max(noObj5kNanos * 3L, 15_000_000L),
+                "Expected O(n) scaling (5k=" + noObj5kNanos + "ns, 10k=" + noObj10kNanos + "ns)");
+
+        // 2. With enclosing object: "{\"password\":\"s\",\"arr\":" + "[".repeat(N) + "}".repeat(N)
+        String withObj5k = "{\"password\":\"s\",\"arr\":" + "[".repeat(5_000) + "}".repeat(5_000);
+        String withObj10k = "{\"password\":\"s\",\"arr\":" + "[".repeat(10_000) + "}".repeat(10_000);
+        long withObj5kNanos = bestOfThreeNanos(() -> {
+            String res = RequestResponseLoggingFilter.redactPasswords(withObj5k);
+            assertTrue(res.startsWith("{\"password\":\"[REDACTED]\",\"arr\":"));
+            assertFalse(res.contains("\"s\""));
+        });
+        long withObj10kNanos = bestOfThreeNanos(() -> {
+            String res = RequestResponseLoggingFilter.redactPasswords(withObj10k);
+            assertTrue(res.startsWith("{\"password\":\"[REDACTED]\",\"arr\":"));
+            assertFalse(res.contains("\"s\""));
+        });
+        assertTrue(withObj10kNanos < 150_000_000L,
+                "Expected <150ms on 10k deep array+brace with enclosing object, took "
+                        + (withObj10kNanos / 1_000_000) + "ms");
+        assertTrue(withObj10kNanos <= Math.max(withObj5kNanos * 3L, 15_000_000L),
+                "Expected O(n) scaling (5k=" + withObj5kNanos + "ns, 10k=" + withObj10kNanos + "ns)");
+    }
+
+    private static long bestOfThreeNanos(Runnable task) {
+        long best = Long.MAX_VALUE;
+        for (int run = 0; run < 3; run++) {
+            long start = System.nanoTime();
+            task.run();
+            best = Math.min(best, System.nanoTime() - start);
+        }
+        return best;
+    }
+
+    @Test
+    void redactPasswords_FastPathsCompleteNonSensitiveScimPayloadsWithoutReallocating() {
+        List<String> safePayloads = List.of(
+                new String("{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:User\"],"
+                        + "\"userName\":\"alice\",\"title\":\"Developer\",\"department\":\"Operations\","
+                        + "\"emails\":[{\"value\":\"alice@example.com\",\"type\":\"work\",\"primary\":true}]}"),
+                new String("{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:Group\"],"
+                        + "\"displayName\":\"Ops Team\",\"members\":[{\"value\":\"u1\",\"display\":\"Alice\"}]}"),
+                new String("{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:ListResponse\"],"
+                        + "\"totalResults\":1,\"Resources\":[{\"id\":\"1\",\"title\":\"Developer\","
+                        + "\"groups\":[{\"value\":\"g1\"}]}]}"),
+                new String("{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],"
+                        + "\"Operations\":[{\"op\":\"replace\",\"path\":\"displayName\",\"value\":\"Alice Dev\"}]}"),
+                new String("{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:BulkRequest\"],"
+                        + "\"Operations\":[{\"method\":\"PATCH\",\"path\":\"/Users/1\","
+                        + "\"data\":{\"Operations\":[{\"op\":\"replace\",\"path\":\"title\",\"value\":\"Lead\"}]}}]}"),
+                new String("{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:Error\"],"
+                        + "\"scimType\":\"invalidValue\",\"detail\":\"Invalid attribute value\",\"status\":\"400\"}")
+        );
+
+        for (String payload : safePayloads) {
+            assertSame(payload, RequestResponseLoggingFilter.redactPasswords(payload));
+        }
+
+        // Valid JSON object and array that DO trigger directSensitive ("Password", "\\u") in non-sensitive fields
+        // parse via readTree, confirm redactJsonNode == false, and return the original String untouched
+        String errorMentioningPassword = new String(
+                "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:Error\"],"
+                        + "\"detail\":\"Password must not exceed 72 UTF-8 bytes\",\"status\":\"400\"}");
+        String unicodeArrayNoSecret = new String("[{\"displayName\":\"M\\u00fcller\"}]");
+        assertSame(errorMentioningPassword, RequestResponseLoggingFilter.redactPasswords(errorMentioningPassword));
+        assertSame(unicodeArrayNoSecret, RequestResponseLoggingFilter.redactPasswords(unicodeArrayNoSecret));
+
+        assertEquals("", RequestResponseLoggingFilter.redactPasswords(""));
+        assertEquals(null, RequestResponseLoggingFilter.redactPasswords(null));
+    }
+
+    @Test
+    void isStructurallyCompleteJson_ValidatesBalancedContainersStringsEscapesAndDepthLimits() {
+        // Valid balanced objects, arrays, escapes, and depth-64 boundary
+        assertTrue(RequestResponseLoggingFilter.isStructurallyCompleteJson("{}"));
+        assertTrue(RequestResponseLoggingFilter.isStructurallyCompleteJson("  [ 1, true, null, {\"k\":\"v\"} ] \n\t "));
+        assertTrue(RequestResponseLoggingFilter.isStructurallyCompleteJson(
+                "{\"escaped\":\"quote:\\\" slash:\\\\ solidus:\\/ ctrl:\\b\\f\\n\\r\\t hex:\\u0041\\u007a braces:{}[]\"}"));
+        assertTrue(RequestResponseLoggingFilter.isStructurallyCompleteJson("[".repeat(64) + "]".repeat(64)));
+
+        // Null, blank, scalar, non-container roots
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson(null));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson(""));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("   \t\n  "));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("123"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("\"string-scalar\""));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("}orphan"));
+
+        // Truncated/unclosed strings and invalid escapes
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":\"unclosed}"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":\"trailing-backslash\\"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":\"escaped-quote-at-eof\\\""));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":\"illegal-escape\\w\"}"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":\"short-unicode\\u12\"}"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":\"bad-unicode\\uZZZZ\"}"));
+
+        // Mismatched brackets, unclosed containers, trailing tokens, and depth > 64
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{]"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("[}"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":[1,2}}"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":[1,2]"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":1} trailing"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("{\"a\":1}{}"));
+        assertFalse(RequestResponseLoggingFilter.isStructurallyCompleteJson("[".repeat(65) + "]".repeat(65)));
     }
 
     @Test

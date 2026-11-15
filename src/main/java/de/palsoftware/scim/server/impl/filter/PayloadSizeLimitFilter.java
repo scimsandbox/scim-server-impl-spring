@@ -56,21 +56,26 @@ public class PayloadSizeLimitFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        String payloadLimitDetail = resolvePayloadLimitDetail(request);
-
         if (request.getContentLengthLong() > MAX_PAYLOAD_BYTES) {
             ScimFilterErrorWriter.writeScimError(
                     response,
                     objectMapper,
                     HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
                     null,
-                    payloadLimitDetail);
+                    resolvePayloadLimitDetail(request));
             return;
         }
 
+        filterWithBoundedStream(request, response, filterChain, objectMapper);
+    }
+
+    static void filterWithBoundedStream(HttpServletRequest request,
+                                        HttpServletResponse response,
+                                        FilterChain filterChain,
+                                        ObjectMapper objectMapper) throws ServletException, IOException {
         HttpServletRequest boundedRequest = BoundedPayloadRequestWrapper.isBounded(request)
                 ? request
-                : new BoundedPayloadRequestWrapper(request, MAX_PAYLOAD_BYTES, payloadLimitDetail);
+                : new BoundedPayloadRequestWrapper(request, MAX_PAYLOAD_BYTES, resolvePayloadLimitDetail(request));
         try {
             filterChain.doFilter(boundedRequest, response);
         } catch (ServletException | IOException | RuntimeException ex) {

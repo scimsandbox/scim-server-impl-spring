@@ -37,18 +37,18 @@
     {
       "name": "app.rate-limit.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enables three-tier SCIM API rate limiting (pre-auth per-IP, pre-auth global cap, post-auth per-workspace)."
+      "description": "Enables three-tier SCIM API rate limiting (Tier 1 pre-auth per-IP, Tier 2 post-auth per-workspace, and Tier 3 post-auth pod-wide global cap)."
     },
     {
       "name": "app.rate-limit.requests-per-second",
       "type": "java.lang.Double",
-      "description": "Server-wide global sustained token refill rate per second across all clients and workspaces."
+      "description": "Post-authentication pod-wide global sustained token refill rate per second across all verified workspaces (also used to derive default per-IP and per-workspace sub-limits)."
     },
     {
       "name": "app.rate-limit.burst",
       "type": "java.lang.Integer",
       "defaultValue": 0,
-      "description": "Optional server-wide global burst token capacity (defaults to ceil(requests-per-second), capped at 1000, when <= 0)."
+      "description": "Optional post-authentication pod-wide global burst token capacity across all verified workspaces (defaults to ceil(requests-per-second), capped at 1000, when <= 0)."
     },
     {
       "name": "app.rate-limit.per-ip-requests-per-second",
