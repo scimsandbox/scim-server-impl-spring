@@ -644,12 +644,12 @@ class ThrottlingFilterTest {
     }
 
     @Test
-    void prodConfig1000RpsAndBundled200Rps_SingleIpJunkFloodLeavesColdTenantsEntraId40MinAndScimValidatorOk() throws Exception {
+    void prodConfig1000RpsAndBundled200Rps_MultiIpFloodsLeaveColdTenantsEntraId40MinAndScimValidatorOk() throws Exception {
         AtomicLong fakeNanos = new AtomicLong(Duration.ofSeconds(1).toNanos());
 
-        // Exact production config: requests-per-second=1000, all sub-limits 0 (default):
+        // Exact K8s production config: requests-per-second=1000, all sub-limits 0 (default):
         // - ThrottlingFilter per-IP = 250 RPS / 250 burst
-        // - UnauthenticatedLookupLimiter pod-wide = 250 RPS / 250 burst; per-IP failed lookup = 62.5 RPS / 63 burst
+        // - UnauthenticatedLookupLimiter pod-wide = 1000 RPS / 1000 burst; per-IP failed lookup = 15.625 RPS / 16 burst (1/64)
         // - verifiedTokenHashes TTL = 24 hours, maxSize = 50,000
         // - Post-auth global = 1000 RPS / 1000 burst; per-workspace = 250 RPS / 250 burst
         MockEnvironment prodEnv = new MockEnvironment()
@@ -668,9 +668,9 @@ class ThrottlingFilterTest {
                 objectMapper);
 
         record TenantFixture(UUID workspaceId, String rawToken, String clientIp) {}
-        List<TenantFixture> tenants = new ArrayList<>(90);
+        List<TenantFixture> tenants = new ArrayList<>(92);
         Map<String, WorkspaceToken> tokenByHash = new HashMap<>(128);
-        for (int i = 0; i < 90; i++) {
+        for (int i = 0; i < 92; i++) {
             UUID wsId = UUID.randomUUID();
             Workspace ws = new Workspace();
             ws.setId(wsId);
@@ -703,45 +703,54 @@ class ThrottlingFilterTest {
 
         UUID targetWsId = tenants.getFirst().workspaceId();
 
-        // 1. At t = 0: Single attacker IP (203.0.113.66) sends 300 junk-token requests:
-        //    - First 63 return 401 (consuming ONLY 63 of 250 pod lookup permits; 187/250 [75%] remain free!)
-        //    - Next 187 pass ThrottlingFilter (250 cap) and hit perIpLookupBucket (63 cap) -> 429 with 0 DB queries
-        //    - Remaining 50 hit ThrottlingFilter (250 cap) -> 429 with 0 DB queries
-        int count401 = 0;
-        int countPerIpLookup429 = 0;
-        int countPreAuthThrottling429 = 0;
-        for (int reqNum = 1; reqNum <= 300; reqNum++) {
-            if (reqNum == 64) {
-                Mockito.clearInvocations(tokenRepository);
-            }
-            MockHttpServletRequest junkReq = new MockHttpServletRequest(
-                    "GET", "/ws/" + targetWsId + "/scim/v2/Users");
-            junkReq.setRemoteAddr("203.0.113.66");
-            junkReq.addHeader("Authorization", "Bearer single-ip-junk-" + reqNum);
-            MockHttpServletResponse junkResp = new MockHttpServletResponse();
-            fullChain.doFilter(junkReq, junkResp);
+        // 1. Reviewer's Round 6 scenario at t = 0: 4 attacker IPs x 100 bad-token requests (400 total):
+        //    - Each IP gets ONLY 16 lookups (4 x 16 = 64 401s; 936/1,000 [93.6%] pod permits remain free!)
+        //    - Remaining 84 per IP (336 total) get 429 with 0 DB queries!
+        int fourIp401 = 0;
+        int fourIp429 = 0;
+        for (int ipIdx = 1; ipIdx <= 4; ipIdx++) {
+            String attackerIp = "203.0.113." + ipIdx;
+            for (int reqNum = 1; reqNum <= 100; reqNum++) {
+                MockHttpServletRequest junkReq = new MockHttpServletRequest(
+                        "GET", "/ws/" + targetWsId + "/scim/v2/Users");
+                junkReq.setRemoteAddr(attackerIp);
+                junkReq.addHeader("Authorization", "Bearer four-ip-junk-" + ipIdx + "-" + reqNum);
+                MockHttpServletResponse junkResp = new MockHttpServletResponse();
+                fullChain.doFilter(junkReq, junkResp);
 
-            if (reqNum <= 63) {
-                assertThat(junkResp.getStatus()).isEqualTo(401);
-                count401++;
-            } else if (reqNum <= 250) {
-                assertThat(junkResp.getStatus()).isEqualTo(429);
-                assertThat(junkReq.getAttribute(ScimRequestMetricAttributes.THROTTLED))
-                        .isEqualTo(ScimRequestMetricAttributes.THROTTLED_YES);
-                countPerIpLookup429++;
-            } else {
-                assertThat(junkResp.getStatus()).isEqualTo(429);
-                countPreAuthThrottling429++;
+                if (reqNum <= 16) {
+                    assertThat(junkResp.getStatus()).isEqualTo(401);
+                    fourIp401++;
+                } else {
+                    assertThat(junkResp.getStatus()).isEqualTo(429);
+                    assertThat(junkReq.getAttribute(ScimRequestMetricAttributes.THROTTLED))
+                            .isEqualTo(ScimRequestMetricAttributes.THROTTLED_YES);
+                    fourIp429++;
+                }
             }
         }
-        assertThat(count401).isEqualTo(63);
-        assertThat(countPerIpLookup429).isEqualTo(187);
-        assertThat(countPreAuthThrottling429).isEqualTo(50);
+        assertThat(fourIp401).isEqualTo(64);
+        assertThat(fourIp429).isEqualTo(336);
+        verify(tokenRepository, times(64)).findByTokenHashAndNotRevoked(anyString());
+
+        // Single-IP 300-request check on 203.0.113.1 (requests 101..250 hit perIpLookupBucket 429;
+        // requests 251..300 hit ThrottlingFilter 250 per-IP cap 429; 0 DB queries across all 200):
+        Mockito.clearInvocations(tokenRepository);
+        for (int reqNum = 101; reqNum <= 300; reqNum++) {
+            MockHttpServletRequest extraJunk = new MockHttpServletRequest(
+                    "GET", "/ws/" + targetWsId + "/scim/v2/Users");
+            extraJunk.setRemoteAddr("203.0.113.1");
+            extraJunk.addHeader("Authorization", "Bearer extra-junk-" + reqNum);
+            MockHttpServletResponse extraResp = new MockHttpServletResponse();
+            fullChain.doFilter(extraJunk, extraResp);
+            assertThat(extraResp.getStatus()).isEqualTo(429);
+        }
         verifyNoInteractions(tokenRepository);
 
-        // 2. Immediately at t = 0 during the attack: ALL 90 cold uncached legitimate tenants (pod restart/scale-out)
-        //    send SCIM requests -> ALL 90 / 90 return 200 OK and refund their lookup permits!
-        for (TenantFixture tenant : tenants) {
+        // Immediately at t = 0 during the 4-IP flood: a cold 5th IP + 90 cold uncached tenant IPs (91 cold tenants,
+        // simulating a newly rolled-out pod during a 2-pod K8s deploy) ALL return 200 OK and refund their permits!
+        for (int i = 0; i < 91; i++) {
+            TenantFixture tenant = tenants.get(i);
             MockHttpServletRequest tenantReq = new MockHttpServletRequest(
                     "GET", "/ws/" + tenant.workspaceId() + "/scim/v2/Users");
             tenantReq.setRemoteAddr(tenant.clientIp());
@@ -750,17 +759,49 @@ class ThrottlingFilterTest {
             fullChain.doFilter(tenantReq, tenantResp);
             assertThat(tenantResp.getStatus()).isEqualTo(200);
         }
-        verify(tokenRepository, times(90)).findByTokenHashAndNotRevoked(anyString());
+        verify(tokenRepository, times(91)).findByTokenHashAndNotRevoked(anyString());
+
+        // 2. Scale flood to 32 attacker IPs x 100 bad-token requests (28 more IPs = 3,200 total bad-token requests!):
+        //    28 x 16 = 448 more 401s (total 512 / 1,000 pod permits used, leaving 488 free!) ->
+        //    cold tenant #92 STILL authenticates with 200 OK!
+        int moreIp401 = 0;
+        int moreIp429 = 0;
+        for (int ipIdx = 5; ipIdx <= 32; ipIdx++) {
+            String attackerIp = "203.0.113." + ipIdx;
+            for (int reqNum = 1; reqNum <= 100; reqNum++) {
+                MockHttpServletRequest junkReq = new MockHttpServletRequest(
+                        "GET", "/ws/" + targetWsId + "/scim/v2/Users");
+                junkReq.setRemoteAddr(attackerIp);
+                junkReq.addHeader("Authorization", "Bearer flood32-" + ipIdx + "-" + reqNum);
+                MockHttpServletResponse junkResp = new MockHttpServletResponse();
+                fullChain.doFilter(junkReq, junkResp);
+                if (junkResp.getStatus() == 401) {
+                    moreIp401++;
+                } else if (junkResp.getStatus() == 429) {
+                    moreIp429++;
+                }
+            }
+        }
+        assertThat(moreIp401).isEqualTo(448);
+        assertThat(moreIp429).isEqualTo(2352);
+
+        TenantFixture tenant92 = tenants.get(91);
+        MockHttpServletRequest tenant92Req = new MockHttpServletRequest(
+                "GET", "/ws/" + tenant92.workspaceId() + "/scim/v2/Users");
+        tenant92Req.setRemoteAddr(tenant92.clientIp());
+        tenant92Req.addHeader("Authorization", "Bearer " + tenant92.rawToken());
+        MockHttpServletResponse tenant92Resp = new MockHttpServletResponse();
+        fullChain.doFilter(tenant92Req, tenant92Resp);
+        assertThat(tenant92Resp.getStatus()).isEqualTo(200);
 
         // 3. Advance fakeNanos by 40 minutes (Entra ID's ~40-minute sync cycle!),
-        //    drain podLookupBucket completely to 0 across 6 botnet IPs (6 x 50 = 300 junk requests, each <= 63 per-IP cap:
-        //    first 250 across 5 IPs drain 250 pod permits -> 401; remaining 50 on 6th IP -> 429),
-        //    then have ALL 90 Entra ID tenants sync again -> ALL 90 / 90 STILL return 200 OK!
+        //    drain all 1,000 podLookupBucket permits to 0 across 64 botnet IPs (64 x 16 = 1,024 junk requests:
+        //    first 1,000 -> 401; remaining 24 -> 429), then have ALL 92 Entra ID tenants sync again -> ALL 92 / 92 200 OK!
         fakeNanos.addAndGet(Duration.ofMinutes(40).toNanos());
         int botnet401 = 0;
         int botnet429 = 0;
-        for (int ipIdx = 1; ipIdx <= 6; ipIdx++) {
-            for (int j = 1; j <= 50; j++) {
+        for (int ipIdx = 1; ipIdx <= 64; ipIdx++) {
+            for (int j = 1; j <= 16; j++) {
                 MockHttpServletRequest botReq = new MockHttpServletRequest(
                         "GET", "/ws/" + targetWsId + "/scim/v2/Users");
                 botReq.setRemoteAddr("198.18.1." + ipIdx);
@@ -774,8 +815,8 @@ class ThrottlingFilterTest {
                 }
             }
         }
-        assertThat(botnet401).isEqualTo(250);
-        assertThat(botnet429).isEqualTo(50);
+        assertThat(botnet401).isEqualTo(1000);
+        assertThat(botnet429).isEqualTo(24);
 
         Mockito.clearInvocations(tokenRepository);
         for (TenantFixture tenant : tenants) {
@@ -787,23 +828,31 @@ class ThrottlingFilterTest {
             fullChain.doFilter(syncReq, syncResp);
             assertThat(syncResp.getStatus()).isEqualTo(200);
         }
-        verify(tokenRepository, times(90)).findByTokenHashAndNotRevoked(anyString());
+        verify(tokenRepository, times(92)).findByTokenHashAndNotRevoked(anyString());
 
         // 4. Advance fakeNanos by 24 hours + 1 minute (> VERIFIED_TOKEN_IDLE_EXPIRATION),
-        //    drain podLookupBucket to 0 across 5 botnet IPs (5 x 50 = 250), then verify an idle tenant's 24h entry expired
-        //    so its cold lookup now hits the exhausted podLookupBucket (429 with 0 DB queries)!
+        //    drain all 1,000 podLookupBucket permits across 63 botnet IPs (63 x 16 = 1,008: 1,000 401s + 8 429s),
+        //    then verify an idle tenant's 24h entry expired so its cold lookup hits 429 with 0 DB queries!
         fakeNanos.addAndGet(Duration.ofHours(24).plusMinutes(1).toNanos());
-        for (int ipIdx = 1; ipIdx <= 5; ipIdx++) {
-            for (int j = 1; j <= 50; j++) {
+        int drain24h401 = 0;
+        int drain24h429 = 0;
+        for (int ipIdx = 1; ipIdx <= 63; ipIdx++) {
+            for (int j = 1; j <= 16; j++) {
                 MockHttpServletRequest drainReq = new MockHttpServletRequest(
                         "GET", "/ws/" + targetWsId + "/scim/v2/Users");
                 drainReq.setRemoteAddr("198.18.2." + ipIdx);
                 drainReq.addHeader("Authorization", "Bearer botnet-24h-" + ipIdx + "-" + j);
                 MockHttpServletResponse drainResp = new MockHttpServletResponse();
                 fullChain.doFilter(drainReq, drainResp);
-                assertThat(drainResp.getStatus()).isEqualTo(401);
+                if (drainResp.getStatus() == 401) {
+                    drain24h401++;
+                } else if (drainResp.getStatus() == 429) {
+                    drain24h429++;
+                }
             }
         }
+        assertThat(drain24h401).isEqualTo(1000);
+        assertThat(drain24h429).isEqualTo(8);
 
         Mockito.clearInvocations(tokenRepository);
         TenantFixture expiredHintTenant = tenants.getFirst();
@@ -820,10 +869,12 @@ class ThrottlingFilterTest {
         assertThat(coldAfter24hResp.getStatus()).isEqualTo(429);
         verifyNoInteractions(tokenRepository);
 
-        // 5. Bundled 200 RPS scim-validator (Rfc7644AuthSpec.groovy) regression check in 0 ns elapsed:
-        //    podLimit = 50 RPS / 50 burst, perIpLimit = 12.5 RPS / 13 burst:
-        //    10 rapid invalid-token + anonymous ServiceProviderConfig probes from 127.0.0.1 in 0 ns ALL get 401/200
-        //    (never 429!), probes 11..13 also get 401, 14th probe gets 429, and cold valid tenants from other IPs get 200!
+        // 5. Bundled 200 RPS scim-validator (Rfc7644AuthSpec.groovy) + 4-IP flood check in 0 ns elapsed:
+        //    podLimit = 200 RPS / 200 burst, perIpLimit = 3.125 RPS (1/64) / 12 burst:
+        //    - 10 rapid invalid-token + anonymous ServiceProviderConfig probes from 127.0.0.1 in 0 ns ALL get 401/200!
+        //    - Probes 11..12 get 401; probe 13 gets 429!
+        //    - 3 more attacker IPs x 50 bad tokens only use 3 x 12 = 36 permits (48 / 200 total across 4 IPs, 152 free!)
+        //    - Cold valid tenant from a 5th IP gets 200 OK!
         AtomicLong validatorClock = new AtomicLong(Duration.ofSeconds(1).toNanos());
         MockEnvironment bundledEnv = new MockEnvironment()
                 .withProperty("app.rate-limit.enabled", "true")
@@ -839,7 +890,6 @@ class ThrottlingFilterTest {
         FilterChain bundledChain = (req, res) -> bundledPreAuth.doFilter(
                 req, res, (r2, s2) -> bundledBearer.doFilter(r2, s2, filterChain));
 
-        // 8 invalid-token probes (covering Rfc7644AuthSpec's 7 invalid Bearer tokens) + 2 anonymous SPC probes = 10 probes
         for (int probe = 1; probe <= 8; probe++) {
             MockHttpServletRequest badTokenReq = new MockHttpServletRequest(
                     "GET", "/ws/" + targetWsId + "/scim/v2/Users");
@@ -857,8 +907,7 @@ class ThrottlingFilterTest {
             bundledChain.doFilter(anonSpcReq, anonSpcResp);
             assertThat(anonSpcResp.getStatus()).isEqualTo(200);
         }
-        // Probes 11..13 from 127.0.0.1 still get 401 (up to burst 13); 14th gets 429!
-        for (int probe = 11; probe <= 13; probe++) {
+        for (int probe = 11; probe <= 12; probe++) {
             MockHttpServletRequest badTokenReq = new MockHttpServletRequest(
                     "GET", "/ws/" + targetWsId + "/scim/v2/Users");
             badTokenReq.setRemoteAddr("127.0.0.1");
@@ -867,15 +916,35 @@ class ThrottlingFilterTest {
             bundledChain.doFilter(badTokenReq, badTokenResp);
             assertThat(badTokenResp.getStatus()).isEqualTo(401);
         }
-        MockHttpServletRequest probe14Req = new MockHttpServletRequest(
+        MockHttpServletRequest probe13Req = new MockHttpServletRequest(
                 "GET", "/ws/" + targetWsId + "/scim/v2/Users");
-        probe14Req.setRemoteAddr("127.0.0.1");
-        probe14Req.addHeader("Authorization", "Bearer validator-invalid-14");
-        MockHttpServletResponse probe14Resp = new MockHttpServletResponse();
-        bundledChain.doFilter(probe14Req, probe14Resp);
-        assertThat(probe14Resp.getStatus()).isEqualTo(429);
+        probe13Req.setRemoteAddr("127.0.0.1");
+        probe13Req.addHeader("Authorization", "Bearer validator-invalid-13");
+        MockHttpServletResponse probe13Resp = new MockHttpServletResponse();
+        bundledChain.doFilter(probe13Req, probe13Resp);
+        assertThat(probe13Resp.getStatus()).isEqualTo(429);
 
-        // Cold valid tenant from another IP still has 37/50 pod lookup permits free -> 200 OK!
+        int bundledFlood401 = 0;
+        int bundledFlood429 = 0;
+        for (int ipIdx = 2; ipIdx <= 4; ipIdx++) {
+            for (int j = 1; j <= 50; j++) {
+                MockHttpServletRequest bFloodReq = new MockHttpServletRequest(
+                        "GET", "/ws/" + targetWsId + "/scim/v2/Users");
+                bFloodReq.setRemoteAddr("203.0.114." + ipIdx);
+                bFloodReq.addHeader("Authorization", "Bearer bundled-flood-" + ipIdx + "-" + j);
+                MockHttpServletResponse bFloodResp = new MockHttpServletResponse();
+                bundledChain.doFilter(bFloodReq, bFloodResp);
+                if (bFloodResp.getStatus() == 401) {
+                    bundledFlood401++;
+                } else if (bFloodResp.getStatus() == 429) {
+                    bundledFlood429++;
+                }
+            }
+        }
+        assertThat(bundledFlood401).isEqualTo(36);
+        assertThat(bundledFlood429).isEqualTo(114);
+
+        // Cold valid tenant from a 5th IP still has 152/200 pod lookup permits free -> 200 OK!
         TenantFixture coldBundledTenant = tenants.get(1);
         MockHttpServletRequest coldBundledReq = new MockHttpServletRequest(
                 "GET", "/ws/" + coldBundledTenant.workspaceId() + "/scim/v2/Users");
@@ -894,15 +963,11 @@ class ThrottlingFilterTest {
         assertThat(ThrottlingFilter.resolveBurst(5000.0, 0)).isEqualTo(ThrottlingFilter.MAX_DEFAULT_BURST);
         assertThat(ThrottlingFilter.resolveBurst(200.0, 25)).isEqualTo(25);
 
-        // Sub-rate-limit defaults: parentRPS / 4.0 and ceil(resolvedParentBurst / 4.0)
+        // Sub-rate-limit defaults (Tier 1 per-IP & Tier 2 per-workspace): parentRPS / 4.0 and ceil(resolvedParentBurst / 4.0)
         assertThat(ThrottlingFilter.resolveSubRateLimit(100.0, 0, 0.0, 0))
                 .isEqualTo(new ThrottlingFilter.SubRateLimit(25.0, 25));
         assertThat(ThrottlingFilter.resolveSubRateLimit(1000.0, 0, 0.0, 0))
                 .isEqualTo(new ThrottlingFilter.SubRateLimit(250.0, 250));
-        assertThat(ThrottlingFilter.resolveSubRateLimit(250.0, 250, 0.0, 0))
-                .isEqualTo(new ThrottlingFilter.SubRateLimit(62.5, 63));
-        assertThat(ThrottlingFilter.resolveSubRateLimit(50.0, 50, 0.0, 0))
-                .isEqualTo(new ThrottlingFilter.SubRateLimit(12.5, 13));
         assertThat(ThrottlingFilter.resolveSubRateLimit(10000.0, 0, 0.0, 0))
                 .isEqualTo(new ThrottlingFilter.SubRateLimit(2500.0, 250));
         assertThat(ThrottlingFilter.resolveSubRateLimit(0.2, 10, 0.0, 0))
@@ -914,6 +979,43 @@ class ThrottlingFilterTest {
         assertThat(ThrottlingFilter.resolveSubRateLimit(200.0, 200, 0.0, 42))
                 .isEqualTo(new ThrottlingFilter.SubRateLimit(50.0, 42));
 
+        // Pod-wide unauthenticated lookup limit defaults (1x global) and explicit overrides
+        assertThat(ThrottlingFilter.resolvePodLookupLimit(1000.0, 0, 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(1000.0, 1000));
+        assertThat(ThrottlingFilter.resolvePodLookupLimit(200.0, 0, 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(200.0, 200));
+        assertThat(ThrottlingFilter.resolvePodLookupLimit(4000.0, 4000, 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(4000.0, 4000));
+        assertThat(ThrottlingFilter.resolvePodLookupLimit(200.0, 200, 15.2, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(15.2, 16));
+        assertThat(ThrottlingFilter.resolvePodLookupLimit(200.0, 200, 0.0, 42))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(200.0, 42));
+        assertThat(ThrottlingFilter.resolvePodLookupLimit(200.0, 200, 0.5, 2))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(0.5, 2));
+
+        // Per-IP unauthenticated lookup limit defaults (1/64 RPS, min(ceil(podBurst/16), max(12, ceil(podBurst/64))))
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(1000.0, 1000), 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(15.625, 16));
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(200.0, 200), 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(3.125, 12));
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(4000.0, 4000), 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(62.5, 63));
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(0.5, 2), 0.0, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(0.0078125, 1));
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(200.0, 200), 4.2, 0))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(4.2, 5));
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(200.0, 200), 0.0, 7))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(3.125, 7));
+        assertThat(ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(200.0, 200), 0.25, 2))
+                .isEqualTo(new ThrottlingFilter.SubRateLimit(0.25, 2));
+
         assertThatThrownBy(() -> ThrottlingFilter.createPreAuthLimiter(0.0, 10, 0.0, 0))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ThrottlingFilter.createPreAuthLimiter(-1.0, 10, 0.0, 0))
@@ -921,6 +1023,18 @@ class ThrottlingFilterTest {
         assertThatThrownBy(() -> ThrottlingFilter.createPreAuthLimiter(Double.NaN, 10, 0.0, 0))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ThrottlingFilter.createPreAuthLimiter(10.0, 10, Double.POSITIVE_INFINITY, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ThrottlingFilter.resolvePodLookupLimit(0.0, 10, 0.0, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ThrottlingFilter.resolvePodLookupLimit(100.0, 10, Double.NaN, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ThrottlingFilter.resolvePerIpLookupLimit(null, 0.0, 0))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(0.0, 10), 0.0, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ThrottlingFilter.resolvePerIpLookupLimit(
+                new ThrottlingFilter.SubRateLimit(100.0, 100), Double.NEGATIVE_INFINITY, 0))
                 .isInstanceOf(IllegalArgumentException.class);
 
         // Verify UnauthenticatedLookupLimiter.NOOP and public factories + null/attribute/timeout branches

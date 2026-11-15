@@ -45,6 +45,9 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     static final Duration MAX_WAIT_TIMEOUT = Duration.ofSeconds(5);
     static final int MAX_DEFAULT_BURST = 1_000;
     static final double DEFAULT_SUB_DIVISOR = 4.0;
+    static final double DEFAULT_PER_IP_LOOKUP_DIVISOR = 64.0;
+    static final double MAX_DEFAULT_PER_IP_LOOKUP_BURST_DIVISOR = 16.0;
+    static final int DEFAULT_MIN_PER_IP_LOOKUP_BURST = 12;
     static final long MAX_CACHED_KEYS = 10_000L;
     static final Duration BUCKET_IDLE_EXPIRATION = Duration.ofMinutes(15);
     static final long MAX_VERIFIED_TOKENS = 50_000L;
@@ -56,6 +59,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
 
     private static final String NANO_CLOCK_NULL_MSG = "nanoClock must not be null";
     private static final String SLEEPER_NULL_MSG = "sleeper must not be null";
+    private static final String POD_LIMIT_NULL_MSG = "podLimit must not be null";
+    private static final String REQUESTS_PER_SECOND_PARAM = "requestsPerSecond";
 
     private final KeyedPermitLimiter permitLimiter;
     private final List<IpAddressMatcher> trustedProxies;
@@ -241,12 +246,8 @@ public class ThrottlingFilter extends OncePerRequestFilter {
                 "app.rate-limit.trusted-cloudflare-proxies", String.class).orElse("");
         Duration waitTimeout = binder.bind("app.rate-limit.wait-timeout", Duration.class).orElse(DEFAULT_WAIT_TIMEOUT);
 
-        SubRateLimit podLimit = resolveSubRateLimit(globalRps, globalBurst, unauthRps, unauthBurst);
-        SubRateLimit perIpLimit = resolveSubRateLimit(
-                podLimit.requestsPerSecond(),
-                podLimit.burst(),
-                perIpUnauthRps,
-                perIpUnauthBurst);
+        SubRateLimit podLimit = resolvePodLookupLimit(globalRps, globalBurst, unauthRps, unauthBurst);
+        SubRateLimit perIpLimit = resolvePerIpLookupLimit(podLimit, perIpUnauthRps, perIpUnauthBurst);
         return createUnauthenticatedLookupLimiter(
                 podLimit,
                 perIpLimit,
@@ -265,14 +266,13 @@ public class ThrottlingFilter extends OncePerRequestFilter {
             double perIpUnauthenticatedRequestsPerSecond,
             int perIpUnauthenticatedBurst,
             Duration waitTimeout) {
-        SubRateLimit podLimit = resolveSubRateLimit(
+        SubRateLimit podLimit = resolvePodLookupLimit(
                 globalRequestsPerSecond,
                 globalBurst,
                 unauthenticatedRequestsPerSecond,
                 unauthenticatedBurst);
-        SubRateLimit perIpLimit = resolveSubRateLimit(
-                podLimit.requestsPerSecond(),
-                podLimit.burst(),
+        SubRateLimit perIpLimit = resolvePerIpLookupLimit(
+                podLimit,
                 perIpUnauthenticatedRequestsPerSecond,
                 perIpUnauthenticatedBurst);
         return createUnauthenticatedLookupLimiter(
@@ -308,7 +308,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
             Duration waitTimeout,
             LongSupplier nanoClock,
             NanoSleeper sleeper) {
-        Objects.requireNonNull(podLimit, "podLimit must not be null");
+        Objects.requireNonNull(podLimit, POD_LIMIT_NULL_MSG);
         Objects.requireNonNull(perIpLimit, "perIpLimit must not be null");
         Objects.requireNonNull(nanoClock, NANO_CLOCK_NULL_MSG);
         Objects.requireNonNull(sleeper, SLEEPER_NULL_MSG);
@@ -359,7 +359,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
                                                  int configuredBurst,
                                                  LongSupplier nanoClock,
                                                  NanoSleeper sleeper) {
-        validatePositiveFiniteRate(requestsPerSecond, "requestsPerSecond");
+        validatePositiveFiniteRate(requestsPerSecond, REQUESTS_PER_SECOND_PARAM);
         Objects.requireNonNull(nanoClock, NANO_CLOCK_NULL_MSG);
         Objects.requireNonNull(sleeper, SLEEPER_NULL_MSG);
 
@@ -391,14 +391,18 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         }
     }
 
+    static void validateFiniteRate(double rate, String name) {
+        if (!Double.isFinite(rate)) {
+            throw new IllegalArgumentException(name + " must be a finite number");
+        }
+    }
+
     static SubRateLimit resolveSubRateLimit(double parentRequestsPerSecond,
                                             int parentBurst,
                                             double subRequestsPerSecond,
                                             int subBurst) {
-        validatePositiveFiniteRate(parentRequestsPerSecond, "requestsPerSecond");
-        if (!Double.isFinite(subRequestsPerSecond)) {
-            throw new IllegalArgumentException("subRequestsPerSecond must be a finite number");
-        }
+        validatePositiveFiniteRate(parentRequestsPerSecond, REQUESTS_PER_SECOND_PARAM);
+        validateFiniteRate(subRequestsPerSecond, "subRequestsPerSecond");
 
         int resolvedParentBurst = resolveBurst(parentRequestsPerSecond, parentBurst);
         boolean hasExplicitSubRps = subRequestsPerSecond > 0.0;
@@ -413,6 +417,54 @@ public class ThrottlingFilter extends OncePerRequestFilter {
             effectiveBurst = resolveBurst(effectiveRps, 0);
         } else {
             effectiveBurst = Math.max(1, (int) Math.ceil(resolvedParentBurst / DEFAULT_SUB_DIVISOR));
+        }
+        return new SubRateLimit(effectiveRps, effectiveBurst);
+    }
+
+    static SubRateLimit resolvePodLookupLimit(double globalRequestsPerSecond,
+                                              int globalBurst,
+                                              double unauthenticatedRequestsPerSecond,
+                                              int unauthenticatedBurst) {
+        validatePositiveFiniteRate(globalRequestsPerSecond, REQUESTS_PER_SECOND_PARAM);
+        validateFiniteRate(unauthenticatedRequestsPerSecond, "unauthenticatedRequestsPerSecond");
+
+        int resolvedGlobalBurst = resolveBurst(globalRequestsPerSecond, globalBurst);
+        boolean hasExplicitRps = unauthenticatedRequestsPerSecond > 0.0;
+        double effectiveRps = hasExplicitRps ? unauthenticatedRequestsPerSecond : globalRequestsPerSecond;
+
+        int effectiveBurst;
+        if (unauthenticatedBurst > 0) {
+            effectiveBurst = unauthenticatedBurst;
+        } else if (hasExplicitRps) {
+            effectiveBurst = resolveBurst(effectiveRps, 0);
+        } else {
+            effectiveBurst = resolvedGlobalBurst;
+        }
+        return new SubRateLimit(effectiveRps, effectiveBurst);
+    }
+
+    static SubRateLimit resolvePerIpLookupLimit(SubRateLimit podLookupLimit,
+                                                double perIpUnauthenticatedRequestsPerSecond,
+                                                int perIpUnauthenticatedBurst) {
+        Objects.requireNonNull(podLookupLimit, POD_LIMIT_NULL_MSG);
+        validatePositiveFiniteRate(podLookupLimit.requestsPerSecond(), REQUESTS_PER_SECOND_PARAM);
+        validateFiniteRate(perIpUnauthenticatedRequestsPerSecond, "perIpUnauthenticatedRequestsPerSecond");
+
+        int podBurst = Math.max(1, podLookupLimit.burst());
+        boolean hasExplicitRps = perIpUnauthenticatedRequestsPerSecond > 0.0;
+        double effectiveRps = hasExplicitRps
+                ? perIpUnauthenticatedRequestsPerSecond
+                : (podLookupLimit.requestsPerSecond() / DEFAULT_PER_IP_LOOKUP_DIVISOR);
+
+        int effectiveBurst;
+        if (perIpUnauthenticatedBurst > 0) {
+            effectiveBurst = perIpUnauthenticatedBurst;
+        } else if (hasExplicitRps) {
+            effectiveBurst = resolveBurst(effectiveRps, 0);
+        } else {
+            int scaled64 = Math.max(1, (int) Math.ceil(podBurst / DEFAULT_PER_IP_LOOKUP_DIVISOR));
+            int maxDefaultShare = Math.max(1, (int) Math.ceil(podBurst / MAX_DEFAULT_PER_IP_LOOKUP_BURST_DIVISOR));
+            effectiveBurst = Math.min(maxDefaultShare, Math.max(DEFAULT_MIN_PER_IP_LOOKUP_BURST, scaled64));
         }
         return new SubRateLimit(effectiveRps, effectiveBurst);
     }
