@@ -12,19 +12,18 @@ import de.palsoftware.scim.server.impl.security.ActuatorApiKeyAuthFilter;
 import de.palsoftware.scim.server.impl.security.BearerTokenAuthFilter;
 import de.palsoftware.scim.server.impl.security.RequestPaths;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.web.context.WebServerInitializedEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.env.Environment;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.util.matcher.RequestMatcher;
-
-import java.time.Duration;
 
 @Configuration
 @EnableWebSecurity
@@ -37,24 +36,17 @@ public class SecurityConfig {
             WorkspaceTokenRepository tokenRepository,
             WorkspaceRepository workspaceRepository,
             ObjectMapper objectMapper,
-            @Value("${app.security.actuator.api-key:}") String actuatorApiKey,
-            @Value("${management.server.port:-1}") int managementPort,
-            @Value("${server.port:8080}") int serverPort,
-            @Value("${app.rate-limit.enabled:false}") boolean rateLimitEnabled,
-            @Value("${app.rate-limit.requests-per-second:200}") double globalRequestsPerSecond,
-            @Value("${app.rate-limit.burst:0}") int globalBurst,
-            @Value("${app.rate-limit.unauthenticated-requests-per-second:0}") double unauthenticatedRequestsPerSecond,
-            @Value("${app.rate-limit.unauthenticated-burst:0}") int unauthenticatedBurst,
-            @Value("${app.rate-limit.wait-timeout:0s}") Duration waitTimeout,
+            Environment environment,
             ObjectProvider<ThrottlingFilter.UnauthenticatedLookupLimiter> unauthenticatedLookupLimiterProvider) {
+        Binder binder = Binder.get(environment);
+        boolean rateLimitEnabled = binder.bind("app.rate-limit.enabled", Boolean.class).orElse(false);
+        String actuatorApiKey = environment.getProperty("app.security.actuator.api-key", "");
+        int managementPort = binder.bind("management.server.port", Integer.class).orElse(-1);
+        int serverPort = binder.bind("server.port", Integer.class).orElse(8080);
+
         ThrottlingFilter.UnauthenticatedLookupLimiter lookupLimiter = rateLimitEnabled
-                ? unauthenticatedLookupLimiterProvider.getIfAvailable(() ->
-                        ThrottlingFilter.createUnauthenticatedLookupLimiter(
-                                globalRequestsPerSecond,
-                                globalBurst,
-                                unauthenticatedRequestsPerSecond,
-                                unauthenticatedBurst,
-                                waitTimeout))
+                ? unauthenticatedLookupLimiterProvider.getIfAvailable(
+                        () -> ThrottlingFilter.createUnauthenticatedLookupLimiter(environment))
                 : ThrottlingFilter.UnauthenticatedLookupLimiter.NOOP;
         this.bearerTokenAuthFilter = new BearerTokenAuthFilter(
                 tokenRepository, workspaceRepository, objectMapper, lookupLimiter);

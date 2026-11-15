@@ -8,6 +8,7 @@ import de.palsoftware.scim.server.impl.model.WorkspaceToken;
 import de.palsoftware.scim.server.impl.repository.WorkspaceRepository;
 import de.palsoftware.scim.server.impl.repository.WorkspaceTokenRepository;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -67,13 +68,15 @@ class BearerTokenAuthFilterTest {
                     }
 
                     @Override
-                    public ThrottlingFilter.AcquireResult tryAcquireLookupPermit() {
+                    public ThrottlingFilter.AcquireResult tryAcquireLookupPermit(HttpServletRequest req) {
                         permitsRequested.incrementAndGet();
                         return ThrottlingFilter.AcquireResult.ALLOWED;
                     }
 
                     @Override
-                    public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+                    public void onValidTokenLookup(HttpServletRequest req,
+                                                   String tokenCacheKey,
+                                                   boolean refundLookupPermit) {
                         // Not expected for malformed Authorization scheme
                     }
 
@@ -397,13 +400,13 @@ class BearerTokenAuthFilterTest {
             }
 
             @Override
-            public ThrottlingFilter.AcquireResult tryAcquireLookupPermit() {
+            public ThrottlingFilter.AcquireResult tryAcquireLookupPermit(HttpServletRequest req) {
                 permitsRequested.incrementAndGet();
                 return ThrottlingFilter.AcquireResult.ALLOWED;
             }
 
             @Override
-            public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+            public void onValidTokenLookup(HttpServletRequest req, String tokenCacheKey, boolean refundLookupPermit) {
                 // Not expected for oversized token
             }
 
@@ -458,9 +461,9 @@ class BearerTokenAuthFilterTest {
         Workspace ws = new Workspace();
         ws.setId(workspaceId);
 
-        // Pod-wide unauthenticated lookup burst = 1 (0.5 RPS -> Retry-After = 2s)
+        // Pod-wide unauthenticated lookup burst = 1 (0.5 RPS -> Retry-After = 2s), default per-IP = ceil(1/4) = 1
         ThrottlingFilter.UnauthenticatedLookupLimiter limiter =
-                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 200, 0.5, 1, Duration.ZERO);
+                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 200, 0.5, 1, 0.0, 0, Duration.ZERO);
         BearerTokenAuthFilter guardedFilter = new BearerTokenAuthFilter(
                 tokenRepository, null, new ObjectMapper(), limiter);
 
@@ -504,7 +507,7 @@ class BearerTokenAuthFilterTest {
         wsB.setId(workspaceB);
 
         ThrottlingFilter.UnauthenticatedLookupLimiter limiter =
-                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 200, 0.5, 1, Duration.ZERO);
+                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 200, 0.5, 1, 0.5, 5, Duration.ZERO);
         BearerTokenAuthFilter guardedFilter = new BearerTokenAuthFilter(
                 tokenRepository, null, new ObjectMapper(), limiter);
 
@@ -531,7 +534,7 @@ class BearerTokenAuthFilterTest {
         wrongWsEntity.setWorkspace(wsB);
         wrongWsEntity.setTokenHash(wrongWsHash);
         when(tokenRepository.findByTokenHashAndNotRevoked(wrongWsHash)).thenReturn(Optional.of(wrongWsEntity));
-        limiter.onValidTokenLookup(workspaceA + ":" + wrongWsHash, false);
+        limiter.onValidTokenLookup(null, workspaceA + ":" + wrongWsHash, false);
         assertTrue(limiter.isKnownActiveToken(workspaceA + ":" + wrongWsHash));
 
         // Drain the single lookup permit via 1 invalid-token request (401)
@@ -589,25 +592,41 @@ class BearerTokenAuthFilterTest {
         UUID workspaceId = UUID.randomUUID();
         when(workspaceRepository.existsById(workspaceId)).thenReturn(true);
 
-        // Burst = 2 (0.5 RPS -> Retry-After = 2s): covers standard + compat /ms/ServiceProviderConfig/
+        // Pod-wide burst = 2 (0.5 RPS -> Retry-After = 2s), per-IP burst = 1 (0.25 RPS -> Retry-After = 4s):
+        // covers per-IP isolation + pod-wide cap across standard + compat /ms/ServiceProviderConfig/
         ThrottlingFilter.UnauthenticatedLookupLimiter limiter =
-                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 200, 0.5, 2, Duration.ZERO);
+                ThrottlingFilter.createUnauthenticatedLookupLimiter(200.0, 200, 0.5, 2, 0.25, 1, Duration.ZERO);
         BearerTokenAuthFilter wsFilter = new BearerTokenAuthFilter(
                 tokenRepository, workspaceRepository, new ObjectMapper(), limiter);
 
-        for (String uri : List.of(
+        String[] discoveryIps = {"198.51.100.1", "198.51.100.2"};
+        String[] discoveryUris = {
                 "/ws/" + workspaceId + "/scim/v2/ServiceProviderConfig",
-                "/ws/" + workspaceId + "/scim/v2/ms/ServiceProviderConfig/")) {
-            MockHttpServletRequest okReq = new MockHttpServletRequest("GET", uri);
+                "/ws/" + workspaceId + "/scim/v2/ms/ServiceProviderConfig/"
+        };
+        for (int i = 0; i < discoveryUris.length; i++) {
+            MockHttpServletRequest okReq = new MockHttpServletRequest("GET", discoveryUris[i]);
+            okReq.setRemoteAddr(discoveryIps[i]);
             MockHttpServletResponse okResp = new MockHttpServletResponse();
             wsFilter.doFilter(okReq, okResp, filterChain);
             assertEquals(200, okResp.getStatus());
         }
 
-        // 3rd anonymous GET /ServiceProviderConfig is rejected BEFORE workspaceRepository.existsById!
+        // Repeat from 198.51.100.1 hits per-IP lookup cap (0.25 RPS -> Retry-After: 4) BEFORE existsById!
         Mockito.clearInvocations(workspaceRepository);
+        MockHttpServletRequest perIpThrottledReq = new MockHttpServletRequest(
+                "GET", "/ws/" + workspaceId + "/scim/v2/ServiceProviderConfig");
+        perIpThrottledReq.setRemoteAddr("198.51.100.1");
+        MockHttpServletResponse perIpThrottledResp = new MockHttpServletResponse();
+        wsFilter.doFilter(perIpThrottledReq, perIpThrottledResp, filterChain);
+        assertEquals(429, perIpThrottledResp.getStatus());
+        assertEquals("4", perIpThrottledResp.getHeader("Retry-After"));
+        verifyNoInteractions(workspaceRepository);
+
+        // 3rd distinct IP (198.51.100.3) hits pod-wide lookup cap (0.5 RPS -> Retry-After: 2) BEFORE existsById!
         MockHttpServletRequest throttledReq = new MockHttpServletRequest(
                 "GET", "/ws/" + workspaceId + "/scim/v2/ms/ServiceProviderConfig");
+        throttledReq.setRemoteAddr("198.51.100.3");
         MockHttpServletResponse throttledResp = new MockHttpServletResponse();
         wsFilter.doFilter(throttledReq, throttledResp, filterChain);
 

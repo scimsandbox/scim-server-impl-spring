@@ -66,13 +66,25 @@
       "name": "app.rate-limit.unauthenticated-requests-per-second",
       "type": "java.lang.Double",
       "defaultValue": 0,
-      "description": "Pod-wide sustained token refill rate per second for unauthenticated and cold-token-miss database lookups (defaults to requests-per-second / 4 when <= 0; active tokens refund their cold-miss permit)."
+      "description": "Pod-wide sustained token refill rate per second for unauthenticated and cold-token-miss database lookups (defaults to requests-per-second / 4 when <= 0; verified active tokens refund their cold-miss permit and retain a 24-hour active-token hint while still checking revocation/expiry on every request)."
     },
     {
       "name": "app.rate-limit.unauthenticated-burst",
       "type": "java.lang.Integer",
       "defaultValue": 0,
       "description": "Pod-wide burst capacity for unauthenticated and cold-token-miss database lookups (defaults to ceil(unauthenticated-requests-per-second), capped at 1000, when explicit, else ceil(globalBurst / 4))."
+    },
+    {
+      "name": "app.rate-limit.per-ip-unauthenticated-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Per-client-IP (or IPv6 /64 prefix) sustained token refill rate per second for unauthenticated and failed-token database lookups, isolating single-IP junk-token floods from draining the pod-wide lookup budget (defaults to podUnauthenticatedRequestsPerSecond / 4 when <= 0; valid tokens refund their cold-miss permit)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-unauthenticated-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Per-client-IP (or IPv6 /64 prefix) burst capacity for unauthenticated and failed-token database lookups (defaults to ceil(per-ip-unauthenticated-requests-per-second), capped at 1000, when explicit, else ceil(podUnauthenticatedBurst / 4))."
     },
     {
       "name": "app.rate-limit.per-workspace-requests-per-second",

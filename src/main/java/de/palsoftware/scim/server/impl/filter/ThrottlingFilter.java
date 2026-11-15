@@ -15,6 +15,8 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.web.util.matcher.IpAddressMatcher;
 import org.springframework.stereotype.Component;
@@ -45,8 +47,12 @@ public class ThrottlingFilter extends OncePerRequestFilter {
     static final double DEFAULT_SUB_DIVISOR = 4.0;
     static final long MAX_CACHED_KEYS = 10_000L;
     static final Duration BUCKET_IDLE_EXPIRATION = Duration.ofMinutes(15);
+    static final long MAX_VERIFIED_TOKENS = 50_000L;
+    static final Duration VERIFIED_TOKEN_IDLE_EXPIRATION = Duration.ofHours(24);
     static final String GLOBAL_FALLBACK_KEY = "global";
     public static final String CAPACITY_ERROR_DETAIL = "Too many requests. Try again later.";
+    public static final String RESOLVED_CLIENT_IP_KEY_ATTRIBUTE =
+            ThrottlingFilter.class.getName() + ".RESOLVED_CLIENT_IP_KEY";
 
     private static final String NANO_CLOCK_NULL_MSG = "nanoClock must not be null";
     private static final String SLEEPER_NULL_MSG = "sleeper must not be null";
@@ -186,6 +192,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         LoadingCache<String, TokenBucket> wsBuckets = Caffeine.newBuilder()
                 .maximumSize(MAX_CACHED_KEYS)
                 .expireAfterAccess(BUCKET_IDLE_EXPIRATION)
+                .ticker(nanoClock::getAsLong)
                 .build(_ -> new TokenBucket(wsLimit.requestsPerSecond(), wsLimit.burst(), nanoClock, sleeper));
 
         return (key, timeout) -> {
@@ -207,59 +214,135 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         };
     }
 
+    public static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(Environment environment) {
+        return createUnauthenticatedLookupLimiter(environment, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
+    }
+
+    static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(Environment environment,
+                                                                           LongSupplier nanoClock) {
+        return createUnauthenticatedLookupLimiter(environment, nanoClock, TimeUnit.NANOSECONDS::sleep);
+    }
+
+    static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(Environment environment,
+                                                                           LongSupplier nanoClock,
+                                                                           NanoSleeper sleeper) {
+        Objects.requireNonNull(environment, "environment must not be null");
+        Binder binder = Binder.get(environment);
+        double globalRps = binder.bind("app.rate-limit.requests-per-second", Double.class).orElse(200.0);
+        int globalBurst = binder.bind("app.rate-limit.burst", Integer.class).orElse(0);
+        double unauthRps = binder.bind("app.rate-limit.unauthenticated-requests-per-second", Double.class).orElse(0.0);
+        int unauthBurst = binder.bind("app.rate-limit.unauthenticated-burst", Integer.class).orElse(0);
+        double perIpUnauthRps = binder.bind(
+                "app.rate-limit.per-ip-unauthenticated-requests-per-second", Double.class).orElse(0.0);
+        int perIpUnauthBurst = binder.bind(
+                "app.rate-limit.per-ip-unauthenticated-burst", Integer.class).orElse(0);
+        String trustedProxies = binder.bind("app.rate-limit.trusted-proxies", String.class).orElse("");
+        String trustedCloudflareProxies = binder.bind(
+                "app.rate-limit.trusted-cloudflare-proxies", String.class).orElse("");
+        Duration waitTimeout = binder.bind("app.rate-limit.wait-timeout", Duration.class).orElse(DEFAULT_WAIT_TIMEOUT);
+
+        SubRateLimit podLimit = resolveSubRateLimit(globalRps, globalBurst, unauthRps, unauthBurst);
+        SubRateLimit perIpLimit = resolveSubRateLimit(
+                podLimit.requestsPerSecond(),
+                podLimit.burst(),
+                perIpUnauthRps,
+                perIpUnauthBurst);
+        return createUnauthenticatedLookupLimiter(
+                podLimit,
+                perIpLimit,
+                ClientIpResolver.parseTrustedProxies(trustedProxies),
+                ClientIpResolver.parseTrustedProxies(trustedCloudflareProxies),
+                waitTimeout,
+                nanoClock,
+                sleeper);
+    }
+
     public static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(
             double globalRequestsPerSecond,
             int globalBurst,
             double unauthenticatedRequestsPerSecond,
             int unauthenticatedBurst,
+            double perIpUnauthenticatedRequestsPerSecond,
+            int perIpUnauthenticatedBurst,
             Duration waitTimeout) {
-        return createUnauthenticatedLookupLimiter(
+        SubRateLimit podLimit = resolveSubRateLimit(
                 globalRequestsPerSecond,
                 globalBurst,
                 unauthenticatedRequestsPerSecond,
-                unauthenticatedBurst,
+                unauthenticatedBurst);
+        SubRateLimit perIpLimit = resolveSubRateLimit(
+                podLimit.requestsPerSecond(),
+                podLimit.burst(),
+                perIpUnauthenticatedRequestsPerSecond,
+                perIpUnauthenticatedBurst);
+        return createUnauthenticatedLookupLimiter(
+                podLimit,
+                perIpLimit,
+                List.of(),
+                List.of(),
                 waitTimeout,
                 System::nanoTime,
                 TimeUnit.NANOSECONDS::sleep);
     }
 
     static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(
-            double globalRequestsPerSecond,
-            int globalBurst,
-            double unauthenticatedRequestsPerSecond,
-            int unauthenticatedBurst,
+            SubRateLimit podLimit,
+            SubRateLimit perIpLimit,
             Duration waitTimeout,
             LongSupplier nanoClock) {
         return createUnauthenticatedLookupLimiter(
-                globalRequestsPerSecond,
-                globalBurst,
-                unauthenticatedRequestsPerSecond,
-                unauthenticatedBurst,
+                podLimit,
+                perIpLimit,
+                List.of(),
+                List.of(),
                 waitTimeout,
                 nanoClock,
                 TimeUnit.NANOSECONDS::sleep);
     }
 
     static UnauthenticatedLookupLimiter createUnauthenticatedLookupLimiter(
-            double globalRequestsPerSecond,
-            int globalBurst,
-            double unauthenticatedRequestsPerSecond,
-            int unauthenticatedBurst,
+            SubRateLimit podLimit,
+            SubRateLimit perIpLimit,
+            List<IpAddressMatcher> trustedProxies,
+            List<IpAddressMatcher> trustedCloudflareProxies,
             Duration waitTimeout,
             LongSupplier nanoClock,
             NanoSleeper sleeper) {
-        SubRateLimit limit = resolveSubRateLimit(
-                globalRequestsPerSecond, globalBurst, unauthenticatedRequestsPerSecond, unauthenticatedBurst);
+        Objects.requireNonNull(podLimit, "podLimit must not be null");
+        Objects.requireNonNull(perIpLimit, "perIpLimit must not be null");
         Objects.requireNonNull(nanoClock, NANO_CLOCK_NULL_MSG);
         Objects.requireNonNull(sleeper, SLEEPER_NULL_MSG);
 
         Duration effectiveWaitTimeout = resolveWaitTimeout(waitTimeout);
-        TokenBucket lookupBucket = new TokenBucket(limit.requestsPerSecond(), limit.burst(), nanoClock, sleeper);
-        Cache<String, Boolean> verifiedTokenHashes = Caffeine.newBuilder()
+        List<IpAddressMatcher> effectiveTrustedProxies = trustedProxies != null
+                ? List.copyOf(trustedProxies)
+                : List.of();
+        List<IpAddressMatcher> effectiveCloudflareProxies = trustedCloudflareProxies != null
+                ? List.copyOf(trustedCloudflareProxies)
+                : List.of();
+
+        TokenBucket podLookupBucket = new TokenBucket(
+                podLimit.requestsPerSecond(), podLimit.burst(), nanoClock, sleeper);
+        LoadingCache<String, TokenBucket> perIpLookupBuckets = Caffeine.newBuilder()
                 .maximumSize(MAX_CACHED_KEYS)
                 .expireAfterAccess(BUCKET_IDLE_EXPIRATION)
+                .ticker(nanoClock::getAsLong)
+                .build(_ -> new TokenBucket(
+                        perIpLimit.requestsPerSecond(), perIpLimit.burst(), nanoClock, sleeper));
+        Cache<String, Boolean> verifiedTokenHashes = Caffeine.newBuilder()
+                .maximumSize(MAX_VERIFIED_TOKENS)
+                .expireAfterAccess(VERIFIED_TOKEN_IDLE_EXPIRATION)
+                .ticker(nanoClock::getAsLong)
                 .build();
-        return new DefaultUnauthenticatedLookupLimiter(lookupBucket, verifiedTokenHashes, effectiveWaitTimeout);
+
+        return new DefaultUnauthenticatedLookupLimiter(
+                perIpLookupBuckets,
+                podLookupBucket,
+                verifiedTokenHashes,
+                effectiveTrustedProxies,
+                effectiveCloudflareProxies,
+                effectiveWaitTimeout,
+                nanoClock);
     }
 
     public static KeyedPermitLimiter createKeyedLimiter(double requestsPerSecond, int configuredBurst) {
@@ -284,6 +367,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         LoadingCache<String, TokenBucket> buckets = Caffeine.newBuilder()
                 .maximumSize(MAX_CACHED_KEYS)
                 .expireAfterAccess(BUCKET_IDLE_EXPIRATION)
+                .ticker(nanoClock::getAsLong)
                 .build(_ -> new TokenBucket(requestsPerSecond, resolvedBurst, nanoClock, sleeper));
         return (key, timeout) -> {
             String bucketKey = (key != null && !key.isEmpty()) ? key : GLOBAL_FALLBACK_KEY;
@@ -307,20 +391,20 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         }
     }
 
-    static SubRateLimit resolveSubRateLimit(double globalRequestsPerSecond,
-                                            int globalBurst,
+    static SubRateLimit resolveSubRateLimit(double parentRequestsPerSecond,
+                                            int parentBurst,
                                             double subRequestsPerSecond,
                                             int subBurst) {
-        validatePositiveFiniteRate(globalRequestsPerSecond, "requestsPerSecond");
+        validatePositiveFiniteRate(parentRequestsPerSecond, "requestsPerSecond");
         if (!Double.isFinite(subRequestsPerSecond)) {
             throw new IllegalArgumentException("subRequestsPerSecond must be a finite number");
         }
 
-        int resolvedGlobalBurst = resolveBurst(globalRequestsPerSecond, globalBurst);
+        int resolvedParentBurst = resolveBurst(parentRequestsPerSecond, parentBurst);
         boolean hasExplicitSubRps = subRequestsPerSecond > 0.0;
         double effectiveRps = hasExplicitSubRps
                 ? subRequestsPerSecond
-                : (globalRequestsPerSecond / DEFAULT_SUB_DIVISOR);
+                : (parentRequestsPerSecond / DEFAULT_SUB_DIVISOR);
 
         int effectiveBurst;
         if (subBurst > 0) {
@@ -328,7 +412,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         } else if (hasExplicitSubRps) {
             effectiveBurst = resolveBurst(effectiveRps, 0);
         } else {
-            effectiveBurst = Math.max(1, (int) Math.ceil(resolvedGlobalBurst / DEFAULT_SUB_DIVISOR));
+            effectiveBurst = Math.max(1, (int) Math.ceil(resolvedParentBurst / DEFAULT_SUB_DIVISOR));
         }
         return new SubRateLimit(effectiveRps, effectiveBurst);
     }
@@ -363,6 +447,7 @@ public class ThrottlingFilter extends OncePerRequestFilter {
 
         String clientIpKey = ClientIpResolver.extractClientIpKey(
                 request, trustedProxies, trustedCloudflareProxies);
+        request.setAttribute(RESOLVED_CLIENT_IP_KEY_ATTRIBUTE, clientIpKey);
         AcquireResult result = permitLimiter.tryAcquire(clientIpKey, waitTimeout);
         if (!result.allowed()) {
             request.setAttribute(ScimRequestMetricAttributes.THROTTLED, ScimRequestMetricAttributes.THROTTLED_YES);
@@ -404,12 +489,12 @@ public class ThrottlingFilter extends OncePerRequestFilter {
             }
 
             @Override
-            public AcquireResult tryAcquireLookupPermit() {
+            public AcquireResult tryAcquireLookupPermit(HttpServletRequest request) {
                 return AcquireResult.ALLOWED;
             }
 
             @Override
-            public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+            public void onValidTokenLookup(HttpServletRequest request, String tokenCacheKey, boolean refundLookupPermit) {
                 // No-op when rate limiting is disabled
             }
 
@@ -421,17 +506,21 @@ public class ThrottlingFilter extends OncePerRequestFilter {
 
         boolean isKnownActiveToken(String tokenCacheKey);
 
-        AcquireResult tryAcquireLookupPermit();
+        AcquireResult tryAcquireLookupPermit(HttpServletRequest request);
 
-        void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit);
+        void onValidTokenLookup(HttpServletRequest request, String tokenCacheKey, boolean refundLookupPermit);
 
         void evictToken(String tokenCacheKey);
     }
 
     private record DefaultUnauthenticatedLookupLimiter(
-            TokenBucket lookupBucket,
+            LoadingCache<String, TokenBucket> perIpLookupBuckets,
+            TokenBucket podLookupBucket,
             Cache<String, Boolean> verifiedTokenHashes,
-            Duration waitTimeout) implements UnauthenticatedLookupLimiter {
+            List<IpAddressMatcher> trustedProxies,
+            List<IpAddressMatcher> trustedCloudflareProxies,
+            Duration waitTimeout,
+            LongSupplier nanoClock) implements UnauthenticatedLookupLimiter {
 
         @Override
         public boolean isKnownActiveToken(String tokenCacheKey) {
@@ -439,17 +528,34 @@ public class ThrottlingFilter extends OncePerRequestFilter {
         }
 
         @Override
-        public AcquireResult tryAcquireLookupPermit() {
-            return lookupBucket.tryAcquire(waitTimeout);
+        public AcquireResult tryAcquireLookupPermit(HttpServletRequest request) {
+            long startNanos = nanoClock.getAsLong();
+            TokenBucket ipBucket = Objects.requireNonNull(perIpLookupBuckets.get(resolveClientIpKey(request)));
+            AcquireResult ipResult = ipBucket.tryAcquire(waitTimeout);
+            if (!ipResult.allowed()) {
+                return ipResult;
+            }
+
+            Duration remaining = remainingTimeout(waitTimeout, startNanos, nanoClock);
+            AcquireResult podResult = podLookupBucket.tryAcquire(remaining);
+            if (!podResult.allowed()) {
+                ipBucket.refund();
+                return podResult;
+            }
+            return AcquireResult.ALLOWED;
         }
 
         @Override
-        public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+        public void onValidTokenLookup(HttpServletRequest request, String tokenCacheKey, boolean refundLookupPermit) {
             if (tokenCacheKey != null) {
                 verifiedTokenHashes.put(tokenCacheKey, Boolean.TRUE);
             }
             if (refundLookupPermit) {
-                lookupBucket.refund();
+                TokenBucket ipBucket = perIpLookupBuckets.getIfPresent(resolveClientIpKey(request));
+                if (ipBucket != null) {
+                    ipBucket.refund();
+                }
+                podLookupBucket.refund();
             }
         }
 
@@ -458,6 +564,19 @@ public class ThrottlingFilter extends OncePerRequestFilter {
             if (tokenCacheKey != null) {
                 verifiedTokenHashes.invalidate(tokenCacheKey);
             }
+        }
+
+        private String resolveClientIpKey(HttpServletRequest request) {
+            if (request == null) {
+                return GLOBAL_FALLBACK_KEY;
+            }
+            if (request.getAttribute(RESOLVED_CLIENT_IP_KEY_ATTRIBUTE) instanceof String cached && !cached.isEmpty()) {
+                return cached;
+            }
+            String resolved = ClientIpResolver.extractClientIpKey(
+                    request, trustedProxies, trustedCloudflareProxies);
+            request.setAttribute(RESOLVED_CLIENT_IP_KEY_ATTRIBUTE, resolved);
+            return resolved;
         }
     }
 

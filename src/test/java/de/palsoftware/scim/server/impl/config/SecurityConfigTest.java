@@ -118,7 +118,8 @@ class SecurityConfigTest {
                         "app.rate-limit.enabled=true",
                         "app.rate-limit.requests-per-second=200",
                         "app.rate-limit.wait-timeout=0s",
-                        "app.security.actuator.api-key=unit-test-key")
+                        "app.security.actuator.api-key=${ACTUATOR_API_KEY:}",
+                        "ACTUATOR_API_KEY=unit-test-key")
                 .run(context -> {
                     assertThat(context.getBeansOfType(ThrottlingFilter.class)).hasSize(1);
                     assertThat(context.getBeansOfType(WorkspaceRateLimitFilter.class)).hasSize(1);
@@ -265,7 +266,81 @@ class SecurityConfigTest {
                     verify(tokenRepo, times(2)).findByTokenHashAndNotRevoked(any());
                 });
 
-        // (b) Custom UnauthenticatedLookupLimiter @Bean registered in context is honored via ObjectProvider
+        // (b) Per-IP unauthenticated lookup budget prevents a single IP from draining pod-wide unauthenticated-burst
+        contextRunner
+                .withPropertyValues(
+                        "spring.mvc.formcontent.filter.enabled=false",
+                        "app.rate-limit.enabled=true",
+                        "app.rate-limit.requests-per-second=200",
+                        "app.rate-limit.per-ip-burst=10",
+                        "app.rate-limit.unauthenticated-requests-per-second=0.05",
+                        "app.rate-limit.unauthenticated-burst=10",
+                        "app.rate-limit.per-ip-unauthenticated-requests-per-second=0.25",
+                        "app.rate-limit.per-ip-unauthenticated-burst=2",
+                        "app.rate-limit.wait-timeout=0s")
+                .run(context -> {
+                    WorkspaceTokenRepository tokenRepo = context.getBean(WorkspaceTokenRepository.class);
+                    Workspace ws = new Workspace();
+                    ws.setId(wsId);
+                    ws.setCreatedByUsername("cold-tenant");
+                    String validRawToken = "cold-tenant-valid-token";
+                    String validHash = TokenSecurityUtil.sha256Hex(validRawToken);
+                    WorkspaceToken validTokenEntity = new WorkspaceToken();
+                    validTokenEntity.setWorkspace(ws);
+                    validTokenEntity.setTokenHash(validHash);
+                    when(tokenRepo.findByTokenHashAndNotRevoked(any())).thenAnswer(inv -> {
+                        String hash = inv.getArgument(0);
+                        return validHash.equals(hash) ? Optional.of(validTokenEntity) : Optional.empty();
+                    });
+
+                    ServletPayloadStreamGuardFilter streamGuard = context.getBean(ServletPayloadStreamGuardFilter.class);
+                    Filter springSecurityFilterChain = context.getBean("springSecurityFilterChain", Filter.class);
+                    MockMvc mockMvc = MockMvcBuilders.webAppContextSetup(context)
+                            .addFilters(streamGuard, springSecurityFilterChain)
+                            .build();
+
+                    // Single attacker IP 203.0.113.77 sends 4 junk-token requests (below per-ip-burst=10):
+                    // first 2 get 401, next 2 hit per-ip-unauthenticated-burst=2 (429, Retry-After: 4) with 0 DB calls!
+                    for (int i = 1; i <= 2; i++) {
+                        mockMvc.perform(get(usersPath)
+                                        .with(req -> {
+                                            req.setRemoteAddr("203.0.113.77");
+                                            return req;
+                                        })
+                                        .header("Authorization", "Bearer attacker-junk-" + i))
+                                .andExpect(status().isUnauthorized());
+                    }
+                    verify(tokenRepo, times(2)).findByTokenHashAndNotRevoked(any());
+
+                    for (int i = 3; i <= 4; i++) {
+                        mockMvc.perform(get(usersPath)
+                                        .with(req -> {
+                                            req.setRemoteAddr("203.0.113.77");
+                                            return req;
+                                        })
+                                        .header("Authorization", "Bearer attacker-junk-" + i))
+                                .andExpect(status().isTooManyRequests())
+                                .andExpect(header().string("Retry-After", "4"));
+                    }
+                    verify(tokenRepo, times(2)).findByTokenHashAndNotRevoked(any());
+
+                    // Cold uncached legitimate workspace from 198.51.100.88 STILL has 8/10 pod lookup permits ->
+                    // passes ThrottlingFilter, BearerTokenAuthFilter, and WorkspaceRateLimitFilter!
+                    MockHttpServletRequest coldTenantReq = new MockHttpServletRequest("GET", usersPath);
+                    coldTenantReq.setRemoteAddr("198.51.100.88");
+                    coldTenantReq.addHeader("Authorization", "Bearer " + validRawToken);
+                    MockHttpServletResponse coldTenantResp = new MockHttpServletResponse();
+                    streamGuard.doFilter(coldTenantReq, coldTenantResp,
+                            (req, res) -> springSecurityFilterChain.doFilter(
+                                    req, res, (_, r) -> ((jakarta.servlet.http.HttpServletResponse) r).setStatus(200)));
+
+                    assertThat(coldTenantResp.getStatus()).isEqualTo(200);
+                    assertThat(coldTenantReq.getAttribute(BearerTokenAuthFilter.AUTHENTICATED_WORKSPACE_ID))
+                            .isEqualTo(wsId);
+                    verify(tokenRepo, times(3)).findByTokenHashAndNotRevoked(any());
+                });
+
+        // (c) Custom UnauthenticatedLookupLimiter @Bean registered in context is honored via ObjectProvider
         AtomicInteger customAcquisitions = new AtomicInteger();
         ThrottlingFilter.UnauthenticatedLookupLimiter customLimiter =
                 new ThrottlingFilter.UnauthenticatedLookupLimiter() {
@@ -275,13 +350,15 @@ class SecurityConfigTest {
                     }
 
                     @Override
-                    public ThrottlingFilter.AcquireResult tryAcquireLookupPermit() {
+                    public ThrottlingFilter.AcquireResult tryAcquireLookupPermit(HttpServletRequest request) {
                         customAcquisitions.incrementAndGet();
                         return ThrottlingFilter.AcquireResult.rejected(7L);
                     }
 
                     @Override
-                    public void onValidTokenLookup(String tokenCacheKey, boolean refundLookupPermit) {
+                    public void onValidTokenLookup(HttpServletRequest request,
+                                                   String tokenCacheKey,
+                                                   boolean refundLookupPermit) {
                         // Not reached when rejected
                     }
 

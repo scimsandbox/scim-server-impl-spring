@@ -121,7 +121,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
                                                       HttpServletResponse response,
                                                       FilterChain filterChain,
                                                       UUID workspaceId) throws ServletException, IOException {
-        ThrottlingFilter.AcquireResult permit = unauthenticatedLookupLimiter.tryAcquireLookupPermit();
+        ThrottlingFilter.AcquireResult permit = unauthenticatedLookupLimiter.tryAcquireLookupPermit(request);
         if (!permit.allowed()) {
             writeThrottledError(request, response, permit.retryAfterSeconds());
             return;
@@ -164,7 +164,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
         String tokenCacheKey = workspaceId + ":" + tokenHash;
         boolean knownActive = unauthenticatedLookupLimiter.isKnownActiveToken(tokenCacheKey);
         if (!knownActive) {
-            ThrottlingFilter.AcquireResult permit = unauthenticatedLookupLimiter.tryAcquireLookupPermit();
+            ThrottlingFilter.AcquireResult permit = unauthenticatedLookupLimiter.tryAcquireLookupPermit(request);
             if (!permit.allowed()) {
                 writeThrottledError(request, response, permit.retryAfterSeconds());
                 return null;
@@ -179,7 +179,7 @@ public class BearerTokenAuthFilter extends OncePerRequestFilter {
             return null;
         }
 
-        unauthenticatedLookupLimiter.onValidTokenLookup(tokenCacheKey, !knownActive);
+        unauthenticatedLookupLimiter.onValidTokenLookup(request, tokenCacheKey, !knownActive);
         return verifiedWorkspace;
     }
 
