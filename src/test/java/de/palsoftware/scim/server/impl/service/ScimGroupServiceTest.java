@@ -227,7 +227,7 @@ class ScimGroupServiceTest {
 
         service.deleteGroup(workspaceId, groupId);
 
-        verify(membershipRepository).deleteByMemberValue(groupId);
+        verify(membershipRepository).deleteByMemberValueAndWorkspaceId(groupId, workspaceId);
         verify(groupRepository).delete(group);
         verify(workspaceActivityService).touchWorkspace(workspaceId);
     }
@@ -678,5 +678,47 @@ class ScimGroupServiceTest {
         assertThat(nonScimUri).isNotNull();
         assertThat(nonScimUri.getHttpStatus()).isEqualTo(400);
         assertThat(nonScimUri.getScimType()).isEqualTo("invalidValue");
+    }
+
+    @Test
+    void selfMembership_rejectedWith400InvalidValueAcrossCreatePutAndPatch() {
+        when(workspaceRepository.findById(workspaceId)).thenReturn(Optional.of(workspace));
+        when(groupRepository.save(any(ScimGroup.class))).thenAnswer(i -> {
+            ScimGroup g = i.getArgument(0);
+            if (g.getId() == null) {
+                g.setId(groupId);
+            }
+            return g;
+        });
+        when(groupRepository.findByIdAndWorkspaceId(groupId, workspaceId)).thenReturn(Optional.of(group));
+
+        for (Map<String, Object> selfMember : List.<Map<String, Object>>of(
+                Map.<String, Object>of("value", groupId.toString()),
+                Map.<String, Object>of("value", groupId.toString(), "type", "Group"),
+                Map.<String, Object>of("$ref", "/Groups/" + groupId))) {
+            ScimException createEx = catchThrowableOfType(ScimException.class,
+                    () -> service.createGroup(workspaceId, Map.of("displayName", "SelfCreate", "members", List.of(selfMember))));
+            assertThat(createEx).isNotNull();
+            assertThat(createEx.getHttpStatus()).isEqualTo(400);
+            assertThat(createEx.getScimType()).isEqualTo("invalidValue");
+
+            ScimException putEx = catchThrowableOfType(ScimException.class,
+                    () -> service.replaceGroup(workspaceId, groupId, Map.of("displayName", "TestGroup", "members", List.of(selfMember)), null));
+            assertThat(putEx).isNotNull();
+            assertThat(putEx.getHttpStatus()).isEqualTo(400);
+            assertThat(putEx.getScimType()).isEqualTo("invalidValue");
+
+            ScimException patchAddEx = catchThrowableOfType(ScimException.class,
+                    () -> service.patchGroup(workspaceId, groupId, List.of(Map.of("op", "add", "path", "members", "value", List.of(selfMember))), null));
+            assertThat(patchAddEx).isNotNull();
+            assertThat(patchAddEx.getHttpStatus()).isEqualTo(400);
+            assertThat(patchAddEx.getScimType()).isEqualTo("invalidValue");
+
+            ScimException patchPathlessEx = catchThrowableOfType(ScimException.class,
+                    () -> service.patchGroup(workspaceId, groupId, List.of(Map.of("op", "replace", "value", Map.of("members", List.of(selfMember)))), null));
+            assertThat(patchPathlessEx).isNotNull();
+            assertThat(patchPathlessEx.getHttpStatus()).isEqualTo(400);
+            assertThat(patchPathlessEx.getScimType()).isEqualTo("invalidValue");
+        }
     }
 }

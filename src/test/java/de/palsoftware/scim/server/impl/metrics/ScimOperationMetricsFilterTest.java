@@ -123,6 +123,60 @@ class ScimOperationMetricsFilterTest {
         }
 
     @Test
+    void shouldRecordThrottledMetricsOnHttp429WithRetryAfter() throws Exception {
+        UUID workspaceId = UUID.randomUUID();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET",
+                "/ws/" + workspaceId + "/scim/v2/Users");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain filterChain = Mockito.mock(FilterChain.class);
+
+        Mockito.doAnswer(invocation -> {
+            MockHttpServletRequest currentRequest = (MockHttpServletRequest) invocation.getArgument(0);
+            MockHttpServletResponse currentResponse = (MockHttpServletResponse) invocation.getArgument(1);
+            currentRequest.setAttribute(ScimRequestMetricAttributes.AUTHENTICATION, ScimRequestMetricAttributes.AUTH_OK);
+            currentResponse.setStatus(429);
+            currentResponse.setHeader("Retry-After", "1");
+            return null;
+        }).when(filterChain).doFilter(Mockito.any(), Mockito.any());
+
+        filter.doFilter(request, response, filterChain);
+
+        assertEquals(1, meterRegistry.counter("scim.operation.requests",
+                "operation", "listUsers",
+                "http_status", "429").count());
+        assertEquals(1, meterRegistry.counter("scim.operation.throttled",
+                "state", "yes").count());
+    }
+
+    @Test
+    void shouldRecordUnknownAuthenticationAndThrottledYesWhenRateLimitedBeforeAuth() throws Exception {
+        UUID workspaceId = UUID.randomUUID();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET",
+                "/ws/" + workspaceId + "/scim/v2/Users");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain filterChain = Mockito.mock(FilterChain.class);
+
+        Mockito.doAnswer(invocation -> {
+            MockHttpServletRequest currentRequest = (MockHttpServletRequest) invocation.getArgument(0);
+            MockHttpServletResponse currentResponse = (MockHttpServletResponse) invocation.getArgument(1);
+            currentRequest.setAttribute(ScimRequestMetricAttributes.THROTTLED, ScimRequestMetricAttributes.THROTTLED_YES);
+            currentResponse.setStatus(429);
+            currentResponse.setHeader("Retry-After", "1");
+            return null;
+        }).when(filterChain).doFilter(Mockito.any(), Mockito.any());
+
+        filter.doFilter(request, response, filterChain);
+
+        assertEquals(1, meterRegistry.counter("scim.operation.requests",
+                "operation", "listUsers",
+                "http_status", "429").count());
+        assertEquals(1, meterRegistry.counter("scim.operation.throttled",
+                "state", "yes").count());
+        assertEquals(1, meterRegistry.counter("scim.operation.authentication",
+                "state", "unknown").count());
+    }
+
+    @Test
     void shouldExposePrometheusTimerWithConfiguredBuckets() throws Exception {
         PrometheusMeterRegistry prometheusRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         ScimOperationMetricsFilter prometheusFilter = new ScimOperationMetricsFilter(prometheusRegistry);

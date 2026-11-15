@@ -21,6 +21,10 @@
       "type": "java.lang.Object"
     },
     {
+      "name": "app.rate-limit",
+      "type": "java.lang.Object"
+    },
+    {
       "name": "app.security",
       "type": "java.lang.Object"
     },
@@ -30,6 +34,87 @@
     }
   ],
   "properties": [
+    {
+      "name": "app.rate-limit.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enables SCIM API rate limiting (pre-auth per-IP, pod-wide unauthenticated lookup cap, post-auth per-workspace, and post-auth pod-wide global cap)."
+    },
+    {
+      "name": "app.rate-limit.requests-per-second",
+      "type": "java.lang.Double",
+      "description": "Post-authentication pod-wide global sustained token refill rate per second across all verified workspaces (also used to derive default pod-wide unauthenticated-lookup rate at 1x requests-per-second and default pre-auth per-IP and post-auth per-workspace sub-limits at requests-per-second / 4)."
+    },
+    {
+      "name": "app.rate-limit.burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Optional post-authentication pod-wide global burst token capacity across all verified workspaces (defaults to ceil(requests-per-second), capped at 1000, when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Pre-authentication sustained token refill rate per second for each client IP or IPv6 /64 prefix (defaults to requests-per-second / 4 when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Pre-authentication burst capacity per client IP or IPv6 /64 prefix (defaults to ceil(per-ip-requests-per-second), capped at 1000, when explicit, else ceil(globalBurst / 4))."
+    },
+    {
+      "name": "app.rate-limit.unauthenticated-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Pod-wide sustained token refill rate per second for unauthenticated and cold-token-miss database lookups (defaults to 1x requests-per-second when <= 0; verified active tokens refund their cold-miss permit and retain a 24-hour active-token hint while still checking revocation/expiry on every request)."
+    },
+    {
+      "name": "app.rate-limit.unauthenticated-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Pod-wide burst capacity for unauthenticated and cold-token-miss database lookups (defaults to ceil(unauthenticated-requests-per-second), capped at 1000, when explicit, else globalBurst)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-unauthenticated-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Per-client-IP (or IPv6 /64 prefix) sustained token refill rate per second for unauthenticated and failed-token database lookups, giving each IP a 1/64 share so small multi-IP floods cannot drain the pod-wide lookup budget (defaults to podUnauthenticatedRequestsPerSecond / 64 when <= 0; valid tokens refund their cold-miss permit)."
+    },
+    {
+      "name": "app.rate-limit.per-ip-unauthenticated-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Per-client-IP (or IPv6 /64 prefix) burst capacity for unauthenticated and failed-token database lookups (defaults to ceil(per-ip-unauthenticated-requests-per-second), capped at 1000, when explicit, else min(ceil(podUnauthenticatedBurst / 16), max(12, ceil(podUnauthenticatedBurst / 64))))."
+    },
+    {
+      "name": "app.rate-limit.per-workspace-requests-per-second",
+      "type": "java.lang.Double",
+      "defaultValue": 0,
+      "description": "Post-authentication sustained token refill rate per second for each verified workspace (defaults to requests-per-second / 4 when <= 0)."
+    },
+    {
+      "name": "app.rate-limit.per-workspace-burst",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Post-authentication burst capacity per verified workspace (defaults to ceil(per-workspace-requests-per-second), capped at 1000, when explicit, else ceil(globalBurst / 4))."
+    },
+    {
+      "name": "app.rate-limit.trusted-proxies",
+      "type": "java.lang.String",
+      "defaultValue": "",
+      "description": "Comma-separated list of trusted reverse-proxy IPs or CIDR ranges allowed to supply X-Forwarded-For headers (when blank, only loopback/private/link-local/ULA peers are trusted for X-Forwarded-For)."
+    },
+    {
+      "name": "app.rate-limit.trusted-cloudflare-proxies",
+      "type": "java.lang.String",
+      "defaultValue": "",
+      "description": "Comma-separated list of trusted Cloudflare edge proxy IPs or CIDR ranges allowed to supply CF-Connecting-IP (and X-Forwarded-For) headers (when blank, CF-Connecting-IP is never trusted)."
+    },
+    {
+      "name": "app.rate-limit.wait-timeout",
+      "type": "java.time.Duration",
+      "description": "Maximum wait duration to acquire a rate-limit token before returning HTTP 429."
+    },
     {
       "name": "app.security.actuator.api-key",
       "type": "java.lang.String",

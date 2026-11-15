@@ -1,5 +1,7 @@
 package de.palsoftware.scim.server.impl.scim.schema;
 
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
+
 import java.util.*;
 
 /**
@@ -78,7 +80,7 @@ public class ScimSchemaDefinitions {
                 config.put(KEY_SCHEMAS, List.of("urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"));
                 config.put(KEY_DOCUMENTATION_URI, "https://datatracker.ietf.org/doc/html/rfc7644");
                 config.put("patch", Map.of(ATTR_SUPPORTED, true));
-                config.put("bulk", Map.of(ATTR_SUPPORTED, true, "maxOperations", 1000, "maxPayloadSize", 1048576));
+                config.put("bulk", Map.of(ATTR_SUPPORTED, true, "maxOperations", 1000, "maxPayloadSize", PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES));
                 config.put("filter", Map.of(ATTR_SUPPORTED, true, "maxResults", 200));
                 config.put("pagination", Map.of(
                                 PAGINATION_CURSOR, true,
