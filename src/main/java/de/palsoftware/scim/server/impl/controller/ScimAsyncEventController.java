@@ -1,5 +1,6 @@
 package de.palsoftware.scim.server.impl.controller;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import de.palsoftware.scim.server.impl.entity.ScimAsyncEvent;
@@ -27,6 +28,7 @@ public class ScimAsyncEventController extends ScimBaseController {
 
     private static final String RESOURCE_EVENT = "Event";
     private static final Duration IN_FLIGHT_AWAIT_TIMEOUT = Duration.ofSeconds(2);
+    private static final TypeReference<Map<String, Object>> MAP_TYPE_REF = new TypeReference<>() {};
 
     private final ScimAsyncEventRepository asyncEventRepository;
     private final ObjectMapper objectMapper;
@@ -82,39 +84,42 @@ public class ScimAsyncEventController extends ScimBaseController {
             if (rawPayload == null || rawPayload.isBlank()) {
                 throw new ScimException(500, null, "Internal server error");
             }
-            try {
-                Map<String, Object> setPayload = objectMapper.readValue(
-                        rawPayload,
-                        new TypeReference<Map<String, Object>>() {});
-                return ResponseEntity.ok()
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .body(setPayload);
-            } catch (Exception e) {
-                return ResponseEntity.ok()
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .body(rawPayload);
-            }
+            Object body = parseCompletedPayload(rawPayload);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body);
         }
 
         if ("FAILED".equalsIgnoreCase(event.getStatus())) {
-            String rawPayload = event.getSetPayload();
-            if (rawPayload != null && !rawPayload.isBlank()) {
-                try {
-                    Map<String, Object> setPayload = objectMapper.readValue(
-                            rawPayload,
-                            new TypeReference<Map<String, Object>>() {});
-                    if (setPayload != null && setPayload.containsKey("events")) {
-                        return ResponseEntity.ok()
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .body(setPayload);
-                    }
-                } catch (Exception ignored) {
-                    // Fall through to 500 SCIM error when payload is not a SET JSON object
-                }
+            Map<String, Object> failedSetPayload = parseFailedSetPayload(event.getSetPayload());
+            if (failedSetPayload != null) {
+                return ResponseEntity.ok()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(failedSetPayload);
             }
             throw new ScimException(500, null, "Internal server error");
         }
 
         throw new ScimException(500, null, "Internal server error");
+    }
+
+    private Object parseCompletedPayload(String rawPayload) {
+        try {
+            return objectMapper.readValue(rawPayload, MAP_TYPE_REF);
+        } catch (JsonProcessingException _) {
+            return rawPayload;
+        }
+    }
+
+    private Map<String, Object> parseFailedSetPayload(String rawPayload) {
+        if (rawPayload == null || rawPayload.isBlank()) {
+            return null;
+        }
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(rawPayload, MAP_TYPE_REF);
+            return (parsed != null && parsed.containsKey("events")) ? parsed : null;
+        } catch (JsonProcessingException _) {
+            return null;
+        }
     }
 }

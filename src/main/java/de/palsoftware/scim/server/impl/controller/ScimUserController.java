@@ -52,7 +52,7 @@ public class ScimUserController extends ScimBaseController {
         if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "POST", "User", null, compatBaseUrl, () -> {
                 ScimUser user = userService.createUser(wsId, body);
-                List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+                List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
                 CompatMode compatMode = CompatMode.fromString(compat);
                 Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
                 return applyCompat(scimResponse, compatMode);
@@ -61,7 +61,7 @@ public class ScimUserController extends ScimBaseController {
         }
 
         ScimUser user = userService.createUser(wsId, body);
-        List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+        List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
@@ -102,7 +102,7 @@ public class ScimUserController extends ScimBaseController {
             return ResponseEntity.status(304).eTag(etag).build();
         }
 
-        List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+        List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
@@ -165,7 +165,7 @@ public class ScimUserController extends ScimBaseController {
 
         // Batch-load groups for all users in one query (avoids N+1)
         List<UUID> userIds = users.stream().map(ScimUser::getId).toList();
-        Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(userIds, baseUrl);
+        Map<UUID, List<Map<String, Object>>> groupsByUserId = userService.getUserGroupsBatch(wsId, userIds, baseUrl);
 
         List<Map<String, Object>> resources = users.stream()
                 .map(u -> {
@@ -204,7 +204,7 @@ public class ScimUserController extends ScimBaseController {
         if (ScimPreferHeaderUtil.shouldExecuteAsync(request)) {
             UUID txnId = asyncEventService.submitAsync(wsId, "PUT", "User", uid, compatBaseUrl, () -> {
                 ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
-                List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+                List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
                 CompatMode compatMode = CompatMode.fromString(compat);
                 Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
                 return applyCompat(scimResponse, compatMode);
@@ -213,7 +213,7 @@ public class ScimUserController extends ScimBaseController {
         }
 
         ScimUser user = userService.replaceUser(wsId, uid, body, ifMatch);
-        List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+        List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);
@@ -251,7 +251,7 @@ public class ScimUserController extends ScimBaseController {
             List<String> modifiedAttributes = extractModifiedPatchAttributes(operations);
             UUID txnId = asyncEventService.submitAsync(wsId, "PATCH", "User", uid, compatBaseUrl, () -> {
                 ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
-                List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+                List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
                 CompatMode compatMode = CompatMode.fromString(compat);
                 Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
                 Map<String, Object> out = new LinkedHashMap<>(applyCompat(scimResponse, compatMode));
@@ -262,7 +262,7 @@ public class ScimUserController extends ScimBaseController {
         }
 
         ScimUser user = userService.patchUser(wsId, uid, operations, ifMatch);
-        List<Map<String, Object>> groups = userService.getUserGroups(user.getId(), baseUrl);
+        List<Map<String, Object>> groups = userService.getUserGroups(wsId, user.getId(), baseUrl);
         CompatMode compatMode = CompatMode.fromString(compat);
         Map<String, Object> scimResponse = ScimUserMapper.toScimResponse(user, compatBaseUrl, groups);
         scimResponse = applyCompat(scimResponse, compatMode);

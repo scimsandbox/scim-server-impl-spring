@@ -99,7 +99,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(userCountResult);
         when(userService.listUsers(eq(wsUuid), anyString(), eq("userName"), eq("ascending"), eq(1), eq(100)))
                 .thenReturn(userPageResult);
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -157,7 +157,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
         when(groupService.listGroups(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(9)))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -188,7 +188,7 @@ class ScimDiscoveryControllerTest {
 
         when(userService.listUsers(eq(wsUuid), eq("userName sw \"carol\""), isNull(), eq("ascending"), eq(1), eq(10)))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         Map<String, Object> searchBody = Map.of(
@@ -259,7 +259,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -295,7 +295,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -331,7 +331,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -365,7 +365,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userNullDisplay)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -397,7 +397,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userNullDisplay)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("descending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -429,7 +429,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(groupAlice)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         Map<String, Object> searchBody = Map.of(
@@ -466,7 +466,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(userBob)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("displayName"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 2L, "Resources", List.of(groupAlice, groupCharlie)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -502,7 +502,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -538,7 +538,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
         when(groupService.listGroups(eq(wsUuid), isNull(), eq("emails"), eq("ascending"), eq(1), anyInt()))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -565,7 +565,7 @@ class ScimDiscoveryControllerTest {
 
         when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
                 .thenReturn(Map.of("totalResults", 5L, "Resources", List.of(user)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(
@@ -603,7 +603,7 @@ class ScimDiscoveryControllerTest {
 
         when(userService.listUsers(eq(wsUuid), isNull(), isNull(), eq("ascending"), eq(1), eq(1)))
                 .thenReturn(Map.of("totalResults", 3L, "Resources", List.of(user)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         Map<String, Object> reqBody = Map.of("cursor", "", "count", 1);
@@ -704,7 +704,7 @@ class ScimDiscoveryControllerTest {
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(user)));
         when(groupService.listGroups(eq(wsUuid), eq(filter), isNull(), eq("ascending"), eq(1), eq(9)))
                 .thenReturn(Map.of("totalResults", 1L, "Resources", List.of(group)));
-        when(userService.getUserGroupsBatch(anyList(), anyString()))
+        when(userService.getUserGroupsBatch(any(), anyList(), anyString()))
                 .thenReturn(Collections.emptyMap());
 
         ResponseEntity<Map<String, Object>> response = controller.rootSearchGet(

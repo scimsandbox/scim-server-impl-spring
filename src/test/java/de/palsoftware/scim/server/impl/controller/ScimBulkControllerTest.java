@@ -1,5 +1,6 @@
 package de.palsoftware.scim.server.impl.controller;
 
+import de.palsoftware.scim.server.impl.filter.PayloadSizeLimitFilter;
 import de.palsoftware.scim.server.impl.model.ScimGroup;
 import de.palsoftware.scim.server.impl.model.ScimUser;
 import de.palsoftware.scim.server.impl.service.ScimGroupService;
@@ -10,7 +11,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -241,24 +244,21 @@ class ScimBulkControllerTest {
         assertTrue(e.getMessage().contains("BulkRequest schema"));
     }
 
-    // ─── Tests for Fix 5: maxPayloadSize check ──────────────────────────
+    // ─── Tests for Fix 5: maxPayloadSize enforced at PayloadSizeLimitFilter ─
 
     @Test
-    void testProcessBulk_ExceedsMaxPayloadSize_Throws413() {
-        Map<String, Object> body = new HashMap<>();
-        body.put("schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"));
-        body.put("Operations", List.of());
-
-        // Set Content-Length to exceed 1MB
-        request.addHeader("Content-Length", "2000000");
+    void testProcessBulk_ExceedsMaxPayloadSize_RejectedWith413ByFilter() throws Exception {
+        request.setMethod("POST");
+        request.addHeader("Content-Length", String.valueOf(PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 512));
         request.setContentType("application/scim+json");
-        request.setContent(new byte[2000000]);
+        request.setContent(new byte[PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 512]);
+        MockHttpServletResponse response = new MockHttpServletResponse();
 
-        String workspaceIdValue = workspaceId.toString();
-        ScimException e = assertThrows(ScimException.class,
-                () -> controller.processBulk(workspaceIdValue, body, null, request));
-        assertEquals(413, e.getHttpStatus());
-        assertTrue(e.getMessage().contains("maxPayloadSize"));
+        PayloadSizeLimitFilter filter = new PayloadSizeLimitFilter();
+        filter.doFilter(request, response, (_, _) -> fail("Controller must not be invoked when Content-Length > MAX_PAYLOAD_BYTES"));
+
+        assertEquals(413, response.getStatus());
+        assertTrue(response.getContentAsString().contains("maxPayloadSize"));
     }
 
     @Test
@@ -820,25 +820,36 @@ class ScimBulkControllerTest {
     }
 
     @Test
-    void processBulk_chunkedBodyExceedingMaxPayloadSize_throws413() {
-        // Simulate Transfer-Encoding: chunked where Content-Length is -1 (unknown)
-        assertEquals(-1L, request.getContentLengthLong());
+    void processBulk_chunkedBodyExceedingMaxPayloadSize_rejectedWith413ByFilter() throws Exception {
+        byte[] oversizedJson = ("{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:BulkRequest\"],"
+                + "\"Operations\":[{\"method\":\"POST\",\"path\":\"/Users\",\"bulkId\":\"u1\","
+                + "\"data\":{\"userName\":\""
+                + "x".repeat(PayloadSizeLimitFilter.MAX_PAYLOAD_BYTES + 64)
+                + "\"}}]}").getBytes(StandardCharsets.UTF_8);
 
-        String oversizedString = "x".repeat(ScimBulkController.MAX_PAYLOAD_SIZE + 64);
-        Map<String, Object> op = Map.of(
-                "method", "POST",
-                "path", "/Users",
-                "bulkId", "u1",
-                "data", Map.of("userName", oversizedString)
-        );
-        Map<String, Object> body = Map.of(
-                "schemas", List.of("urn:ietf:params:scim:api:messages:2.0:BulkRequest"),
-                "Operations", List.of(op)
-        );
+        MockHttpServletRequest chunkedRequest = new MockHttpServletRequest("POST", "/ws/" + workspaceId + "/scim/v2/Bulk") {
+            @Override
+            public int getContentLength() {
+                return -1;
+            }
 
-        ScimException ex = assertThrows(ScimException.class,
-                () -> controller.processBulk(workspaceId.toString(), body, null, request));
-        assertEquals(413, ex.getHttpStatus());
-        assertNull(ex.getScimType());
+            @Override
+            public long getContentLengthLong() {
+                return -1L;
+            }
+        };
+        chunkedRequest.setContentType("application/scim+json");
+        chunkedRequest.setContent(oversizedJson);
+        assertEquals(-1L, chunkedRequest.getContentLengthLong());
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        PayloadSizeLimitFilter filter = new PayloadSizeLimitFilter();
+        filter.doFilter(chunkedRequest, response, (req, _) -> {
+            req.getInputStream().readAllBytes();
+            fail("Expected stream read beyond MAX_PAYLOAD_BYTES to abort before controller execution");
+        });
+
+        assertEquals(413, response.getStatus());
+        assertTrue(response.getContentAsString().contains("maxPayloadSize"));
     }
 }

@@ -113,7 +113,7 @@ public class ScimUserService {
             Map<UUID, List<Map<String, Object>>> groupsMap = Collections.emptyMap();
             if (!candidates.isEmpty() && ScimFilterParser.referencesUserGroups(ast)) {
                 List<UUID> ids = candidates.stream().map(ScimUser::getId).filter(Objects::nonNull).toList();
-                groupsMap = getUserGroupsBatch(ids, "");
+                groupsMap = getUserGroupsBatch(workspaceId, ids, "");
             }
 
             List<ScimUser> matched = new ArrayList<>();
@@ -274,17 +274,18 @@ public class ScimUserService {
     public void deleteUser(UUID workspaceId, UUID userId, String ifMatch) {
         ScimUser user = getUser(workspaceId, userId);
         validateIfMatch(ifMatch, user.getVersion());
-        // Remove user from all groups
-        membershipRepository.deleteByMemberValue(userId);
+        // Remove user from all groups within this workspace
+        membershipRepository.deleteByMemberValueAndWorkspaceId(userId, workspaceId);
         userRepository.delete(user);
         workspaceActivityService.touchWorkspace(workspaceId);
     }
 
     /**
-     * Get groups this user belongs to (for the read-only 'groups' attribute).
+     * Get groups this user belongs to within the workspace (for the read-only 'groups' attribute).
      */
-    public List<Map<String, Object>> getUserGroups(UUID userId, String baseUrl) {
-        List<ScimGroupMembership> memberships = membershipRepository.findByMemberValue(userId);
+    public List<Map<String, Object>> getUserGroups(UUID workspaceId, UUID userId, String baseUrl) {
+        List<ScimGroupMembership> memberships =
+                membershipRepository.findByMemberValueAndWorkspaceId(userId, workspaceId);
         return memberships.stream()
                 .map(m -> {
                     Map<String, Object> g = new LinkedHashMap<>();
@@ -298,13 +299,15 @@ public class ScimUserService {
     }
 
     /**
-     * Batch-load groups for multiple users in a single query (avoids N+1).
+     * Batch-load groups for multiple users within the workspace in a single query (avoids N+1).
      */
-    public Map<UUID, List<Map<String, Object>>> getUserGroupsBatch(List<UUID> userIds, String baseUrl) {
+    public Map<UUID, List<Map<String, Object>>> getUserGroupsBatch(
+            UUID workspaceId, List<UUID> userIds, String baseUrl) {
         if (userIds.isEmpty()) {
             return Collections.emptyMap();
         }
-        List<ScimGroupMembership> memberships = membershipRepository.findByMemberValueIn(userIds);
+        List<ScimGroupMembership> memberships =
+                membershipRepository.findByMemberValueInAndWorkspaceId(userIds, workspaceId);
         Map<UUID, List<Map<String, Object>>> result = new HashMap<>();
         for (ScimGroupMembership m : memberships) {
             Map<String, Object> g = new LinkedHashMap<>();
@@ -326,7 +329,7 @@ public class ScimUserService {
         try {
             UUID mgrId = UUID.fromString(mgrVal.trim());
             Optional<ScimUser> mgrOpt = userRepository.findByIdAndWorkspaceId(mgrId, workspaceId);
-            if (mgrOpt != null && mgrOpt.isPresent()) {
+            if (mgrOpt.isPresent()) {
                 ScimUser mgr = mgrOpt.get();
                 target.setEnterpriseManagerDisplay(
                         mgr.getDisplayName() != null ? mgr.getDisplayName() : mgr.getUserName());

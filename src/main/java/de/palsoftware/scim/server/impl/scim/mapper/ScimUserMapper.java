@@ -14,6 +14,7 @@ import de.palsoftware.scim.server.impl.model.ScimUserRole;
 import de.palsoftware.scim.server.impl.model.ScimUserX509Certificate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 /**
@@ -22,6 +23,7 @@ import java.util.*;
  */
 public class ScimUserMapper {
 
+    public static final int MAX_BCRYPT_PASSWORD_BYTES = 72;
     private static final BCryptPasswordEncoder PASSWORD_ENCODER = new BCryptPasswordEncoder();
 
     private ScimUserMapper() {
@@ -301,20 +303,133 @@ public class ScimUserMapper {
         if (input.containsKey(KEY_LOCALE)) user.setLocale(ScimCanonicalizer.requireNullableString(input.get(KEY_LOCALE), KEY_LOCALE));
         if (input.containsKey(KEY_TIMEZONE)) user.setTimezone(ScimCanonicalizer.requireNullableString(input.get(KEY_TIMEZONE), KEY_TIMEZONE));
         if (input.containsKey(KEY_ACTIVE)) user.setActive(ScimCanonicalizer.requireBoolean(input.get(KEY_ACTIVE), KEY_ACTIVE, true));
-        if (input.containsKey("password")) {
-            String pw = ScimCanonicalizer.requireNullableString(input.get("password"), "password");
-            user.setPassword(hashPassword(pw));
+        applyPasswordFromScimInput(user, input);
+    }
+
+    private record PasswordCandidate(int priority, String sortKey, Object rawValue)
+            implements Comparable<PasswordCandidate> {
+        @Override
+        public int compareTo(PasswordCandidate other) {
+            int cmp = Integer.compare(this.priority, other.priority);
+            return cmp != 0 ? cmp : this.sortKey.compareTo(other.sortKey);
         }
     }
 
+    public static boolean equalsAsciiIgnoreCase(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) {
+            return false;
+        }
+        for (int i = 0; i < a.length(); i++) {
+            char ca = a.charAt(i);
+            char cb = b.charAt(i);
+            if (ca >= 'A' && ca <= 'Z') {
+                ca = (char) (ca + ('a' - 'A'));
+            }
+            if (cb >= 'A' && cb <= 'Z') {
+                cb = (char) (cb + ('a' - 'A'));
+            }
+            if (ca != cb) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static boolean isAsciiPasswordKey(String key) {
+        return equalsAsciiIgnoreCase(key, "password")
+                || equalsAsciiIgnoreCase(key, USER_SCHEMA + ":password");
+    }
+
+    public static boolean isCoreUserSchemaKey(String key) {
+        return equalsAsciiIgnoreCase(key, USER_SCHEMA);
+    }
+
+    public static void applyPasswordFromScimInput(ScimUser user, Map<String, Object> input) {
+        if (input == null || input.isEmpty()) {
+            return;
+        }
+        List<PasswordCandidate> candidates = collectPasswordCandidates(input);
+        if (candidates.isEmpty()) {
+            return;
+        }
+        String winningPassword = validateAndSelectWinningPassword(candidates);
+        user.setPassword(encodeValidatedPassword(winningPassword));
+    }
+
+    private static List<PasswordCandidate> collectPasswordCandidates(Map<String, Object> input) {
+        List<PasswordCandidate> candidates = new ArrayList<>(2);
+        for (Map.Entry<String, Object> entry : input.entrySet()) {
+            collectPasswordCandidateFromEntry(entry.getKey(), entry.getValue(), candidates);
+        }
+        return candidates;
+    }
+
+    private static void collectPasswordCandidateFromEntry(
+            String key, Object value, List<PasswordCandidate> candidates) {
+        if (key == null) {
+            return;
+        }
+        String trimmedKey = key.trim();
+        if ("password".equals(key)) {
+            candidates.add(new PasswordCandidate(0, key, value));
+        } else if (isAsciiPasswordKey(trimmedKey)) {
+            candidates.add(new PasswordCandidate(1, key, value));
+        } else if (isCoreUserSchemaKey(trimmedKey)) {
+            collectCoreSchemaPasswordCandidates(key, trimmedKey, value, candidates);
+        }
+    }
+
+    private static void collectCoreSchemaPasswordCandidates(
+            String key, String trimmedKey, Object nestedRaw, List<PasswordCandidate> candidates) {
+        if (nestedRaw == null) {
+            return;
+        }
+        if (!(nestedRaw instanceof Map<?, ?> nestedMap)) {
+            throw new ScimException(400, "invalidValue", "Core User schema extension must be a complex object");
+        }
+        for (Map.Entry<?, ?> nestedEntry : nestedMap.entrySet()) {
+            if (nestedEntry.getKey() instanceof String subKey
+                    && equalsAsciiIgnoreCase(subKey.trim(), "password")) {
+                int priority = (USER_SCHEMA.equals(trimmedKey) && "password".equals(subKey)) ? 2 : 3;
+                candidates.add(new PasswordCandidate(priority, key + "\u0000" + subKey, nestedEntry.getValue()));
+            }
+        }
+    }
+
+    private static String validateAndSelectWinningPassword(List<PasswordCandidate> candidates) {
+        PasswordCandidate bestCandidate = null;
+        String winningPassword = null;
+        for (PasswordCandidate candidate : candidates) {
+            String validated = validatePasswordPlaintext(
+                    ScimCanonicalizer.requireNullableString(candidate.rawValue(), "password"));
+            if (bestCandidate == null || candidate.compareTo(bestCandidate) < 0) {
+                bestCandidate = candidate;
+                winningPassword = validated;
+            }
+        }
+        return winningPassword;
+    }
+
+    private static String validatePasswordPlaintext(String password) {
+        if (password == null) {
+            return null;
+        }
+        if (password.isEmpty()) {
+            throw new ScimException(400, "invalidValue", "Password must not be empty");
+        }
+        if (password.getBytes(StandardCharsets.UTF_8).length > MAX_BCRYPT_PASSWORD_BYTES) {
+            throw new ScimException(400, "invalidValue",
+                    "Password must not exceed " + MAX_BCRYPT_PASSWORD_BYTES + " UTF-8 bytes");
+        }
+        return password;
+    }
+
+    private static String encodeValidatedPassword(String validatedPassword) {
+        return validatedPassword == null ? null : PASSWORD_ENCODER.encode(validatedPassword);
+    }
+
     public static String hashPassword(String password) {
-        if (password == null || password.isEmpty()) {
-            return password;
-        }
-        if (password.startsWith("$2a$") || password.startsWith("$2b$") || password.startsWith("$2y$")) {
-            return password;
-        }
-        return PASSWORD_ENCODER.encode(password);
+        return encodeValidatedPassword(validatePasswordPlaintext(password));
     }
 
     @SuppressWarnings("unchecked")

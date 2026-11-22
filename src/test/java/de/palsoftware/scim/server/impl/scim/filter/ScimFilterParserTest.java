@@ -655,4 +655,89 @@ class ScimFilterParserTest {
         assertTrue(ScimFilterParser.referencesUserGroups(
                 ScimFilterParser.parseAst("groups[display eq \"Admins\"]", true)));
     }
+
+    @Test
+    void testFilterGuardrails_MaxLengthMaxTokensAndMaxDepthReturn400InvalidFilter() {
+        // 1. Nesting depth <= 20 succeeds
+        String validNested = "(".repeat(20) + "userName eq \"alice\"" + ")".repeat(20);
+        assertNotNull(ScimFilterParser.parseAst(validNested, true));
+        assertNotNull(ScimFilterParser.parseUserFilter(validNested, workspaceId));
+
+        // 2. Parenthesis nesting > 20 throws 400 invalidFilter (never StackOverflowError)
+        String deepParens = "(".repeat(25) + "userName eq \"alice\"" + ")".repeat(25);
+        ScimException parenAstEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(deepParens, true));
+        assertEquals(400, parenAstEx.getHttpStatus());
+        assertEquals("invalidFilter", parenAstEx.getScimType());
+
+        ScimException parenSpecEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseUserFilter(deepParens, workspaceId));
+        assertEquals(400, parenSpecEx.getHttpStatus());
+        assertEquals("invalidFilter", parenSpecEx.getScimType());
+
+        ScimException parenGroupEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseGroupFilter("(".repeat(25) + "displayName eq \"g\"" + ")".repeat(25), workspaceId));
+        assertEquals(400, parenGroupEx.getHttpStatus());
+        assertEquals("invalidFilter", parenGroupEx.getScimType());
+
+        // 3. Chained 'not' recursion > 20 throws 400 invalidFilter
+        String deepNot = "not ".repeat(25) + "userName pr";
+        ScimException notAstEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(deepNot, true));
+        assertEquals(400, notAstEx.getHttpStatus());
+        assertEquals("invalidFilter", notAstEx.getScimType());
+
+        ScimException notSpecEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseUserFilter(deepNot, workspaceId));
+        assertEquals(400, notSpecEx.getHttpStatus());
+        assertEquals("invalidFilter", notSpecEx.getScimType());
+
+        // 4. Deeply nested valuePath inner filter throws 400 invalidFilter
+        String deepValuePath = "emails[" + "(".repeat(22) + "type eq \"work\"" + ")".repeat(22) + "]";
+        ScimException vpEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(deepValuePath, true));
+        assertEquals(400, vpEx.getHttpStatus());
+        assertEquals("invalidFilter", vpEx.getScimType());
+
+        // 5. 51-term and 100-term 'id eq "<uuid>"' OR filters succeed in both parseAst and parseUserFilter
+        String orFilter51 = buildIdOrFilter(51);
+        assertNotNull(ScimFilterParser.parseAst(orFilter51, true));
+        assertNotNull(ScimFilterParser.parseUserFilter(orFilter51, workspaceId));
+
+        String orFilter100 = buildIdOrFilter(100);
+        assertNotNull(ScimFilterParser.parseAst(orFilter100, true));
+        assertNotNull(ScimFilterParser.parseUserFilter(orFilter100, workspaceId));
+
+        // 6. Filter exceeding max length (16,384 chars) throws 400 invalidFilter
+        String oversizedFilter = "userName eq \"" + "a".repeat(ScimFilterParser.MAX_FILTER_LENGTH) + "\"";
+        ScimException lenEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(oversizedFilter, true));
+        assertEquals(400, lenEx.getHttpStatus());
+        assertEquals("invalidFilter", lenEx.getScimType());
+        assertTrue(lenEx.getMessage().contains(String.valueOf(ScimFilterParser.MAX_FILTER_LENGTH)));
+
+        // 7. Filter exceeding max tokens (2,000 tokens, while well under 16,384 chars) throws 400 invalidFilter
+        StringBuilder manyTokens = new StringBuilder("id pr");
+        for (int i = 0; i < 670; i++) {
+            manyTokens.append(" or id pr"); // +3 tokens per iteration -> 2,012 tokens total (~6,035 chars)
+        }
+        String manyTokensStr = manyTokens.toString();
+        assertTrue(manyTokensStr.length() < ScimFilterParser.MAX_FILTER_LENGTH);
+        ScimException tokEx = assertThrows(ScimException.class,
+                () -> ScimFilterParser.parseAst(manyTokensStr, true));
+        assertEquals(400, tokEx.getHttpStatus());
+        assertEquals("invalidFilter", tokEx.getScimType());
+        assertTrue(tokEx.getMessage().contains(String.valueOf(ScimFilterParser.MAX_FILTER_TOKENS)));
+    }
+
+    private static String buildIdOrFilter(int termCount) {
+        StringBuilder sb = new StringBuilder(termCount * 48);
+        for (int i = 0; i < termCount; i++) {
+            if (i > 0) {
+                sb.append(" or ");
+            }
+            sb.append("id eq \"").append(UUID.randomUUID()).append('"');
+        }
+        return sb.toString();
+    }
 }
