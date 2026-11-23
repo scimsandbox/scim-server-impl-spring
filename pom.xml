@@ -36,7 +36,7 @@
         <jackson-bom.version>2.23.0</jackson-bom.version>
         <log4j2.version>2.26.1</log4j2.version>
         <commons-compress.version>1.28.0</commons-compress.version>
-        <tomcat.version>10.1.61</tomcat.version>
+        <tomcat.version>11.0.29</tomcat.version>
         <postgresql.version>42.7.14</postgresql.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jacoco.version>0.8.16</jacoco.version>
